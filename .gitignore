@@ -1,0 +1,33 @@
+# Built binaries (run `make`)
+/preview_clean
+/xreal_cam
+/enumerate
+
+# Research tool binaries
+/cam_probe
+/capture
+/controls
+/get_uvc_desc
+/hid_cmd
+/hid_read
+/lighttest_bin
+/preview
+/uvc_ctl
+
+# Local captures & outputs
+/frames/
+/xreal_out/
+/lighttest_out/
+/capture_new/
+/clean_out/
+/attic/
+*.pgm
+*.raw
+meta.csv
+preview_snap_*.png
+
+# Misc
+.DS_Store
+.vscode/
+__pycache__/
+*.pyc
