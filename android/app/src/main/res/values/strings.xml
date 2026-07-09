@@ -15,8 +15,11 @@
     <string name="show_clean">Clean</string>
     <!-- the mode button shows the mode you switch TO, like the Raw/Clean one -->
     <string name="mode_sbs">SBS</string>
-    <string name="mode_stereo">Stereo</string>
-    <string name="snapshot">Snapshot</string>
+    <string name="mode_stereo">3D</string>
+    <!-- the timewarp button shows the CURRENT state -->
+    <string name="tw_on">TW✓</string>
+    <string name="tw_off">TW✕</string>
+    <string name="snapshot">Snap</string>
     <string name="status_reconnecting">Stream stalled — reconnecting…</string>
     <string name="snapshot_saved">Snapshot saved: %1$s</string>
     <string name="snapshot_failed">Could not create the snapshot file.</string>

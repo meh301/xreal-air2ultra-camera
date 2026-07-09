@@ -7,6 +7,7 @@
  * nativeGrabFrame() which copies it out under the same mutex.
  */
 #include <jni.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -204,6 +205,12 @@ static void wxyz_to_rot(const float q[4], float R[9]) {
     R[6] = 2 * (x * z - w * y); R[7] = 2 * (y * z + w * x); R[8] = 1 - 2 * (x * x + y * y);
 }
 
+/* Soft deadband on the warp angle: at rest the AHRS wobbles by fractions of
+ * a degree, which would jitter the whole view; subtracting the deadband
+ * makes stillness exactly still, and a 0.1-degree lag during real motion is
+ * imperceptible. */
+#define TW_DEADBAND_RAD (0.1f * (float)M_PI / 180.0f)
+
 /* dR = R(q_exposure)^T * R(q_now): how a fixed world direction moved in the
  * IMU frame between the camera exposure and now. Drift cancels over this
  * short window, so the AHRS absolute error is irrelevant. Returns 0, or -1
@@ -227,14 +234,28 @@ static int pose_delta(uint64_t ts_exposure, float dR[9]) {
     memcpy(qn, S.qhist[(n - 1) % 256].q, sizeof qn);
     pthread_mutex_unlock(&S.imu_lock);
 
-    float Re[9], Rn[9];
-    wxyz_to_rot(qe, Re);
-    wxyz_to_rot(qn, Rn);
-    for (int r = 0; r < 3; r++)                /* dR = Re^T * Rn */
-        for (int c = 0; c < 3; c++)
-            dR[r * 3 + c] = Re[0 * 3 + r] * Rn[0 * 3 + c] +
-                            Re[1 * 3 + r] * Rn[1 * 3 + c] +
-                            Re[2 * 3 + r] * Rn[2 * 3 + c];
+    /* delta quaternion qd = conj(qe) * qn (Hamilton, wxyz):
+     * R(qd) = R(qe)^T * R(qn) */
+    float qd[4] = {
+        qe[0] * qn[0] + qe[1] * qn[1] + qe[2] * qn[2] + qe[3] * qn[3],
+        qe[0] * qn[1] - qe[1] * qn[0] - qe[2] * qn[3] + qe[3] * qn[2],
+        qe[0] * qn[2] + qe[1] * qn[3] - qe[2] * qn[0] - qe[3] * qn[1],
+        qe[0] * qn[3] - qe[1] * qn[2] + qe[2] * qn[1] - qe[3] * qn[0],
+    };
+    if (qd[0] < 0) { qd[0] = -qd[0]; qd[1] = -qd[1]; qd[2] = -qd[2]; qd[3] = -qd[3]; }
+
+    float vn = sqrtf(qd[1] * qd[1] + qd[2] * qd[2] + qd[3] * qd[3]);
+    float angle = 2.0f * atan2f(vn, qd[0]);
+    if (angle <= TW_DEADBAND_RAD || vn < 1e-9f) {
+        memset(dR, 0, 9 * sizeof(float));
+        dR[0] = dR[4] = dR[8] = 1.0f;          /* still = exactly still */
+        return 0;
+    }
+    float soft = angle - TW_DEADBAND_RAD;
+    float s = sinf(soft * 0.5f) / vn;
+    qd[0] = cosf(soft * 0.5f);
+    qd[1] *= s; qd[2] *= s; qd[3] *= s;
+    wxyz_to_rot(qd, dR);
     return 0;
 }
 

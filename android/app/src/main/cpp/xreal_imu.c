@@ -143,7 +143,8 @@ int xr_ahrs_feed(xr_ahrs *a, const xr_imu_sample *s) {
     a->last_ts = s->ts_ns;
     if (dt < 0.0f) dt = 0.0f;
     if (dt > 0.005f) dt = 0.005f;
-    if (++a->n == SETTLE_N) a->beta = 0.05f;      /* converged: settle down */
+    if (++a->n == SETTLE_N) a->beta = 0.02f;      /* converged: settle down —
+        kept low so accel noise doesn't wobble the timewarp at rest */
     float d2r = (float)(M_PI / 180.0);
     madgwick_update(a,
                     (s->gyro_dps[0] - a->bias[0]) * d2r,

@@ -50,20 +50,22 @@
 
         <Button
             android:id="@+id/toggle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            style="@style/ThinButton"
             android:text="@string/show_raw" />
 
         <Button
             android:id="@+id/view_mode"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            style="@style/ThinButton"
             android:text="@string/mode_sbs" />
 
         <Button
+            android:id="@+id/timewarp"
+            style="@style/ThinButton"
+            android:text="@string/tw_on" />
+
+        <Button
             android:id="@+id/snapshot"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            style="@style/ThinButton"
             android:text="@string/snapshot" />
     </LinearLayout>
 </LinearLayout>

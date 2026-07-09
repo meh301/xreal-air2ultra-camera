@@ -269,11 +269,11 @@ class MainActivity : Activity() {
             modeButton.text =
                 getString(if (stereoMode) R.string.mode_sbs else R.string.mode_stereo)
         }
-
-        // tapping the status line toggles the IMU timewarp for A/B comparison
-        statusView.setOnClickListener {
+        val twButton = findViewById<Button>(R.id.timewarp)
+        twButton.setOnClickListener {
             timewarp = !timewarp
             XrealNative.nativeSetTimewarp(timewarp)
+            twButton.text = getString(if (timewarp) R.string.tw_on else R.string.tw_off)
         }
 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
