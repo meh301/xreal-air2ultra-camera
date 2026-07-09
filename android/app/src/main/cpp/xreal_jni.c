@@ -21,6 +21,7 @@
 
 #include "xreal_align.h"
 #include "xreal_core.h"
+#include "xreal_gles.h"
 #include "xreal_imu.h"
 
 #define TAG "xrealcam"
@@ -49,21 +50,14 @@ static struct {
     int cw, ch, counter;
     uint32_t seq, grabbed;
 
-    /* glasses passthrough: composed frames are pushed straight into this
-     * window from the UVC thread — no UI polling, no bitmap copy, no view
-     * pass; saves roughly one to two display frames of latency */
-    ANativeWindow *win;
-    int win_w, win_h;
-
     /* factory calibration blob (fetched over the IMU command channel) and
-     * the world-aligned per-eye passthrough state built from it */
+     * the world-aligned per-eye passthrough state built from it; glasses
+     * output itself goes through the GLES renderer (xreal_gles.c) */
     uint8_t *config;
     uint32_t config_len;
     xr_eye_calib eye_calib[2];        /* [0]=left eye, [1]=right eye */
     atomic_int align_have;            /* calibration params received */
-    atomic_int align_dirty;           /* maps need (re)building */
     atomic_int align_variant;
-    int32_t *amap[2];                 /* per-eye sample maps, PE_W*PE_H */
 
     int fps_count;
     int64_t fps_t0;
@@ -100,10 +94,6 @@ static struct {
         .align_variant = XR_ALIGN_VARIANT_DEFAULT,
         .stereo_mode = 1 };
 
-/* aligned passthrough render size per eye (the compositor upscales; the
- * source is only a ~350 px crop of the camera, so this loses nothing) */
-enum { PE_W = 960, PE_H = 540 };
-
 static int64_t now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -136,68 +126,17 @@ static void compose(int counter) {
         }
     }
     S.seq++;
-
-    if (S.win && atomic_load(&S.align_have) && atomic_load(&S.stereo_mode)) {
-        /* world-aligned per-eye passthrough (VR-compositor style: one
-         * calibrated virtual display per eye) */
-        if (atomic_load(&S.align_dirty)) {
-            int variant = atomic_load(&S.align_variant);
-            for (int e = 0; e < 2; e++) {
-                if (!S.amap[e]) S.amap[e] = malloc(sizeof(int32_t) * PE_W * PE_H);
-                xr_align_build(&S.eye_calib[e], variant, PE_W, PE_H,
-                               1920, 1080, S.amap[e]);
-            }
-            atomic_store(&S.align_dirty, 0);
-            S.win_w = 0;   /* force buffer geometry update */
-            LOGI("aligned maps built (variant %d)", variant);
-        }
-        if (S.win_w != 2 * PE_W || S.win_h != PE_H) {
-            ANativeWindow_setBuffersGeometry(S.win, 2 * PE_W, PE_H,
-                                             WINDOW_FORMAT_RGBA_8888);
-            S.win_w = 2 * PE_W;
-            S.win_h = PE_H;
-        }
-        ANativeWindow_Buffer nb;
-        if (ANativeWindow_lock(S.win, &nb, NULL) == 0) {
-            int rows = PE_H < nb.height ? PE_H : nb.height;
-            int cols = PE_W < nb.width / 2 ? PE_W : nb.width / 2;
-            for (int eye = 0; eye < 2; eye++) {
-                /* left eye view samples cam1 (physical left camera) */
-                int cam = swap ? eye : 1 - eye;
-                const uint8_t *src = S.clean[cam];
-                const int32_t *map = S.amap[eye];
-                for (int y = 0; y < rows; y++) {
-                    uint8_t *dst = (uint8_t *)nb.bits +
-                                   ((size_t)y * nb.stride + eye * PE_W) * 4;
-                    const int32_t *m = map + (size_t)y * PE_W;
-                    for (int x = 0; x < cols; x++) {
-                        int32_t i = m[x];
-                        uint8_t v = i >= 0 ? src[i] : 0;
-                        dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 0xFF;
-                        dst += 4;
-                    }
-                }
-            }
-            ANativeWindow_unlockAndPost(S.win);
-        }
-    } else if (S.win) {
-        if (S.win_w != S.cw || S.win_h != S.ch) {
-            ANativeWindow_setBuffersGeometry(S.win, S.cw, S.ch,
-                                             WINDOW_FORMAT_RGBA_8888);
-            S.win_w = S.cw;
-            S.win_h = S.ch;
-        }
-        ANativeWindow_Buffer nb;
-        if (ANativeWindow_lock(S.win, &nb, NULL) == 0) {
-            int rows = S.ch < nb.height ? S.ch : nb.height;
-            int rowbytes = (S.cw < nb.width ? S.cw : nb.width) * 4;
-            for (int y = 0; y < rows; y++)
-                memcpy((uint8_t *)nb.bits + (size_t)y * nb.stride * 4,
-                       S.rgba + (size_t)y * S.cw * 4, rowbytes);
-            ANativeWindow_unlockAndPost(S.win);
-        }
-    }
+    int cw = S.cw, ch = S.ch;
     pthread_mutex_unlock(&S.lock);
+
+    /* glasses output through the GLES renderer (front-buffer when the device
+     * supports it). All source buffers are written only by this thread. */
+    if (atomic_load(&S.stereo_mode) && atomic_load(&S.align_have)) {
+        /* left eye view samples cam1, the physical left camera */
+        xr_gles_submit_eyes(S.clean[swap ? 0 : 1], S.clean[swap ? 1 : 0]);
+    } else {
+        xr_gles_submit_pair(S.rgba, cw, ch);
+    }
 }
 
 static void frame_cb(uvc_frame_t *frame, void *user) {
@@ -687,7 +626,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass 
         memcpy(c->cc, p + 19, 2 * sizeof(float));
         memcpy(c->kc, p + 21, 12 * sizeof(float));
     }
-    atomic_store(&S.align_dirty, 1);
+    xr_gles_set_alignment(S.eye_calib, atomic_load(&S.align_variant));
     atomic_store(&S.align_have, 1);
     LOGI("alignment calibration set");
 }
@@ -706,27 +645,24 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetStereoMode(JNIEnv *env, jclass
     }
 }
 
-/* Cycle the rotation-convention variant (0..3) for on-device calibration. */
+/* Set the rotation-convention variant (0..3); the verified default is 2. */
 JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignVariant(JNIEnv *env, jclass cls,
                                                                jint variant) {
     (void)env; (void)cls;
     atomic_store(&S.align_variant, variant & 3);
-    atomic_store(&S.align_dirty, 1);
+    if (atomic_load(&S.align_have))
+        xr_gles_set_alignment(S.eye_calib, variant & 3);
 }
 
-/* Attach/detach the glasses' Surface; composed frames are then presented
- * directly from the UVC thread. Pass null before the surface is destroyed. */
+/* Attach/detach the glasses' Surface; the GLES render thread takes it from
+ * here. Pass null before the surface is destroyed. */
 JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetSurface(JNIEnv *env, jclass cls,
                                                           jobject surface) {
     (void)cls;
     ANativeWindow *nw = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
-    pthread_mutex_lock(&S.lock);
-    if (S.win) ANativeWindow_release(S.win);
-    S.win = nw;
-    S.win_w = S.win_h = 0;
-    pthread_mutex_unlock(&S.lock);
+    xr_gles_set_window(nw);
     LOGI("passthrough surface %s", nw ? "attached" : "detached");
 }
 

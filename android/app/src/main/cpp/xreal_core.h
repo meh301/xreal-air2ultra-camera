@@ -58,6 +58,7 @@ void xr_equalize(const uint8_t *in, uint8_t *out, int n);
 typedef struct {
     float stripe[XR_OW];
     int have_stripe;
+    int frame_count;   /* the static stripe is re-estimated every 3rd frame */
 } xr_cleaner;
 
 void xr_cleaner_reset(xr_cleaner *c);

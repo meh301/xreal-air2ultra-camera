@@ -36,33 +36,37 @@ static void fisheye624_project(const float p[3], const float fc[2],
     *v = fc[1] * (yr + dy) + cc[1];
 }
 
-void xr_align_build(const xr_eye_calib *eye, int variant, int w, int h,
-                    int full_w, int full_h, int32_t *out_idx) {
+int xr_align_uv(const xr_eye_calib *eye, int variant,
+                float u_disp, float v_disp, float *u_cam, float *v_cam) {
     float Rd[9], Rc[9];
     quat_to_rot(eye->q_disp, variant & 1, Rd);
     quat_to_rot(eye->q_cam, (variant >> 1) & 1, Rc);
+    float ud = (u_disp - eye->K[2]) / eye->K[0];
+    float vd = (v_disp - eye->K[5]) / eye->K[4];
+    /* ray in display frame -> IMU frame (Rd maps display->imu) */
+    float rx = Rd[0] * ud + Rd[1] * vd + Rd[2];
+    float ry = Rd[3] * ud + Rd[4] * vd + Rd[5];
+    float rz = Rd[6] * ud + Rd[7] * vd + Rd[8];
+    /* IMU -> camera: Rc maps cam->imu, so multiply by its transpose */
+    float p[3] = {
+        Rc[0] * rx + Rc[3] * ry + Rc[6] * rz,
+        Rc[1] * rx + Rc[4] * ry + Rc[7] * rz,
+        Rc[2] * rx + Rc[5] * ry + Rc[8] * rz,
+    };
+    if (p[2] <= 1e-6f) return -1;
+    fisheye624_project(p, eye->fc, eye->cc, eye->kc, u_cam, v_cam);
+    return 0;
+}
 
-    float fx = eye->K[0], cx = eye->K[2], fy = eye->K[4], cy = eye->K[5];
+void xr_align_build(const xr_eye_calib *eye, int variant, int w, int h,
+                    int full_w, int full_h, int32_t *out_idx) {
     float su = (float)full_w / w, sv = (float)full_h / h;
-
     for (int y = 0; y < h; y++) {
-        float vd = ((y + 0.5f) * sv - 0.5f - cy) / fy;
         for (int x = 0; x < w; x++) {
-            float ud = ((x + 0.5f) * su - 0.5f - cx) / fx;
-            /* ray in display frame -> IMU frame (Rd maps display->imu) */
-            float rx = Rd[0] * ud + Rd[1] * vd + Rd[2];
-            float ry = Rd[3] * ud + Rd[4] * vd + Rd[5];
-            float rz = Rd[6] * ud + Rd[7] * vd + Rd[8];
-            /* IMU -> camera: Rc maps cam->imu, so multiply by its transpose */
-            float p[3] = {
-                Rc[0] * rx + Rc[3] * ry + Rc[6] * rz,
-                Rc[1] * rx + Rc[4] * ry + Rc[7] * rz,
-                Rc[2] * rx + Rc[5] * ry + Rc[8] * rz,
-            };
+            float u, v;
             int32_t idx = -1;
-            if (p[2] > 1e-6f) {
-                float u, v;
-                fisheye624_project(p, eye->fc, eye->cc, eye->kc, &u, &v);
+            if (xr_align_uv(eye, variant, (x + 0.5f) * su - 0.5f,
+                            (y + 0.5f) * sv - 0.5f, &u, &v) == 0) {
                 int ui = (int)lroundf(u), vi = (int)lroundf(v);
                 if (ui >= 0 && ui < XR_OW && vi >= 0 && vi < XR_OH)
                     idx = vi * XR_OW + ui;

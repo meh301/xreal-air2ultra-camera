@@ -24,10 +24,16 @@ typedef struct {
  * real world through the glasses. */
 enum { XR_ALIGN_VARIANT_DEFAULT = 2 };
 
+/* Project one display pixel (in the calibrated full_w x full_h display
+ * coordinates) to camera pixel coordinates. Returns 0, or -1 if the ray
+ * points behind the camera. */
+int xr_align_uv(const xr_eye_calib *eye, int variant,
+                float u_disp, float v_disp, float *u_cam, float *v_cam);
+
 /* Build the sample map for one eye: out_idx[y*w + x] = index into the
  * 480x640 camera image (or -1 for out-of-view). (w, h) is the rendered
  * per-eye size; full_w/full_h the calibrated display resolution the K matrix
- * refers to (1920x1080). depth_m <= 0 means infinity. */
+ * refers to (1920x1080). */
 void xr_align_build(const xr_eye_calib *eye, int variant, int w, int h,
                     int full_w, int full_h, int32_t *out_idx);
 

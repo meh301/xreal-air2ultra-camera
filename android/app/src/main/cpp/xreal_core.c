@@ -123,6 +123,7 @@ static float select_kth(float *a, int n, int k) {
 
 void xr_cleaner_reset(xr_cleaner *c) {
     c->have_stripe = 0;
+    c->frame_count = 0;
     memset(c->stripe, 0, sizeof c->stripe);
 }
 
@@ -132,24 +133,29 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out) {
 
     for (int i = 0; i < XR_OW * XR_OH; i++) g_f[i] = in[i];
 
-    /* horizontal high-pass */
-    for (int y = 0; y < XR_OH; y++) {
-        float *row = g_f + y * XR_OW, *hp = g_hp + y * XR_OW;
-        pref[0] = 0;
-        for (int x = 0; x < XR_OW; x++) pref[x + 1] = pref[x] + row[x];
-        for (int x = 0; x < XR_OW; x++) {
-            int lo = x - R < 0 ? 0 : x - R;
-            int hi = x + R > XR_OW - 1 ? XR_OW - 1 : x + R;
-            hp[x] = row[x] - (pref[hi + 1] - pref[lo]) / (float)(hi - lo + 1);
+    /* column FPN is static: re-estimate the EMA'd stripe only every 3rd
+     * frame (it converges after ~15 estimates and then barely moves) */
+    if (!c->have_stripe || c->frame_count % 3 == 0) {
+        /* horizontal high-pass */
+        for (int y = 0; y < XR_OH; y++) {
+            float *row = g_f + y * XR_OW, *hp = g_hp + y * XR_OW;
+            pref[0] = 0;
+            for (int x = 0; x < XR_OW; x++) pref[x + 1] = pref[x] + row[x];
+            for (int x = 0; x < XR_OW; x++) {
+                int lo = x - R < 0 ? 0 : x - R;
+                int hi = x + R > XR_OW - 1 ? XR_OW - 1 : x + R;
+                hp[x] = row[x] - (pref[hi + 1] - pref[lo]) / (float)(hi - lo + 1);
+            }
         }
+        /* column median -> EMA stripe */
+        for (int x = 0; x < XR_OW; x++) {
+            for (int y = 0; y < XR_OH; y++) buf[y] = g_hp[y * XR_OW + x];
+            float cur = select_kth(buf, XR_OH, XR_OH / 2);
+            c->stripe[x] = c->have_stripe ? 0.95f * c->stripe[x] + 0.05f * cur : cur;
+        }
+        c->have_stripe = 1;
     }
-    /* column median -> EMA stripe -> subtract */
-    for (int x = 0; x < XR_OW; x++) {
-        for (int y = 0; y < XR_OH; y++) buf[y] = g_hp[y * XR_OW + x];
-        float cur = select_kth(buf, XR_OH, XR_OH / 2);
-        c->stripe[x] = c->have_stripe ? 0.95f * c->stripe[x] + 0.05f * cur : cur;
-    }
-    c->have_stripe = 1;
+    c->frame_count++;
     for (int y = 0; y < XR_OH; y++) {
         float *row = g_f + y * XR_OW;
         for (int x = 0; x < XR_OW; x++) row[x] -= c->stripe[x];

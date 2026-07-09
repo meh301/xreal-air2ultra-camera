@@ -41,11 +41,11 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 LOCAL_PATH := $(XREAL_LOCAL_PATH)
 LOCAL_MODULE := xrealcam
-LOCAL_SRC_FILES := xreal_align.c xreal_core.c xreal_imu.c xreal_jni.c
+LOCAL_SRC_FILES := xreal_align.c xreal_core.c xreal_gles.c xreal_imu.c xreal_jni.c
 LOCAL_STATIC_LIBRARIES := uvc
 LOCAL_SHARED_LIBRARIES := libusb1.0
 LOCAL_CFLAGS := -O2 -std=c11 -Wall
-LOCAL_LDLIBS := -llog -landroid
+LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv2
 include $(BUILD_SHARED_LIBRARY)
 
 # ---- libusb1.0.so (upstream-maintained module definition; include last, it
