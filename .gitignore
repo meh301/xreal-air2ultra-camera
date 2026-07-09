@@ -26,6 +26,13 @@
 meta.csv
 preview_snap_*.png
 
+# factory calibration dumps (contain the device serial - never commit)
+/c.json
+/calib.json
+/vio_bak.json
+*.calib.json
+imu*.csv
+
 # Android
 android/.gradle/
 android/.idea/
