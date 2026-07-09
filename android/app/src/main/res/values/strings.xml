@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">XREAL Stereo Cam</string>
+    <string name="status_plug_in">Plug the XREAL Air 2 Ultra into the USB-C port…</string>
+    <string name="status_waiting_permission">Waiting for USB permission…</string>
+    <string name="status_permission_denied">USB permission denied — replug or restart the app.</string>
+    <string name="status_open_failed">Could not open the USB device.</string>
+    <string name="status_native_error">Stream failed to start (libuvc error %1$d).</string>
+    <string name="status_starting">Streaming — waiting for the first stereo pair…</string>
+    <string name="status_streaming">XREAL Air 2 Ultra  L | R  ctr=%1$d  %2$.0f fps  [%3$s]</string>
+    <string name="status_unplugged">Glasses unplugged.</string>
+    <string name="show_raw">Raw</string>
+    <string name="show_clean">Clean</string>
+    <string name="snapshot">Snapshot</string>
+    <string name="snapshot_saved">Snapshot saved: %1$s</string>
+</resources>

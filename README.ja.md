@@ -1,6 +1,6 @@
-# XREAL Air 2 Ultra — macOS用ステレオカメラビューア
+# XREAL Air 2 Ultra — ステレオカメラビューア
 
-**XREAL Air 2 Ultra のステレオトラッキングカメラを macOS で読み取る — SDK不要、kext不要、ドライバ不要。**
+**XREAL Air 2 Ultra のステレオトラッキングカメラを macOS / Windows / Linux / Android で読み取る — SDK不要、kext不要、ドライバ不要。**
 
 [English README is here](README.md)
 
@@ -14,29 +14,71 @@ Air 2 Ultra はトラッキングカメラを標準の UVC (USB Video Class) デ
 
 ## クイックスタート
 
-必要なもの: Xcode Command Line Tools (`xcode-select --install`) の入ったMac、
-USB-C接続した Air 2 Ultra。
+### Windows / Linux (macOSでも可)
+
+必要なもの: Python 3.9+ と `numpy`、`opencv-python`、USB-C接続した Air 2 Ultra。
+
+```sh
+pip install numpy opencv-python
+python python/preview_clean.py
+```
+
+左右カメラのライブ映像(デスクランブル+ノイズ除去済み)のウィンドウが開きます。
+XREALのストリームはテレメトリ行のフィンガープリントで自動検出されるため、他の
+Webカメラが混ざっていても問題ありません。`python python/xreal_uvc.py` で検出状況を
+確認できます。
+
+キー操作: `c` クリーン/スクランブル表示切替 · `s` スナップショットPNG保存 · `space` 一時停止 · `q` 終了
+
+プラットフォーム別の注意:
+- **Windows**: カメラが見つからない場合は *設定 → プライバシーとセキュリティ →
+  カメラ* でデスクトップアプリのカメラアクセスを許可してください。Media Foundation と
+  DirectShow の両バックエンドを自動で試します(`--backend msmf|dshow` で固定可能)。
+- **Linux**: `/dev/video*` へのアクセス権が必要です(通常は `video` グループ:
+  `sudo usermod -aG video $USER` 後に再ログイン)。グラスは通常の `uvcvideo`
+  デバイスとして見えるので、閲覧だけなら udev ルールは不要です。
+
+### macOS (ネイティブツール)
+
+必要なもの: Xcode Command Line Tools (`xcode-select --install`)。
 
 ```sh
 make
 ./preview_clean
 ```
 
-これだけです。初回実行時にターミナルへのカメラ権限を求められます。
-左右カメラのライブ映像(デスクランブル+ノイズ除去済み)のウィンドウが開きます。
+初回実行時にターミナルへのカメラ権限を求められます。
 
-キー操作: `c` クリーン/スクランブル表示切替 · `s` スナップショットPNG保存 · `space` 一時停止 · `q` 終了
+### Android
+
+Android には外付けUVCデバイス用のカメラAPIがないため、[`android/`](android/) に
+USBホストAPI経由でグラスを開くネイティブアプリ(libusb + libuvc + C実装の
+デスクランブラ)を用意しています。Android Studio または Gradle でビルドできます:
+
+```sh
+cd android
+./fetch_deps.sh        # Windowsでは fetch_deps.ps1 — libusb/libuvc をピン留めタグで取得
+./gradlew :app:assembleDebug
+```
+
+APKをインストールし、グラスをスマホのUSB-Cポートに接続してUSB権限のダイアログを
+許可すると、ライブステレオプレビューが始まります。詳細は
+[android/README.md](android/README.md) を参照してください。
 
 ## ツール一覧
 
 | ツール | 機能 |
 |--------|------|
-| `preview_clean` | リアルタイムステレオビューア(デスクランブル+固定パターンノイズ除去)、60fps。`--snap out.png` でウィンドウなしスナップショット、`--test in.pgm prefix` でオフライン検証。 |
-| `xreal_cam` | レコーダー: `./xreal_cam <フレーム数> <出力dir>` で生の `cam0_*.pgm` / `cam1_*.pgm`(スクランブルされたまま)と `meta.csv` を保存。 |
-| `enumerate` | AVFoundationのカメラ一覧とXREALデバイスのフォーマットを表示。 |
-| `python/process_clean.py` | オフラインパイプライン: `python3 python/process_clean.py <キャプチャdir> <出力dir>` で録画をデスクランブル+クリーン化してPNGと左右並置の `stereo_feed.mp4` を生成。要 `numpy opencv-python pillow`。 |
+| `python/preview_clean.py` | クロスプラットフォームのリアルタイムステレオビューア(デスクランブル+固定パターンノイズ除去)。`--snap out.png` でウィンドウなしスナップショット、`--test in.pgm prefix` でオフライン検証。 |
+| `python/xreal_cam.py` | クロスプラットフォームのレコーダー: `python xreal_cam.py <フレーム数> <出力dir>` で生の `cam0_*.pgm` / `cam1_*.pgm`(スクランブルされたまま)と `meta.csv` を保存。macOS版レコーダーと同一形式。 |
+| `python/xreal_uvc.py` | 上記2ツールが使うキャプチャモジュール(バックエンド探索、テレメトリによる自動検出、バイト順補正)。直接実行するとXREALストリームをスキャン。 |
+| `preview_clean` (macOS) | ビューアのネイティブSwift版、60fps。キー・フラグは共通。 |
+| `xreal_cam` (macOS) | レコーダーのネイティブSwift版。 |
+| `enumerate` (macOS) | AVFoundationのカメラ一覧とXREALデバイスのフォーマットを表示。 |
+| `android/` | Androidアプリ: USBホストAPI + libusb/libuvc、C実装のデスクランブル+ノイズ除去、左右並置ライブプレビューとスナップショット。 |
+| `python/process_clean.py` | オフラインパイプライン: `python3 python/process_clean.py <キャプチャdir> <出力dir>` で録画(どちらのレコーダーの出力でも可)をデスクランブル+クリーン化してPNGと左右並置の `stereo_feed.mp4` を生成。 |
 | `python/xreal_descramble.py` | 単一フレーム用の最小デスクランブラ。リファレンス実装。 |
-| `research/` | リバースエンジニアリング用ツール群(ベンダーHIDコマンド、UVCコントロール、USBディスクリプタ)。[research/README.md](research/README.md) 参照。 |
+| `research/` | リバースエンジニアリング用ツール群(ベンダーHIDコマンド、UVCコントロール、USBディスクリプタ)。大半はmacOSとLinuxでビルド可能。[research/README.md](research/README.md) 参照。 |
 
 ## 仕組み(概要)
 
@@ -49,9 +91,11 @@ make
 - センサーは90°回転(かつ左右で互いに180°逆向き)に実装されているため、デスクランブラは
   回転も行います。出力は片眼あたり480×640の縦向きです。
 - 残る縦縞(列固定パターンノイズ)はオンラインで推定して減算します。
+- YUVラベルが偽物なので、UVCスタックによっては16bitペアの2バイトが入れ替わって届きます。
+  テレメトリのマーカーでこれを検出でき、本リポジトリの全キャプチャ経路が自動補正します。
 
 プロトコルの詳細(USBレイアウト、テレメトリ行のマップ、スクランブルアルゴリズム、
-UVC露出コントロール、ベンダーHIDプロトコル): **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
+UVC露出コントロール、ベンダーHIDプロトコル、OS別キャプチャノート): **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
 
 ## クレジット
 
@@ -59,6 +103,8 @@ UVC露出コントロール、ベンダーHIDプロトコル): **[docs/PROTOCOL.
   (`stereo_camera.cpp`)の解析成果です。
 - ベンダーHIDパケットフォーマットは
   [badicsalex/ar-drivers-rs](https://github.com/badicsalex/ar-drivers-rs) に文書化されています。
+- Androidアプリは [libusb](https://github.com/libusb/libusb)(LGPL-2.1、独立した
+  共有ライブラリとして分離)と [libuvc](https://github.com/libuvc/libuvc)(BSD)を利用しています。
 - 本リポジトリの解析・ツール・ドキュメントは [Claude Code](https://claude.com/claude-code)
   (Claude Fable 5) との協働で開発されました。
 

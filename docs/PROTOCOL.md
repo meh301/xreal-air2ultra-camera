@@ -2,6 +2,8 @@
 
 Reverse-engineering notes for the tracking-camera path. Everything below was measured
 on a retail Air 2 Ultra on macOS; no official documentation exists.
+(Capturing the same stream on Windows/Linux/Android: see
+[Capturing on other platforms](#capturing-on-other-platforms) at the end.)
 
 ## USB device layout
 
@@ -119,8 +121,35 @@ data `01` enables the IMU stream (ack `0x04`). The IMU channel (interface 2) use
 different header (`0xAA`, request_id `0x0437`). Tools: `research/hid_cmd.swift`,
 `research/hid_read.swift`, `research/cam_probe.swift`.
 
+## Capturing on other platforms
+
+The stream is plain UVC, so any OS UVC stack can deliver it — the only trick is
+getting the **untouched bytes** out, because the nominal `640×241 @ 60 fps`
+"YUY2/UYVY" format is a lie (every byte is one mono pixel of the 640×482 raster).
+
+- **OpenCV** (Windows MSMF/DirectShow, Linux V4L2, macOS AVFoundation): open the
+  device and set `CAP_PROP_CONVERT_RGB = 0`; `read()` then returns the raw
+  308,480-byte buffer instead of a decoded BGR image. Never request a different
+  width/height — that would insert a converter. `python/xreal_uvc.py` implements
+  this, plus device auto-detection.
+- **Android**: no external-UVC camera API exists; `android/` opens the device via
+  the USB host API and hands the fd to libusb (`LIBUSB_OPTION_NO_DEVICE_DISCOVERY`
+  set before init, then `uvc_wrap`) with libuvc doing the stream negotiation.
+- **Byte order**: because the fourcc is fake, a stack that "converts" between
+  YUY2 and UYVY swaps the two bytes of each 16-bit pair without touching real
+  luma. Whether you get wire order or swapped order is backend-dependent.
+  Detect it from the telemetry row: `0xAD,0xDA` at cols 22,23 = native order;
+  `0xDA,0xAD` = swap every 16-bit pair before descrambling (`0x19` moving from
+  col 5 to col 4 confirms it). Row 481 being constant `0x5C` is order-invariant
+  and makes a good device fingerprint on systems with several cameras.
+- **Frame shape**: depending on backend, the raw frame arrives as `241×1280`,
+  `241×640×2`, `1×308480`, etc. Only the byte count (308,480) matters.
+
 ## Open questions
 
 - Extension Unit 4 selectors (sensor/IR-strobe/SLAM-mode configuration).
 - Driving the IMU stream and fusing it with the stereo feed (VIO/SLAM).
 - Purpose of the block scrambling (DMA artifact vs. light obfuscation) — unknown.
+- Whether any UVC stack in the wild actually delivers the byte-swapped order
+  (macOS delivers `2vuy` as-is; the detection exists because it costs nothing
+  and fails loudly if ignored).

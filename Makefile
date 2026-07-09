@@ -1,3 +1,9 @@
+# Builds the native macOS tools. On Windows/Linux use the Python tools in
+# python/ instead (no build step), and android/ for the Android app.
+ifneq ($(shell uname),Darwin)
+$(error The Swift tools are macOS-only. Use python/preview_clean.py (Windows/Linux) or android/ — see README)
+endif
+
 SWIFTC = swiftc -O
 
 all: preview_clean xreal_cam enumerate

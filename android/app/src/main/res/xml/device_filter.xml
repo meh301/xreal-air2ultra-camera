@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- XREAL Air 2 Ultra: idVendor 0x3318 (13080), idProduct 0x0426 (1062) -->
+    <usb-device
+        vendor-id="13080"
+        product-id="1062" />
+</resources>
