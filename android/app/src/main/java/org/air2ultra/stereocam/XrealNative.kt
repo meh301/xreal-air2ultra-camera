@@ -35,4 +35,12 @@ object XrealNative {
      * Returns false when nothing new arrived since the last call.
      */
     external fun nativeGrabImu(buf: ByteBuffer): Boolean
+
+    /**
+     * Drain pending IMU samples (the full 1 kHz stream) into [buf] (direct
+     * ByteBuffer, native order), 32 bytes per sample: u64 ts_ns,
+     * f32 gyro_dps[3], f32 accel_g[3]. Returns the number of samples
+     * written; call every UI tick to keep up.
+     */
+    external fun nativeGrabImuBatch(buf: ByteBuffer): Int
 }

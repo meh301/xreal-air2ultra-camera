@@ -42,15 +42,18 @@ Or open `android/` in Android Studio and run — but run `fetch_deps` first.
 2. Plug the glasses into the phone's USB-C port. The app offers to open (or
    auto-opens) via the `USB_DEVICE_ATTACHED` filter; accept the USB permission
    prompt if one appears.
-3. The stereo preview starts: left | right, descrambled and denoised.
-   *Raw/Clean* toggles the view, *Snapshot* saves a PNG under
-   `Android/data/org.air2ultra.stereocam/files/Pictures/`.
-4. Below the status line, a second line shows the live **IMU**: 1 kHz
-   gyro/accel plus yaw/pitch/roll from an on-device 6-axis Madgwick filter
-   (the glasses stream raw inertial data only). The IMU is read from HID
-   interface 2 over the same libusb handle as the camera; if claiming that
-   interface fails the camera still works.
-5. When the phone drives the glasses' display (DisplayPort alt-mode), the
+3. The portrait test screen fills up:
+   - **top half** — the live stereo pair (left | right), descrambled and
+     denoised. *Raw/Clean* toggles the view, *Snapshot* saves a PNG under
+     `Android/data/org.air2ultra.stereocam/files/Pictures/`.
+   - **bottom half** — two rolling oscilloscope graphs of the full 1 kHz IMU
+     stream (angular rate and acceleration, ~4 s window, autoscaled; samples
+     cross JNI in batches so nothing is dropped). The IMU is read from HID
+     interface 2 over the same libusb handle as the camera; if claiming that
+     interface fails the camera still works. A quaternion is still fused
+     natively and available via `XrealNative.nativeGrabImu` — it's just not
+     displayed.
+4. When the phone drives the glasses' display (DisplayPort alt-mode), the
    clean stereo pair is also rendered onto it fullscreen as **SBS
    passthrough** (left camera → left eye; put the glasses in 3D/SBS mode).
    *Swap L/R* flips the eyes if the mapping looks inverted.

@@ -63,6 +63,9 @@ static struct {
     int imu_count, imu_rate;
     int64_t imu_t0;
     xr_ahrs ahrs;
+    /* sample ring so the UI can drain the full 1 kHz stream in batches */
+    xr_imu_sample ring[1024];
+    uint32_t ring_head, ring_tail;          /* head = write, tail = read */
 } S = { .show_clean = 1, .lock = PTHREAD_MUTEX_INITIALIZER,
         .imu_lock = PTHREAD_MUTEX_INITIALIZER };
 
@@ -177,6 +180,10 @@ static void *imu_worker(void *arg) {
         if (has_q) memcpy(S.imu_q, S.ahrs.q, sizeof S.imu_q);
         S.imu_has_q = has_q;
         S.imu_seq++;
+        S.ring[S.ring_head % 1024] = s;
+        S.ring_head++;
+        if (S.ring_head - S.ring_tail > 1024)
+            S.ring_tail = S.ring_head - 1024;   /* overflow: drop oldest */
         pthread_mutex_unlock(&S.imu_lock);
     }
     return NULL;
@@ -212,6 +219,7 @@ static void imu_start(void) {
     S.imu_seq = S.imu_grabbed = 0;
     S.imu_has_q = 0;
     S.imu_count = 0; S.imu_t0 = 0; S.imu_rate = 0;
+    S.ring_head = S.ring_tail = 0;
     imu_enable();
     atomic_store(&S.imu_running, 1);
     pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
@@ -326,6 +334,32 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabImu(JNIEnv *env, jclass cls,
     }
     pthread_mutex_unlock(&S.imu_lock);
     return fresh;
+}
+
+/* Drain pending IMU samples into `buf` (direct ByteBuffer, native order),
+ * 32 bytes each: u64 ts_ns | f32 gyro_dps[3] | f32 accel_g[3].
+ * Returns the number of samples written (0 if none pending). Lets the UI
+ * pull the full 1 kHz stream in ~33 ms batches for graphing. */
+JNIEXPORT jint JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeGrabImuBatch(JNIEnv *env, jclass cls,
+                                                            jobject buf) {
+    (void)cls;
+    uint8_t *dst = (*env)->GetDirectBufferAddress(env, buf);
+    jlong cap = (*env)->GetDirectBufferCapacity(env, buf);
+    if (!dst || cap < 32) return 0;
+    jint n = 0;
+    pthread_mutex_lock(&S.imu_lock);
+    while (S.ring_tail != S.ring_head && (jlong)(n + 1) * 32 <= cap) {
+        const xr_imu_sample *s = &S.ring[S.ring_tail % 1024];
+        memcpy(dst, &s->ts_ns, 8);
+        memcpy(dst + 8, s->gyro_dps, 12);
+        memcpy(dst + 20, s->accel_g, 12);
+        dst += 32;
+        S.ring_tail++;
+        n++;
+    }
+    pthread_mutex_unlock(&S.imu_lock);
+    return n;
 }
 
 JNIEXPORT void JNICALL

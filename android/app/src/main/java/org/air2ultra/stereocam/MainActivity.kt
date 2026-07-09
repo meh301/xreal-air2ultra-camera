@@ -35,8 +35,6 @@ import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.asin
-import kotlin.math.atan2
 
 /**
  * Draws the stereo pair onto the glasses' own display: the left half of the
@@ -102,7 +100,8 @@ class MainActivity : Activity() {
     private lateinit var usbManager: UsbManager
     private lateinit var imageView: ImageView
     private lateinit var statusView: TextView
-    private lateinit var imuStatusView: TextView
+    private lateinit var gyroGraph: ImuGraphView
+    private lateinit var accelGraph: ImuGraphView
     private lateinit var toggleButton: Button
 
     private var connection: UsbDeviceConnection? = null
@@ -113,8 +112,12 @@ class MainActivity : Activity() {
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
-    private val imuBuffer: ByteBuffer =
-        ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
+    private val imuBatch: ByteBuffer =                 // 256 samples x 32 B
+        ByteBuffer.allocateDirect(256 * 32).order(ByteOrder.nativeOrder())
+    private val gyroTriples = FloatArray(256 * 3)
+    private val accelTriples = FloatArray(256 * 3)
+    private var imuSampleCount = 0
+    private var imuRateT0 = 0L
     private val handler = Handler(Looper.getMainLooper())
 
     private val pollFrame = object : Runnable {
@@ -143,40 +146,32 @@ class MainActivity : Activity() {
                     counter, fps, if (showClean) "CLEAN" else "SCRAMBLED"
                 )
             }
-            if (XrealNative.nativeGrabImu(imuBuffer)) {
-                imuBuffer.position(0)
-                val ts = imuBuffer.long
-                val g = FloatArray(3) { imuBuffer.float }
-                val a = FloatArray(3) { imuBuffer.float }
-                val q = FloatArray(4) { imuBuffer.float }
-                val rate = imuBuffer.float
-                val hasQuat = imuBuffer.int != 0
-                imuStatusView.text = if (hasQuat) {
-                    val (yaw, pitch, roll) = eulerDeg(q)
-                    String.format(
-                        Locale.US,
-                        "IMU %4.0f Hz  gyro(%+6.1f,%+6.1f,%+6.1f)deg/s  " +
-                            "acc(%+5.2f,%+5.2f,%+5.2f)g  ypr(%+5.0f,%+4.0f,%+5.0f)deg",
-                        rate, g[0], g[1], g[2], a[0], a[1], a[2], yaw, pitch, roll
-                    )
-                } else {
-                    String.format(
-                        Locale.US,
-                        "IMU %4.0f Hz  capturing gyro bias - hold still... ts=%d",
-                        rate, ts
-                    )
+            val n = XrealNative.nativeGrabImuBatch(imuBatch)
+            if (n > 0) {
+                imuBatch.position(0)
+                for (i in 0 until n) {
+                    imuBatch.long                      // ts_ns (graphs don't need it)
+                    for (c in 0..2) gyroTriples[i * 3 + c] = imuBatch.float
+                    for (c in 0..2) accelTriples[i * 3 + c] = imuBatch.float
                 }
+                gyroGraph.addSamples(gyroTriples, n)
+                accelGraph.addSamples(accelTriples, n)
+
+                imuSampleCount += n
+                val now = System.nanoTime()
+                if (imuRateT0 == 0L) imuRateT0 = now
+                if (now - imuRateT0 >= 1_000_000_000L) {
+                    val rate = imuSampleCount * 1e9f / (now - imuRateT0)
+                    gyroGraph.rateHz = rate
+                    accelGraph.rateHz = rate
+                    imuSampleCount = 0
+                    imuRateT0 = now
+                }
+                gyroGraph.invalidate()
+                accelGraph.invalidate()
             }
             if (streaming) handler.postDelayed(this, FRAME_INTERVAL_MS)
         }
-    }
-
-    private fun eulerDeg(q: FloatArray): Triple<Double, Double, Double> {
-        val (w, x, y, z) = q.map { it.toDouble() }
-        val yaw = Math.toDegrees(atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
-        val pitch = Math.toDegrees(asin((2 * (w * y - z * x)).coerceIn(-1.0, 1.0)))
-        val roll = Math.toDegrees(atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)))
-        return Triple(yaw, pitch, roll)
     }
 
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -233,7 +228,12 @@ class MainActivity : Activity() {
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         imageView = findViewById(R.id.preview)
         statusView = findViewById(R.id.status)
-        imuStatusView = findViewById(R.id.imu_status)
+        gyroGraph = findViewById(R.id.gyro_graph)
+        accelGraph = findViewById(R.id.accel_graph)
+        gyroGraph.title = "gyro"
+        gyroGraph.unit = "deg/s"
+        accelGraph.title = "accel"
+        accelGraph.unit = "g"
         toggleButton = findViewById(R.id.toggle)
 
         toggleButton.setOnClickListener {
