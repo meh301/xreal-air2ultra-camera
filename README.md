@@ -62,6 +62,9 @@ controls, vendor HID protocol): **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
   [mazeasdamien/myXreal](https://github.com/mazeasdamien/myXreal) (`stereo_camera.cpp`).
 - The vendor HID packet format is documented in
   [badicsalex/ar-drivers-rs](https://github.com/badicsalex/ar-drivers-rs).
+- Developed with [Claude Code](https://claude.com/claude-code) (Claude Fable 5) —
+  the reverse-engineering analysis, tools, and documentation in this repo were built
+  in collaboration with the AI agent.
 
 ## Disclaimer
 

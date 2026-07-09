@@ -59,6 +59,8 @@ UVC露出コントロール、ベンダーHIDプロトコル): **[docs/PROTOCOL.
   (`stereo_camera.cpp`)の解析成果です。
 - ベンダーHIDパケットフォーマットは
   [badicsalex/ar-drivers-rs](https://github.com/badicsalex/ar-drivers-rs) に文書化されています。
+- 本リポジトリの解析・ツール・ドキュメントは [Claude Code](https://claude.com/claude-code)
+  (Claude Fable 5) との協働で開発されました。
 
 ## 免責事項
 
