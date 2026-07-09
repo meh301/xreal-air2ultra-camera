@@ -127,9 +127,11 @@ Built for feeding a VIO/SLAM pipeline without touching USB yourself:
   descrambler also rotates; output is 480×640 portrait per eye.
 - Remaining vertical stripes (column fixed-pattern noise) are estimated online
   and subtracted.
-- Telemetry comes in two **firmware dialects** (different metadata layouts),
-  and some UVC stacks byte-swap the fake-YUV pairs — every capture path in
-  this repo detects and normalizes both automatically.
+- Telemetry comes in two **firmware dialects** (different metadata layouts):
+  dialect B is the current firmware (`12.1.00.498`, confirmed latest by the
+  official updater), dialect A is older. Some UVC stacks additionally
+  byte-swap the fake-YUV pairs. Every capture path in this repo detects and
+  normalizes all of it automatically.
 
 Full protocol documentation — USB layout, telemetry dialects (and which
 firmware versions they map to), scramble algorithm, IMU packet format,
@@ -152,7 +154,9 @@ per-OS capture notes: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
 ## Credits
 
 - The block-reorder table was discovered by
-  [mazeasdamien/myXreal](https://github.com/mazeasdamien/myXreal) (`stereo_camera.cpp`).
+  [mazeasdamien/myXreal](https://github.com/mazeasdamien/myXreal)
+  (`stereo_camera.cpp`) — also worth a look as a Windows-native C++ sibling
+  project (ImGui dashboard, stereo rectification, VR scene on the glasses).
 - The vendor HID packet formats are documented in
   [badicsalex/ar-drivers-rs](https://github.com/badicsalex/ar-drivers-rs) and
   [wheaney/nrealAirLinuxDriver](https://gitlab.com/wheaney/nrealAirLinuxDriver).

@@ -54,12 +54,15 @@ Two firmware **dialects** have been observed so far; auto-detect per frame
 | 25, 26, 27, 35 | config-like constants |
 | 58 | **camera ID: `0x20` = cam0, `0x21` = cam1** |
 
-Which dialect maps to which firmware generation is not yet settled: the
-dialect-B unit reports MCU app FW `12.1.00.498_20241115` (DSP
-`12.1.00.001_1.0.1.7_1.1`, calibration written 2024-06); the dialect-A unit's
-firmware version was never recorded. If you have a dialect-A unit, run
-`python python/xreal_imu.py --info` (or `./xreal_imu --info` on macOS) and
-report the version.
+**Dialect B is the current format**: the dialect-B unit reports MCU app FW
+`12.1.00.498_20241115` (DSP `12.1.00.001_1.0.1.7_1.1`), and the official
+XREAL updater confirms both MCU and DP firmware are **the latest available**
+(checked 2026-07). Since the telemetry layout is a firmware behavior, any
+unit speaking dialect A is necessarily on an older firmware (the dialect-A
+unit's exact version was never recorded — if you have one, run
+`python python/xreal_imu.py --info` / `./xreal_imu --info` and report it, and
+note that updating via the official app will presumably switch the unit to
+dialect B).
 
 **Dialect B** (a second retail unit, measured on Windows; no `0xAD/0xDA` markers):
 
