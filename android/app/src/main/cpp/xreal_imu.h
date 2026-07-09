@@ -26,6 +26,14 @@ int xr_imu_parse(const uint8_t *report, size_t len, xr_imu_sample *out);
 void xr_imu_command(uint8_t out[XR_IMU_CMD_LEN], uint8_t cmd,
                     const uint8_t *data, size_t n);
 
+/* Build a 64-byte 0xFD-framed command for the MCU HID channel (interface 0):
+ * cmd 0x08 data {mode} sets the display mode - 1 = mirror, 3 = SBS 60 Hz
+ * (per-eye stereo, needed for passthrough), 9 = SBS 90 Hz. */
+enum { XR_MCU_INTERFACE = 0, XR_MCU_CMD_LEN = 64 };
+enum { XR_DISPLAY_MIRROR = 1, XR_DISPLAY_SBS_60 = 3, XR_DISPLAY_SBS_90 = 9 };
+void xr_mcu_command(uint8_t out[XR_MCU_CMD_LEN], uint16_t cmd,
+                    const uint8_t *data, size_t n);
+
 /* 6-axis Madgwick AHRS + automatic gyro-bias capture (first ~1000 samples
  * are averaged as the bias, then tracking starts with an aggressive beta
  * that settles after one second). q is sensor->earth (w, x, y, z). */

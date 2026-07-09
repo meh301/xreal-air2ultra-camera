@@ -97,6 +97,23 @@ def pick_glasses_monitor(monitors):
     return ext[0] if ext else None
 
 
+def set_display_mode(mode):
+    """Switch the glasses' display mode over the MCU HID channel:
+    1 = mirror (both eyes see everything), 3 = SBS 60 Hz (left half -> left
+    eye only — required for stereo/aligned passthrough). Best effort."""
+    try:
+        from xreal_imu import mcu_query
+        got = mcu_query(0x08, bytes([mode]))
+        ok = got is not None and got[0] == 0
+        print(f"glasses display mode -> {mode} "
+              f"({'ok' if ok else 'no ack — switch 3D mode manually'})")
+        return ok
+    except Exception as e:
+        print(f"display mode switch unavailable ({e}); "
+              "enable the glasses' 3D/SBS mode manually")
+        return False
+
+
 # ---- composition -----------------------------------------------------------------
 
 def draw_eye(canvas, img, x0, w, rot, mirror):
@@ -140,19 +157,30 @@ def main():
                   f"{'  (primary)' if m['primary'] else ''}")
         return
 
+    def pick_target(mons):
+        if args.geometry:
+            x, y, w, h = map(int, args.geometry.split(","))
+            return {"name": "manual", "x": x, "y": y, "w": w, "h": h}
+        if args.display is not None:
+            if not 0 <= args.display < len(mons):
+                sys.exit(f"--display {args.display} out of range (see --list)")
+            return mons[args.display]
+        return pick_glasses_monitor(mons)
+
     target = None
-    if args.geometry:
-        x, y, w, h = map(int, args.geometry.split(","))
-        target = {"name": "manual", "x": x, "y": y, "w": w, "h": h}
-    elif args.display is not None:
-        if not 0 <= args.display < len(monitors):
-            sys.exit(f"--display {args.display} out of range (see --list)")
-        target = monitors[args.display]
-    elif not args.window:
-        target = pick_glasses_monitor(monitors)
+    switched_3d = False
+    if not args.window:
+        target = pick_target(monitors)
         if target is None:
             print("No external display found - falling back to --window. "
                   "(Glasses plugged in and in extend mode?)", file=sys.stderr)
+        elif not args.geometry:
+            # per-eye stereo; the DP link renegotiates (geometry may change),
+            # so switch first and re-enumerate
+            switched_3d = set_display_mode(3)
+            if switched_3d:
+                time.sleep(3.0)
+                target = pick_target(list_monitors()) or target
 
     cap = find_camera(index=args.camera,
                       backend=backend_by_name(args.backend) if args.backend else None)
@@ -163,7 +191,7 @@ def main():
 
     if target and not args.window:
         print(f"Fullscreen on {target['name']} {target['w']}x{target['h']} "
-              f"@ {target['x']},{target['y']}  (put the glasses in 3D/SBS mode)")
+              f"@ {target['x']},{target['y']}")
         cw, ch = target["w"], target["h"]
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
         cv2.moveWindow(WIN, target["x"] + 10, target["y"] + 10)
@@ -254,6 +282,8 @@ def main():
     finally:
         fbw.close()
         cv2.destroyAllWindows()
+        if switched_3d:
+            set_display_mode(1)   # leave the glasses as found
 
 
 if __name__ == "__main__":

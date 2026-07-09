@@ -66,6 +66,26 @@ void xr_imu_command(uint8_t out[XR_IMU_CMD_LEN], uint8_t cmd,
     out[4] = (uint8_t)(crc >> 24);
 }
 
+void xr_mcu_command(uint8_t out[XR_MCU_CMD_LEN], uint16_t cmd,
+                    const uint8_t *data, size_t n) {
+    /* fd | crc32 | len u16 (= n+17) | request_id u32 | timestamp u32 |
+     * cmd u16 | reserved[5] | data (docs/PROTOCOL.md, "Vendor HID protocol") */
+    memset(out, 0, XR_MCU_CMD_LEN);
+    uint16_t length = (uint16_t)(n + 17);
+    out[0] = 0xFD;
+    out[5] = (uint8_t)(length & 0xFF);
+    out[6] = (uint8_t)(length >> 8);
+    out[7] = 0x37; out[8] = 0x13;              /* request_id 0x1337 */
+    out[15] = (uint8_t)(cmd & 0xFF);
+    out[16] = (uint8_t)(cmd >> 8);
+    if (n) memcpy(out + 22, data, n);
+    uint32_t crc = crc32z(out + 5, length);
+    out[1] = (uint8_t)crc;
+    out[2] = (uint8_t)(crc >> 8);
+    out[3] = (uint8_t)(crc >> 16);
+    out[4] = (uint8_t)(crc >> 24);
+}
+
 /* ---- Madgwick 6-axis (port of the reference IMU update) ------------------- */
 void xr_ahrs_init(xr_ahrs *a) {
     memset(a, 0, sizeof *a);

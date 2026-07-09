@@ -76,6 +76,10 @@ static struct {
     libusb_device_handle *usb;
     int imu_ep_in;
     int imu_ep_out;             /* interrupt OUT for commands, 0 if absent */
+
+    /* MCU channel (HID interface 0): display mode switching */
+    int mcu_claimed;
+    int mcu_ep_in, mcu_ep_out;
     pthread_t imu_thread;
     atomic_int imu_running;
     pthread_mutex_t imu_lock;
@@ -234,6 +238,71 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
 
 /* ---- IMU: enable + drain thread --------------------------------------------- */
 
+/* ---- MCU channel: put the glasses into per-eye stereo mode ------------------ */
+
+static void find_interface_eps(int ifnum, int *ep_in, int *ep_out) {
+    *ep_in = *ep_out = 0;
+    struct libusb_config_descriptor *cfg;
+    if (libusb_get_active_config_descriptor(libusb_get_device(S.usb), &cfg) != 0)
+        return;
+    for (int i = 0; i < cfg->bNumInterfaces; i++) {
+        const struct libusb_interface_descriptor *alt =
+            &cfg->interface[i].altsetting[0];
+        if (alt->bInterfaceNumber != ifnum) continue;
+        for (int e = 0; e < alt->bNumEndpoints; e++) {
+            uint8_t addr = alt->endpoint[e].bEndpointAddress;
+            if (addr & LIBUSB_ENDPOINT_IN) *ep_in = addr;
+            else *ep_out = addr;
+        }
+    }
+    libusb_free_config_descriptor(cfg);
+}
+
+/* Set the glasses' display mode (XR_DISPLAY_*). Stereo is what makes the
+ * left half of the frame reach only the left eye - without it both eyes see
+ * the whole side-by-side canvas, exactly what AR apps switch on themselves. */
+static void mcu_set_display_mode(uint8_t mode) {
+    if (!S.mcu_claimed) {
+        if (libusb_claim_interface(S.usb, XR_MCU_INTERFACE) != 0) {
+            LOGE("MCU: could not claim interface %d, display mode unchanged",
+                 XR_MCU_INTERFACE);
+            return;
+        }
+        S.mcu_claimed = 1;
+        find_interface_eps(XR_MCU_INTERFACE, &S.mcu_ep_in, &S.mcu_ep_out);
+        LOGI("MCU interface endpoints: in=0x%02x out=0x%02x",
+             S.mcu_ep_in, S.mcu_ep_out);
+    }
+    uint8_t pkt[XR_MCU_CMD_LEN];
+    xr_mcu_command(pkt, 0x08, &mode, 1);
+    int rc;
+    if (S.mcu_ep_out) {
+        int sent = 0;
+        rc = libusb_interrupt_transfer(S.usb, S.mcu_ep_out, pkt,
+                                       XR_MCU_CMD_LEN, &sent, 1000);
+    } else {
+        rc = libusb_control_transfer(S.usb, 0x21, 0x09, 0x0200,
+                                     XR_MCU_INTERFACE, pkt, XR_MCU_CMD_LEN, 1000);
+    }
+    if (rc < 0) { LOGE("display mode %d: send failed rc=%d", mode, rc); return; }
+    /* read the ack (cmd echo; first data byte 0 = success) */
+    if (S.mcu_ep_in) {
+        uint8_t buf[XR_MCU_CMD_LEN];
+        for (int tries = 0; tries < 20; tries++) {
+            int got = 0;
+            if (libusb_interrupt_transfer(S.usb, S.mcu_ep_in, buf, sizeof buf,
+                                          &got, 300) != 0 || got < 23)
+                break;
+            if (buf[0] == 0xFD && buf[15] == 0x08 && buf[16] == 0x00) {
+                LOGI("display mode %d: %s", mode,
+                     buf[22] == 0 ? "ok" : "rejected");
+                return;
+            }
+        }
+    }
+    LOGI("display mode %d: sent (no ack read)", mode);
+}
+
 static int imu_send_cmd(uint8_t cmd, const uint8_t *data, size_t n) {
     uint8_t pkt[XR_IMU_CMD_LEN];
     xr_imu_command(pkt, cmd, data, n);
@@ -381,20 +450,7 @@ static void imu_start(void) {
              XR_IMU_INTERFACE, rc);
         return;
     }
-    struct libusb_config_descriptor *cfg;
-    if (libusb_get_active_config_descriptor(libusb_get_device(S.usb), &cfg) == 0) {
-        for (int i = 0; i < cfg->bNumInterfaces; i++) {
-            const struct libusb_interface_descriptor *alt =
-                &cfg->interface[i].altsetting[0];
-            if (alt->bInterfaceNumber != XR_IMU_INTERFACE) continue;
-            for (int e = 0; e < alt->bNumEndpoints; e++) {
-                uint8_t addr = alt->endpoint[e].bEndpointAddress;
-                if (addr & LIBUSB_ENDPOINT_IN) S.imu_ep_in = addr;
-                else S.imu_ep_out = addr;
-            }
-        }
-        libusb_free_config_descriptor(cfg);
-    }
+    find_interface_eps(XR_IMU_INTERFACE, &S.imu_ep_in, &S.imu_ep_out);
     LOGI("IMU interface %d endpoints: in=0x%02x out=0x%02x",
          XR_IMU_INTERFACE, S.imu_ep_in, S.imu_ep_out);
     if (!S.imu_ep_in) {
@@ -453,6 +509,12 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
         return res;
     }
 
+    /* per-eye stereo: without this the glasses mirror the whole frame into
+     * both eyes and no side-by-side content can fuse */
+    S.usb = uvc_get_libusb_handle(S.devh);
+    libusb_set_auto_detach_kernel_driver(S.usb, 1);
+    mcu_set_display_mode(XR_DISPLAY_SBS_60);
+
     /* the stream advertises itself as 640x241 "YUY2"; trust the descriptor
      * rather than hardcoding, and accept any mode of the right byte size */
     int w = 640, h = 241, fps = 60;
@@ -494,6 +556,11 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStop(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;
     if (!S.streaming) return;
     S.streaming = 0;
+    if (S.mcu_claimed) {
+        mcu_set_display_mode(XR_DISPLAY_MIRROR);   /* leave the glasses as found */
+        libusb_release_interface(S.usb, XR_MCU_INTERFACE);
+        S.mcu_claimed = 0;
+    }
     imu_stop();
     uvc_stop_streaming(S.devh);
     uvc_close(S.devh); S.devh = NULL;
