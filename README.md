@@ -32,6 +32,7 @@ Keys: `c` toggle clean/scrambled view · `s` save snapshot PNG · `space` pause 
 | Tool | What it does |
 |------|--------------|
 | `preview_clean` | Real-time stereo viewer (descramble + fixed-pattern-noise removal), 60 fps. Also `--snap out.png` for a headless snapshot, `--test in.pgm prefix` to verify descrambling offline. |
+| `glasses_passthrough` | Stereo passthrough onto the glasses themselves: left camera → left eye, right camera → right eye. Fullscreen side-by-side on the XREAL display (put the glasses in 3D/SBS mode). `--list` shows displays, `--display N` picks one, `--window` previews the SBS composite in a normal window. Keys: `x` swap eyes · `r` rotate · `m` mirror · `s` toggle SBS. |
 | `xreal_cam` | Recorder: `./xreal_cam <numFrames> <outDir>` writes raw `cam0_*.pgm` / `cam1_*.pgm` (still scrambled) plus `meta.csv` with the per-pair frame counter. |
 | `enumerate` | List AVFoundation cameras and the XREAL device's formats. |
 | `python/process_clean.py` | Offline pipeline: `python3 python/process_clean.py <capDir> <outDir>` descrambles + cleans a recording into PNGs and a side-by-side `stereo_feed.mp4`. Needs `numpy opencv-python pillow`. |
