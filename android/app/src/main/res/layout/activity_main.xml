@@ -61,12 +61,6 @@
             android:text="@string/swap_eyes" />
 
         <Button
-            android:id="@+id/mirror"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/mirror" />
-
-        <Button
             android:id="@+id/snapshot"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

@@ -113,7 +113,6 @@ class MainActivity : Activity() {
     private var streaming = false
     private var showClean = true
     private var swapEyes = false
-    private var mirror = false
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
@@ -270,10 +269,6 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.swap).setOnClickListener {
             swapEyes = !swapEyes
             XrealNative.nativeSetSwap(swapEyes)   // phone view, glasses, snapshots
-        }
-        findViewById<Button>(R.id.mirror).setOnClickListener {
-            mirror = !mirror
-            XrealNative.nativeSetMirror(mirror)
         }
 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
