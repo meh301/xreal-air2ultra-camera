@@ -1,5 +1,6 @@
 # Built binaries (run `make`)
 /preview_clean
+/glasses_passthrough
 /xreal_cam
 /enumerate
 
@@ -25,6 +26,7 @@
 *.raw
 meta.csv
 preview_snap_*.png
+CLAUDE.md
 
 # factory calibration dumps (contain the device serial - never commit)
 /c.json

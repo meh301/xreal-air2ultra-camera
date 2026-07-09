@@ -37,6 +37,7 @@ xcode-select --install   # once
 make
 ./preview_clean          # stereo viewer (same keys/flags as the Python one)
 ./xreal_imu              # IMU reader (--csv / --config / --info)
+./glasses_passthrough    # camera feed onto the glasses' own displays (SBS)
 ```
 
 macOS asks for camera permission for your terminal on first run. The Python
@@ -78,7 +79,11 @@ a 1 kHz IMU readout with fused orientation. Details:
 
 **Native macOS binaries** — `make` builds `preview_clean`, `xreal_cam`,
 `xreal_imu` and `enumerate` (device/format lister), mirroring their Python
-counterparts.
+counterparts, plus one macOS-only tool:
+
+| Command | What it does |
+|---------|--------------|
+| `./glasses_passthrough` | Stereo passthrough onto the glasses themselves — left camera → left eye, right camera → right eye, fullscreen side-by-side on the XREAL display (put the glasses in 3D/SBS mode). `--list` shows displays, `--display N` picks one, `--window` previews without glasses. Keys: `x` swap eyes · `r` rotate · `m` mirror · `s` toggle SBS. |
 
 **Reference & research** — [`python/xreal_descramble.py`](python/xreal_descramble.py)
 is the minimal single-frame descrambler other implementations are checked

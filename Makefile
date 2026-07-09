@@ -6,9 +6,12 @@ endif
 
 SWIFTC = swiftc -O
 
-all: preview_clean xreal_cam xreal_imu enumerate
+all: preview_clean glasses_passthrough xreal_cam xreal_imu enumerate
 
 preview_clean: src/preview_clean.swift
+	$(SWIFTC) $< -o $@ -framework AVFoundation -framework AppKit
+
+glasses_passthrough: src/glasses_passthrough.swift
 	$(SWIFTC) $< -o $@ -framework AVFoundation -framework AppKit
 
 xreal_cam: src/xreal_cam.swift
@@ -21,6 +24,6 @@ enumerate: src/enumerate.swift
 	$(SWIFTC) $< -o $@
 
 clean:
-	rm -f preview_clean xreal_cam xreal_imu enumerate
+	rm -f preview_clean glasses_passthrough xreal_cam xreal_imu enumerate
 
 .PHONY: all clean
