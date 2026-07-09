@@ -31,15 +31,35 @@ void xr_init(void) {
     }
 }
 
-xr_order xr_classify(const uint8_t *flat) {
+/* dialect B fingerprint: dims 640,480,640 as LE u16 at cols 51-56, in native
+ * and 16-bit-pair-swapped byte order */
+static const uint8_t B_NATIVE[8]  = {0x00, 0x80, 0x02, 0xE0, 0x01, 0x80, 0x02, 0x00};
+static const uint8_t B_SWAPPED[8] = {0x80, 0x00, 0xE0, 0x02, 0x80, 0x01, 0x00, 0x02};
+
+xr_order xr_classify(const uint8_t *flat, xr_dialect *dialect) {
+    const uint8_t *t = flat + XR_META_ROW * XR_W;
+    if (!memcmp(t + 50, B_NATIVE, 8))  { *dialect = XR_DIALECT_B; return XR_ORDER_OK; }
+    if (!memcmp(t + 50, B_SWAPPED, 8)) { *dialect = XR_DIALECT_B; return XR_ORDER_SWAPPED; }
+    /* dialect A additionally has a constant-0x5C padding row on every frame */
     const uint8_t *pad = flat + XR_PAD_ROW * XR_W;
     int n = 0;
     for (int x = 0; x < XR_W; x++) n += (pad[x] == XR_PAD_VAL);
-    if (n < XR_W - 64) return XR_ORDER_UNKNOWN;
-    const uint8_t *t = flat + XR_META_ROW * XR_W;
-    if (t[22] == 0xAD && t[23] == 0xDA) return XR_ORDER_OK;
-    if (t[22] == 0xDA && t[23] == 0xAD) return XR_ORDER_SWAPPED;
+    if (n >= XR_W - 64) {
+        if (t[22] == 0xAD && t[23] == 0xDA) { *dialect = XR_DIALECT_A; return XR_ORDER_OK; }
+        if (t[22] == 0xDA && t[23] == 0xAD) { *dialect = XR_DIALECT_A; return XR_ORDER_SWAPPED; }
+    }
     return XR_ORDER_UNKNOWN;
+}
+
+int xr_cam(const uint8_t *flat, xr_dialect d) {
+    const uint8_t *t = flat + XR_META_ROW * XR_W;
+    /* B: bit 1 is the camera that dialect A calls cam0 (right-LUT) */
+    return d == XR_DIALECT_B ? 1 - (t[59] & 1) : (t[XR_CAM_COL] & 1);
+}
+
+int xr_counter(const uint8_t *flat, xr_dialect d) {
+    const uint8_t *t = flat + XR_META_ROW * XR_W;
+    return t[d == XR_DIALECT_B ? 18 : XR_CTR_COL];
 }
 
 void xr_unswap16(uint8_t *flat, size_t n) {

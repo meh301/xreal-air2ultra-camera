@@ -39,6 +39,11 @@ row  481      constant 0x5C padding
 
 ### Telemetry row (row 480)
 
+Two firmware **dialects** have been observed so far; auto-detect per frame
+(implemented in `python/xreal_uvc.py::_classify` and the Android core).
+
+**Dialect A** (unit measured on macOS):
+
 | col | Meaning |
 |-----|---------|
 | 2, 3 | timestamp-like values |
@@ -49,12 +54,33 @@ row  481      constant 0x5C padding
 | 25, 26, 27, 35 | config-like constants |
 | 58 | **camera ID: `0x20` = cam0, `0x21` = cam1** |
 
+**Dialect B** (a second retail unit, measured on Windows; no `0xAD/0xDA` markers):
+
+| col | Meaning |
+|-----|---------|
+| 0, 1 | timestamp-like values |
+| 4 | constant `0x64` |
+| 18 | **pair counter** — shared by both frames of a stereo pair |
+| 22–27 | auxiliary payload, present only on aux frames (see below) |
+| 34 | constant `0x01` |
+| 51–56 | **frame dimensions as LE u16: 640, 480, 640** — use as the fingerprint |
+| 59 | **camera bit: `0x01` = the camera dialect A calls cam0, `0x00` = cam1** |
+| 60 | constant `0x80` |
+| 62, 63 | per-camera values (purpose unknown) |
+
+Dialect B quirk: **every 2nd frame of the bit-1 camera is an "aux" frame** whose
+row 481 is *not* `0x5C` padding but carries data (as do cols 22–27 that frame) —
+purpose unknown (IMU/temperature/config echo?). The image rows are unaffected.
+Fingerprints must therefore not require the padding row on every frame.
+
 Consecutive UVC frames alternate between the two cameras and a pair shares one counter
 value (~30 stereo pairs/s at 60 fps UVC). **Do not infer camera identity from arrival
-order**: the L/R order within a pair is not fixed (in one 117-frame capture, 48 pairs
-arrived one way and 10 the other; frame drops shift it further). Column 58 is the only
-reliable discriminator — it matched image-correlation ground truth on all 117 frames
-tested.
+order**: the L/R order within a pair is not fixed on dialect A (in one 117-frame
+capture, 48 pairs arrived one way and 10 the other; frame drops shift it further; the
+dialect B unit happened to alternate strictly, but don't rely on it). The camera-ID
+column is the only reliable discriminator — on dialect A it matched image-correlation
+ground truth on all 117 frames tested, and on dialect B the bit was verified against
+descramble orientation.
 
 ## Block scrambling
 
@@ -127,11 +153,19 @@ The stream is plain UVC, so any OS UVC stack can deliver it — the only trick i
 getting the **untouched bytes** out, because the nominal `640×241 @ 60 fps`
 "YUY2/UYVY" format is a lie (every byte is one mono pixel of the 640×482 raster).
 
-- **OpenCV** (Windows MSMF/DirectShow, Linux V4L2, macOS AVFoundation): open the
-  device and set `CAP_PROP_CONVERT_RGB = 0`; `read()` then returns the raw
-  308,480-byte buffer instead of a decoded BGR image. Never request a different
-  width/height — that would insert a converter. `python/xreal_uvc.py` implements
-  this, plus device auto-detection.
+- **OpenCV** (Linux V4L2, macOS AVFoundation): open the device and set
+  `CAP_PROP_CONVERT_RGB = 0`; `read()` then returns the raw 308,480-byte buffer
+  instead of a decoded BGR image. Never request a different width/height — that
+  would insert a converter. `python/xreal_uvc.py` implements this, plus device
+  auto-detection.
+- **Windows**: measured on OpenCV 5.0, *neither* backend can deliver this
+  device raw — MSMF opens it (properties readable) but every `ReadSample`
+  fails, and DirectShow streams but force-converts to BGR24 even with
+  `CONVERT_RGB=0` accepted (conversion clips the fake-YUV bytes; the data is
+  unrecoverable). What does work: **ffmpeg's dshow input**, which connects the
+  capture pin at its native `yuyv422 640×241` type and pipes untouched frames
+  (`ffmpeg -f dshow -video_size 640x241 -pixel_format yuyv422 -i video=<dev>
+  -f rawvideo -`). `xreal_uvc.py` prefers this path on Windows automatically.
 - **Android**: no external-UVC camera API exists; `android/` opens the device via
   the USB host API and hands the fd to libusb (`LIBUSB_OPTION_NO_DEVICE_DISCOVERY`
   set before init, then `uvc_wrap`) with libuvc doing the stream negotiation.

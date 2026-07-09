@@ -34,7 +34,8 @@ def main():
     args = ap.parse_args()
 
     cap = find_camera(index=args.camera,
-                      backend=backend_by_name(args.backend) if args.backend else None)
+                      backend=backend_by_name(args.backend) if args.backend else None,
+                      latest_only=False)   # a recorder wants every frame
     if cap is None:
         sys.exit("XREAL UVC camera not found.")
     print(f"Opening XREAL stream at {cap.description}")

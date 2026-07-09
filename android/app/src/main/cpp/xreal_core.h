@@ -20,22 +20,31 @@ enum {
 };
 
 /* Byte order of the delivered stream. The fourcc is fake, so a UVC stack may
- * hand us the bytes of each 16-bit "YUV" pair in either order; the telemetry
- * markers (0xAD,0xDA at row 480 cols 22,23) reveal which. */
+ * hand us the bytes of each 16-bit "YUV" pair in either order; constant
+ * telemetry bytes reveal which. */
 typedef enum {
     XR_ORDER_UNKNOWN = -1,
     XR_ORDER_OK = 0,
     XR_ORDER_SWAPPED = 1
 } xr_order;
 
+/* Firmware telemetry dialect (see docs/PROTOCOL.md "Telemetry row"):
+ * A: counter col 19, camera id 0x20/0x21 at col 58, 0xAD,0xDA markers.
+ * B: counter col 18, camera bit at col 59, dims marker at cols 51-56. */
+typedef enum {
+    XR_DIALECT_UNKNOWN = -1,
+    XR_DIALECT_A = 0,
+    XR_DIALECT_B = 1
+} xr_dialect;
+
 void xr_init(void);                            /* build LUTs; call once */
-xr_order xr_classify(const uint8_t *flat);     /* fingerprint XR_FRAME_BYTES */
+/* fingerprint one XR_FRAME_BYTES frame; sets *dialect on success */
+xr_order xr_classify(const uint8_t *flat, xr_dialect *dialect);
 void xr_unswap16(uint8_t *flat, size_t n);     /* undo the pairwise swap */
 
-static inline int xr_cam(const uint8_t *flat)     /* 0x20=cam0, 0x21=cam1 */
-{ return flat[XR_META_ROW * XR_W + XR_CAM_COL] & 1; }
-static inline int xr_counter(const uint8_t *flat) /* shared by a stereo pair */
-{ return flat[XR_META_ROW * XR_W + XR_CTR_COL]; }
+/* camera index (0 = the camera using the right-LUT) and stereo pair counter */
+int xr_cam(const uint8_t *flat, xr_dialect d);
+int xr_counter(const uint8_t *flat, xr_dialect d);
 
 /* Descramble the 307200 image bytes of camera `cam` (cam0 = right LUT) into a
  * 480x640 portrait raster. Returns 0, or -1 if phase sync failed. */

@@ -17,23 +17,33 @@ Air 2 Ultra はトラッキングカメラを標準の UVC (USB Video Class) デ
 ### Windows / Linux (macOSでも可)
 
 必要なもの: Python 3.9+ と `numpy`、`opencv-python`、USB-C接続した Air 2 Ultra。
+Windowsでは `ffmpeg` もPATHに必要です(`winget install ffmpeg`、下記の注意参照)。
 
 ```sh
 pip install numpy opencv-python
 python python/preview_clean.py
 ```
 
-左右カメラのライブ映像(デスクランブル+ノイズ除去済み)のウィンドウが開きます。
-XREALのストリームはテレメトリ行のフィンガープリントで自動検出されるため、他の
-Webカメラが混ざっていても問題ありません。`python python/xreal_uvc.py` で検出状況を
-確認できます。
+左右カメラのライブ映像(デスクランブル+ノイズ除去済み)のウィンドウが、UVCの
+フルレート60fpsで開きます。XREALのストリームはテレメトリ行のフィンガープリントで
+自動検出されるため、他のWebカメラが混ざっていても問題ありません。
+`python python/xreal_uvc.py` で検出状況を確認できます。
 
 キー操作: `c` クリーン/スクランブル表示切替 · `s` スナップショットPNG保存 · `space` 一時停止 · `q` 終了
 
+クリーンなステレオペアは毎フレーム**名前付き共有メモリのフレームバッファ**
+(`xreal_stereo_fb`、960×640グレースケール+seqlockヘッダ)にも書き込まれるため、
+Python / C++ / Rust / Unity など任意のプロセスからソケット不要・約1msの遅延で
+ライブ映像を利用できます。`python python/xreal_fb.py --show` がデモコンシューマで、
+64バイトヘッダのレイアウトは [python/xreal_fb.py](python/xreal_fb.py) に記載しています。
+`--headless` でウィンドウなしのパブリッシャとして動きます。
+
 プラットフォーム別の注意:
-- **Windows**: カメラが見つからない場合は *設定 → プライバシーとセキュリティ →
-  カメラ* でデスクトップアプリのカメラアクセスを許可してください。Media Foundation と
-  DirectShow の両バックエンドを自動で試します(`--backend msmf|dshow` で固定可能)。
+- **Windows**: ffmpeg をインストールしてください(`winget install ffmpeg`)。
+  OpenCVのWindowsバックエンドはこのデバイスの生ストリームを取得できないことが
+  実測で判明しているため(MSMFはストリーム開始不能、DirectShowは強制BGR変換)、
+  ツールは自動的に ffmpeg の dshow 入力(ネイティブピンフォーマット取得)経由で
+  キャプチャします。
 - **Linux**: `/dev/video*` へのアクセス権が必要です(通常は `video` グループ:
   `sudo usermod -aG video $USER` 後に再ログイン)。グラスは通常の `uvcvideo`
   デバイスとして見えるので、閲覧だけなら udev ルールは不要です。
@@ -71,7 +81,8 @@ APKをインストールし、グラスをスマホのUSB-Cポートに接続し
 |--------|------|
 | `python/preview_clean.py` | クロスプラットフォームのリアルタイムステレオビューア(デスクランブル+固定パターンノイズ除去)。`--snap out.png` でウィンドウなしスナップショット、`--test in.pgm prefix` でオフライン検証。 |
 | `python/xreal_cam.py` | クロスプラットフォームのレコーダー: `python xreal_cam.py <フレーム数> <出力dir>` で生の `cam0_*.pgm` / `cam1_*.pgm`(スクランブルされたまま)と `meta.csv` を保存。macOS版レコーダーと同一形式。 |
-| `python/xreal_uvc.py` | 上記2ツールが使うキャプチャモジュール(バックエンド探索、テレメトリによる自動検出、バイト順補正)。直接実行するとXREALストリームをスキャン。 |
+| `python/xreal_uvc.py` | 上記2ツールが使うキャプチャモジュール(バックエンド探索、ffmpegフォールバック、テレメトリによる自動検出、バイト順補正)。直接実行するとXREALストリームをスキャン。 |
+| `python/xreal_fb.py` | 共有メモリフレームバッファ: レイアウト定義、Writer/Readerクラス、デモコンシューマ(`python xreal_fb.py --show`)。 |
 | `preview_clean` (macOS) | ビューアのネイティブSwift版、60fps。キー・フラグは共通。 |
 | `xreal_cam` (macOS) | レコーダーのネイティブSwift版。 |
 | `enumerate` (macOS) | AVFoundationのカメラ一覧とXREALデバイスのフォーマットを表示。 |

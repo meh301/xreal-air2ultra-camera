@@ -17,24 +17,33 @@ robotics, or just poking at the hardware.
 ### Windows / Linux (and macOS too)
 
 Requirements: Python 3.9+ with `numpy` and `opencv-python`, and an Air 2 Ultra
-plugged in via USB-C.
+plugged in via USB-C. On Windows you also want `ffmpeg` on PATH
+(`winget install ffmpeg`) — see the platform notes.
 
 ```sh
 pip install numpy opencv-python
 python python/preview_clean.py
 ```
 
-A window opens with the live left/right camera feed, descrambled and denoised.
-The XREAL stream is auto-detected among your cameras (it is fingerprinted by its
-telemetry row, so other webcams are skipped); `python python/xreal_uvc.py` scans
-and lists what was found if you want to check.
+A window opens with the live left/right camera feed, descrambled and denoised,
+at the full 60 fps UVC rate. The XREAL stream is auto-detected among your
+cameras (it is fingerprinted by its telemetry row, so other webcams are
+skipped); `python python/xreal_uvc.py` scans and lists what was found.
 
 Keys: `c` toggle clean/scrambled view · `s` save snapshot PNG · `space` pause · `q` quit
 
+Every clean stereo pair is also published to a **named shared-memory
+framebuffer** (`xreal_stereo_fb`, 960×640 grayscale + seqlock header), so your
+own process — Python, C++, Rust, Unity, … — can consume the live feed with ~1 ms
+latency and no sockets. `python python/xreal_fb.py --show` is a demo consumer;
+the 64-byte header layout is documented in [python/xreal_fb.py](python/xreal_fb.py).
+`--headless` runs the publisher without a window.
+
 Platform notes:
-- **Windows**: if no camera is found, allow desktop apps to access the camera in
-  *Settings → Privacy & security → Camera*. Both the Media Foundation and
-  DirectShow backends are tried automatically (`--backend msmf|dshow` to force).
+- **Windows**: install ffmpeg (`winget install ffmpeg`). OpenCV's Windows
+  backends cannot deliver this device's stream raw (measured: MSMF starts no
+  stream, DirectShow force-converts to BGR), so the tools automatically capture
+  through ffmpeg's dshow input instead, which grabs the native pin format.
 - **Linux**: your user needs access to `/dev/video*` (usually the `video`
   group: `sudo usermod -aG video $USER`, then re-login). The glasses appear as
   a regular `uvcvideo` device; no udev rules needed just to view.
@@ -72,7 +81,8 @@ permission prompt, and the live stereo preview starts. See
 |------|--------------|
 | `python/preview_clean.py` | Cross-platform real-time stereo viewer (descramble + fixed-pattern-noise removal). Also `--snap out.png` for a headless snapshot, `--test in.pgm prefix` to verify descrambling offline. |
 | `python/xreal_cam.py` | Cross-platform recorder: `python xreal_cam.py <numFrames> <outDir>` writes raw `cam0_*.pgm` / `cam1_*.pgm` (still scrambled) plus `meta.csv`. Output is identical to the macOS recorder. |
-| `python/xreal_uvc.py` | Capture module used by the two tools (backend scan, telemetry fingerprint, byte-order fix). Run directly to scan for the XREAL stream. |
+| `python/xreal_uvc.py` | Capture module used by the two tools (backend scan, ffmpeg fallback, telemetry fingerprint, byte-order fix). Run directly to scan for the XREAL stream. |
+| `python/xreal_fb.py` | Shared-memory framebuffer: layout definition, writer/reader classes, and a demo consumer (`python xreal_fb.py --show`). |
 | `preview_clean` (macOS) | Native Swift version of the viewer, 60 fps. Same keys and flags. |
 | `xreal_cam` (macOS) | Native Swift version of the recorder. |
 | `enumerate` (macOS) | List AVFoundation cameras and the XREAL device's formats. |

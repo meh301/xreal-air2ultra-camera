@@ -32,6 +32,7 @@ static struct {
     int streaming;
 
     xr_order order;
+    xr_dialect dialect;
     xr_cleaner cleaners[2];
     uint8_t frame[XR_FRAME_BYTES];          /* working copy of the UVC frame */
     uint8_t clean[2][XR_OW * XR_OH];
@@ -86,9 +87,10 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
     memcpy(S.frame, frame->data, XR_FRAME_BYTES);
 
     if (S.order == XR_ORDER_UNKNOWN) {
-        S.order = xr_classify(S.frame);
+        S.order = xr_classify(S.frame, &S.dialect);
         if (S.order == XR_ORDER_UNKNOWN) return;      /* black startup frame */
-        LOGI("stream fingerprinted: byte order %s",
+        LOGI("stream fingerprinted: dialect %c, byte order %s",
+             S.dialect == XR_DIALECT_B ? 'B' : 'A',
              S.order == XR_ORDER_SWAPPED ? "swapped (fixing)" : "ok");
     }
     if (S.order == XR_ORDER_SWAPPED) xr_unswap16(S.frame, XR_FRAME_BYTES);
@@ -98,7 +100,7 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
     for (int i = 0; i < XR_IMG_BYTES; i += 7) sum += S.frame[i];
     if (sum / (XR_IMG_BYTES / 7) < 5) return;
 
-    int cam = xr_cam(S.frame);
+    int cam = xr_cam(S.frame, S.dialect);
     static uint8_t dscr[XR_OW * XR_OH];               /* uvc thread only */
     xr_descramble(S.frame, cam, dscr);
     xr_clean(&S.cleaners[cam], dscr, S.clean[cam]);
@@ -114,7 +116,7 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
         S.fps_t0 = t;
     }
 
-    if (S.have[0] && S.have[1]) compose(xr_counter(S.frame));
+    if (S.have[0] && S.have[1]) compose(xr_counter(S.frame, S.dialect));
 }
 
 JNIEXPORT jint JNICALL
@@ -123,6 +125,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
     if (S.streaming) return 0;
     xr_init();
     S.order = XR_ORDER_UNKNOWN;
+    S.dialect = XR_DIALECT_UNKNOWN;
     S.have[0] = S.have[1] = 0;
     S.seq = S.grabbed = 0;
     S.fps_count = 0; S.fps_t0 = 0; S.fps_x10 = 0;
