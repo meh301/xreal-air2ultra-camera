@@ -19,7 +19,8 @@ Capture paths (auto-selected by find_camera):
 Firmware telemetry dialects (both auto-detected per frame):
   A: the layout in docs/PROTOCOL.md - counter col 19, camera id 0x20/0x21 at
      col 58, markers 0xAD,0xDA at cols 22,23, padding row always 0x5C.
-  B: (newer firmware) counter col 18, camera bit at col 59, frame dimensions
+  B: (observed on MCU FW 12.1.00.498_20241115) u32 ns exposure timestamp at
+     cols 0-3, counter col 18, camera bit at col 59, frame dimensions
      640/480/640 as LE u16 at cols 51-56 (used as the fingerprint), padding
      row 0x5C except on every 2nd cam-bit-1 frame, which carries extra data
      in row 481 and cols 22-27.
@@ -171,7 +172,7 @@ class _DialectA:
 
 
 class _DialectB:
-    """Newer firmware: dims marker at 51-56, counter 18, camera bit 59."""
+    """Dims marker at 51-56, counter 18, camera bit 59 (see module doc)."""
     name = "B"
 
     @staticmethod

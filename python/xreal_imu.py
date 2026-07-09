@@ -51,7 +51,7 @@ import zlib
 
 import hid
 
-VID, PID, IMU_INTERFACE = 0x3318, 0x0426, 2
+VID, PID, IMU_INTERFACE, MCU_INTERFACE = 0x3318, 0x0426, 2, 0
 SIG = b"\x01\x02"
 
 # shared-memory ring (--fb): 64B header + capacity slots of 48 bytes
@@ -85,6 +85,49 @@ class ImuSample:
 def _packet(cmd, data=b""):
     body = struct.pack("<HB", len(data) + 3, cmd) + data
     return bytes([0xAA]) + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF) + body
+
+
+# ---- MCU channel (interface 0, 0xFD framing) — device info queries -----------
+
+def _mcu_packet(cmd, data=b""):
+    body = struct.pack("<HIIH5s", len(data) + 17, 0x1337, 0, cmd, b"\0" * 5) + data
+    return bytes([0xFD]) + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF) + body
+
+
+def mcu_query(cmd, data=b"", tries=50):
+    """One read command on the MCU interface; returns (status, payload)."""
+    path = next((d["path"] for d in hid.enumerate(VID, PID)
+                 if d["interface_number"] == MCU_INTERFACE), None)
+    if path is None:
+        raise FileNotFoundError("MCU HID interface 0 not found")
+    dev = hid.device()
+    dev.open_path(path)
+    try:
+        dev.write(b"\x00" + _mcu_packet(cmd, data).ljust(64, b"\0"))
+        for _ in range(tries):
+            buf = dev.read(1024, timeout_ms=250)
+            if not buf:
+                return None
+            b = bytes(buf)
+            if b[:1] == b"\xfd":
+                length, = struct.unpack_from("<H", b, 5)
+                rcmd, = struct.unpack_from("<H", b, 15)
+                if rcmd == cmd:
+                    payload = b[22:22 + max(0, length - 17)]
+                    return (payload[0] if payload else None,
+                            payload[1:].decode("ascii", "replace").strip("\x00"))
+        return None
+    finally:
+        dev.close()
+
+
+def print_info():
+    """Serial + firmware versions (command ids per the Air-family MCU
+    protocol, wheaney/nrealAirLinuxDriver device_mcu.h)."""
+    for label, cmd in (("serial       ", 0x15), ("MCU app FW   ", 0x26),
+                       ("DP7911 FW    ", 0x16), ("DSP app FW   ", 0x21)):
+        got = mcu_query(cmd)
+        print(f"{label}: {got[1] if got else 'no reply'}")
 
 
 class XrealImu:
@@ -202,8 +245,14 @@ def main():
     ap.add_argument("--quat", action="store_true",
                     help="fuse a 6-axis quaternion host-side (Madgwick; the "
                          "device itself streams raw data only)")
+    ap.add_argument("--info", action="store_true",
+                    help="print serial + firmware versions (MCU channel) and exit")
     ap.add_argument("--seconds", type=float, help="stop after this long")
     args = ap.parse_args()
+
+    if args.info:
+        print_info()
+        return
 
     with XrealImu() as imu:
         if args.config:

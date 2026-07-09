@@ -27,4 +27,12 @@ object XrealNative {
      * frame, else (w shl 48) or (h shl 32) or (fps*10 shl 16) or counter.
      */
     external fun nativeGrabFrame(buf: ByteBuffer): Long
+
+    /**
+     * Copy the newest IMU state into [buf] (direct ByteBuffer >= 56 bytes,
+     * native order): u64 ts_ns, f32 gyro_dps[3], f32 accel_g[3],
+     * f32 quat_wxyz[4] (host-side Madgwick), f32 rate_hz, u32 has_quat.
+     * Returns false when nothing new arrived since the last call.
+     */
+    external fun nativeGrabImu(buf: ByteBuffer): Boolean
 }

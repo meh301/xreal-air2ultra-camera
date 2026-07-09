@@ -18,6 +18,7 @@
 #include <libuvc/libuvc.h>
 
 #include "xreal_core.h"
+#include "xreal_imu.h"
 
 #define TAG "xrealcam"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -49,7 +50,22 @@ static struct {
     int fps_count;
     int64_t fps_t0;
     int fps_x10;
-} S = { .show_clean = 1, .lock = PTHREAD_MUTEX_INITIALIZER };
+
+    /* IMU (HID interface 2 over the same libusb handle) */
+    libusb_device_handle *usb;
+    int imu_ep_in;
+    pthread_t imu_thread;
+    atomic_int imu_running;
+    pthread_mutex_t imu_lock;
+    xr_imu_sample imu_latest;
+    float imu_q[4];
+    int imu_has_q;
+    uint32_t imu_seq, imu_grabbed;
+    int imu_count, imu_rate;
+    int64_t imu_t0;
+    xr_ahrs ahrs;
+} S = { .show_clean = 1, .lock = PTHREAD_MUTEX_INITIALIZER,
+        .imu_lock = PTHREAD_MUTEX_INITIALIZER };
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -119,6 +135,98 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
     if (S.have[0] && S.have[1]) compose(xr_counter(S.frame, S.dialect));
 }
 
+/* ---- IMU: enable + drain thread --------------------------------------------- */
+
+static void imu_enable(void) {
+    uint8_t cmd[XR_IMU_CMD_LEN], on = 1;
+    xr_imu_command(cmd, 0x19, &on, 1);
+    /* HID SET_REPORT(output, id 0) — universal, no interrupt-out ep needed */
+    libusb_control_transfer(S.usb, 0x21, 0x09, 0x0200, XR_IMU_INTERFACE,
+                            cmd, XR_IMU_CMD_LEN, 1000);
+}
+
+static void *imu_worker(void *arg) {
+    (void)arg;
+    uint8_t buf[XR_IMU_REPORT];
+    int stalls = 0;
+    while (atomic_load(&S.imu_running)) {
+        int got = 0;
+        int rc = libusb_interrupt_transfer(S.usb, S.imu_ep_in, buf, sizeof buf,
+                                           &got, 500);
+        if (rc == LIBUSB_ERROR_TIMEOUT || (rc == 0 && got == 0)) {
+            if (++stalls >= 3) { imu_enable(); stalls = 0; }
+            continue;
+        }
+        if (rc < 0) { LOGE("IMU transfer failed: %d", rc); break; }
+        xr_imu_sample s;
+        if (xr_imu_parse(buf, (size_t)got, &s) != 0) continue;
+        stalls = 0;
+        int has_q = xr_ahrs_feed(&S.ahrs, &s);
+
+        S.imu_count++;
+        int64_t t = now_ms();
+        if (S.imu_t0 == 0) S.imu_t0 = t;
+        if (t - S.imu_t0 >= 1000) {
+            S.imu_rate = (int)(S.imu_count * 1000 / (t - S.imu_t0));
+            S.imu_count = 0;
+            S.imu_t0 = t;
+        }
+
+        pthread_mutex_lock(&S.imu_lock);
+        S.imu_latest = s;
+        if (has_q) memcpy(S.imu_q, S.ahrs.q, sizeof S.imu_q);
+        S.imu_has_q = has_q;
+        S.imu_seq++;
+        pthread_mutex_unlock(&S.imu_lock);
+    }
+    return NULL;
+}
+
+static void imu_start(void) {
+    S.usb = uvc_get_libusb_handle(S.devh);
+    S.imu_ep_in = 0;
+    libusb_set_auto_detach_kernel_driver(S.usb, 1);
+    if (libusb_claim_interface(S.usb, XR_IMU_INTERFACE) != 0) {
+        LOGE("IMU: could not claim interface %d (camera unaffected)",
+             XR_IMU_INTERFACE);
+        return;
+    }
+    struct libusb_config_descriptor *cfg;
+    if (libusb_get_active_config_descriptor(libusb_get_device(S.usb), &cfg) == 0) {
+        for (int i = 0; i < cfg->bNumInterfaces && !S.imu_ep_in; i++) {
+            const struct libusb_interface_descriptor *alt =
+                &cfg->interface[i].altsetting[0];
+            if (alt->bInterfaceNumber != XR_IMU_INTERFACE) continue;
+            for (int e = 0; e < alt->bNumEndpoints; e++)
+                if (alt->endpoint[e].bEndpointAddress & LIBUSB_ENDPOINT_IN)
+                    S.imu_ep_in = alt->endpoint[e].bEndpointAddress;
+        }
+        libusb_free_config_descriptor(cfg);
+    }
+    if (!S.imu_ep_in) {
+        LOGE("IMU: no interrupt-in endpoint on interface %d", XR_IMU_INTERFACE);
+        libusb_release_interface(S.usb, XR_IMU_INTERFACE);
+        return;
+    }
+    xr_ahrs_init(&S.ahrs);
+    S.imu_seq = S.imu_grabbed = 0;
+    S.imu_has_q = 0;
+    S.imu_count = 0; S.imu_t0 = 0; S.imu_rate = 0;
+    imu_enable();
+    atomic_store(&S.imu_running, 1);
+    pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
+    LOGI("IMU streaming (interface %d, ep 0x%02x)", XR_IMU_INTERFACE, S.imu_ep_in);
+}
+
+static void imu_stop(void) {
+    if (atomic_load(&S.imu_running)) {
+        atomic_store(&S.imu_running, 0);
+        pthread_join(S.imu_thread, NULL);
+        libusb_release_interface(S.usb, XR_IMU_INTERFACE);
+    }
+    S.usb = NULL;
+}
+
 JNIEXPORT jint JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, jint fd) {
     (void)env; (void)cls;
@@ -177,6 +285,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
     }
     S.streaming = 1;
     LOGI("streaming started");
+    imu_start();   /* best effort — camera works without it */
     return 0;
 }
 
@@ -185,10 +294,39 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStop(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;
     if (!S.streaming) return;
     S.streaming = 0;
+    imu_stop();
     uvc_stop_streaming(S.devh);
     uvc_close(S.devh); S.devh = NULL;
     uvc_exit(S.ctx); S.ctx = NULL;
     LOGI("streaming stopped");
+}
+
+/* Copy the newest IMU state into `buf` (a direct ByteBuffer, >= 56 bytes,
+ * native byte order): u64 ts_ns | f32 gyro_dps[3] | f32 accel_g[3] |
+ * f32 quat_wxyz[4] | f32 rate_hz | u32 has_quat. Returns JNI_FALSE when
+ * nothing new arrived since the last call. */
+JNIEXPORT jboolean JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeGrabImu(JNIEnv *env, jclass cls,
+                                                       jobject buf) {
+    (void)cls;
+    uint8_t *dst = (*env)->GetDirectBufferAddress(env, buf);
+    if (!dst || (*env)->GetDirectBufferCapacity(env, buf) < 56) return JNI_FALSE;
+    jboolean fresh = JNI_FALSE;
+    pthread_mutex_lock(&S.imu_lock);
+    if (S.imu_seq != S.imu_grabbed) {
+        S.imu_grabbed = S.imu_seq;
+        float rate = S.imu_rate;
+        uint32_t has_q = (uint32_t)S.imu_has_q;
+        memcpy(dst, &S.imu_latest.ts_ns, 8);
+        memcpy(dst + 8, S.imu_latest.gyro_dps, 12);
+        memcpy(dst + 20, S.imu_latest.accel_g, 12);
+        memcpy(dst + 32, S.imu_q, 16);
+        memcpy(dst + 48, &rate, 4);
+        memcpy(dst + 52, &has_q, 4);
+        fresh = JNI_TRUE;
+    }
+    pthread_mutex_unlock(&S.imu_lock);
+    return fresh;
 }
 
 JNIEXPORT void JNICALL

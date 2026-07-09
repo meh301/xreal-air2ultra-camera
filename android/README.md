@@ -45,6 +45,11 @@ Or open `android/` in Android Studio and run — but run `fetch_deps` first.
 3. The stereo preview starts: left | right, descrambled and denoised.
    *Raw/Clean* toggles the view, *Snapshot* saves a PNG under
    `Android/data/org.air2ultra.stereocam/files/Pictures/`.
+4. Below the status line, a second line shows the live **IMU**: 1 kHz
+   gyro/accel plus yaw/pitch/roll from an on-device 6-axis Madgwick filter
+   (the glasses stream raw inertial data only). The IMU is read from HID
+   interface 2 over the same libusb handle as the camera; if claiming that
+   interface fails the camera still works.
 
 The phone must support USB host mode (any modern phone does). The glasses
 also drive the display via DisplayPort alt-mode at the same time; the camera

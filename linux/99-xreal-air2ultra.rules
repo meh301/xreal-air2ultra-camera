@@ -1,0 +1,13 @@
+# udev rules for the XREAL Air 2 Ultra (VID 3318, PID 0426)
+# Camera viewing works without this (the uvcvideo node is usually accessible
+# via the `video` group), but IMU access needs the hidraw nodes readable.
+#
+# Install:  sudo cp linux/99-xreal-air2ultra.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload && sudo udevadm trigger
+# then replug the glasses.
+
+# vendor HID interfaces (MCU control / IMU stream)
+KERNEL=="hidraw*", SUBSYSTEMS=="usb", ATTRS{idVendor}=="3318", ATTRS{idProduct}=="0426", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+
+# UVC camera (usually already handled by the video group; kept for completeness)
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="3318", ATTRS{idProduct}=="0426", TAG+="uaccess", MODE="0660", GROUP="video"

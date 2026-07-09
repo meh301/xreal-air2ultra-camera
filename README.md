@@ -39,6 +39,22 @@ latency and no sockets. `python python/xreal_fb.py --show` is a demo consumer;
 the 64-byte header layout is documented in [python/xreal_fb.py](python/xreal_fb.py).
 `--headless` runs the publisher without a window.
 
+All viewers/tools at a glance (Windows/Linux/macOS; IMU tools need
+`pip install hidapi`):
+
+```sh
+python python/preview_clean.py              # stereo camera viewer + framebuffer
+python python/preview_clean.py --headless   # framebuffer publisher only
+python python/xreal_fb.py --show            # consume the framebuffer (demo)
+python python/xreal_imu_scope.py            # IMU oscilloscope + 3D attitude
+python python/xreal_imu.py                  # 1 kHz IMU console reader
+python python/xreal_imu.py --quat           # ... with host-side quaternion
+python python/xreal_imu.py --config c.json  # dump factory VIO calibration
+python python/xreal_imu.py --info           # serial + firmware versions
+python python/xreal_cam.py 120 out/         # record 120 raw frames
+python python/xreal_uvc.py                  # scan/diagnose capture devices
+```
+
 Platform notes:
 - **Windows**: install ffmpeg (`winget install ffmpeg`). OpenCV's Windows
   backends cannot deliver this device's stream raw (measured: MSMF starts no
@@ -46,7 +62,11 @@ Platform notes:
   through ffmpeg's dshow input instead, which grabs the native pin format.
 - **Linux**: your user needs access to `/dev/video*` (usually the `video`
   group: `sudo usermod -aG video $USER`, then re-login). The glasses appear as
-  a regular `uvcvideo` device; no udev rules needed just to view.
+  a regular `uvcvideo` device; no udev rules needed just to view. **IMU access
+  needs the hidraw nodes**: install
+  [linux/99-xreal-air2ultra.rules](linux/99-xreal-air2ultra.rules)
+  (`sudo cp linux/99-xreal-air2ultra.rules /etc/udev/rules.d/ && sudo udevadm
+  control --reload && sudo udevadm trigger`, then replug).
 
 ### macOS (native tools)
 
@@ -54,10 +74,13 @@ Requirements: Xcode Command Line Tools (`xcode-select --install`).
 
 ```sh
 make
-./preview_clean
+./preview_clean          # stereo camera viewer
+./xreal_imu              # native 1 kHz IMU reader (--csv/--config/--info)
 ```
 
-macOS will ask for camera permission for your terminal on first run.
+macOS will ask for camera permission for your terminal on first run. The
+Python tools (including the IMU scope and quaternion fusion) also run on
+macOS if you prefer them.
 
 ### Android
 
@@ -72,7 +95,8 @@ cd android
 ```
 
 Install the APK, plug the glasses into the phone's USB-C port, accept the USB
-permission prompt, and the live stereo preview starts. See
+permission prompt, and the live stereo preview starts — with a live IMU
+readout (1 kHz gyro/accel + fused yaw/pitch/roll) under the status line. See
 [android/README.md](android/README.md) for details.
 
 ## Tools
@@ -88,6 +112,7 @@ permission prompt, and the live stereo preview starts. See
 | `python/xreal_ahrs.py` | Host-side 6-axis Madgwick fusion + gyro-bias capture (the glasses stream raw data only — no onboard quaternion). Also powers `xreal_imu.py --quat`. |
 | `preview_clean` (macOS) | Native Swift version of the viewer, 60 fps. Same keys and flags. |
 | `xreal_cam` (macOS) | Native Swift version of the recorder. |
+| `xreal_imu` (macOS) | Native Swift IMU reader: console, `--csv`, `--config`, `--info`. |
 | `enumerate` (macOS) | List AVFoundation cameras and the XREAL device's formats. |
 | `android/` | Android app: USB host API + libusb/libuvc, descramble + denoise in C, live side-by-side preview with snapshot. |
 | `python/process_clean.py` | Offline pipeline: `python3 python/process_clean.py <capDir> <outDir>` descrambles + cleans a recording (from either recorder) into PNGs and a side-by-side `stereo_feed.mp4`. |
@@ -111,6 +136,12 @@ permission prompt, and the live stereo preview starts. See
 - Because the YUV label is fake, some UVC stacks deliver the two bytes of each 16-bit
   pair swapped. The telemetry markers make this detectable, and all capture paths in
   this repo normalize it automatically.
+- Two **firmware telemetry dialects** exist in the wild (different layouts of the
+  metadata row — counter/camera-ID columns and timestamp fields). Both are
+  auto-detected everywhere; see PROTOCOL.md. Dialect B was observed on MCU firmware
+  `12.1.00.498_20241115`; if your unit speaks dialect A, please run
+  `python python/xreal_imu.py --info` and report your firmware version so the
+  mapping can be documented.
 
 The glasses also stream a **1 kHz IMU** over a vendor HID interface and store
 their complete factory calibration (fisheye intrinsics + camera↔IMU extrinsics

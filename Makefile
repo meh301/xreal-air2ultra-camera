@@ -6,7 +6,7 @@ endif
 
 SWIFTC = swiftc -O
 
-all: preview_clean xreal_cam enumerate
+all: preview_clean xreal_cam xreal_imu enumerate
 
 preview_clean: src/preview_clean.swift
 	$(SWIFTC) $< -o $@ -framework AVFoundation -framework AppKit
@@ -14,10 +14,13 @@ preview_clean: src/preview_clean.swift
 xreal_cam: src/xreal_cam.swift
 	$(SWIFTC) $< -o $@
 
+xreal_imu: src/xreal_imu.swift
+	$(SWIFTC) $< -o $@ -framework IOKit -framework CoreFoundation
+
 enumerate: src/enumerate.swift
 	$(SWIFTC) $< -o $@
 
 clean:
-	rm -f preview_clean xreal_cam enumerate
+	rm -f preview_clean xreal_cam xreal_imu enumerate
 
 .PHONY: all clean

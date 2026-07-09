@@ -22,9 +22,12 @@ import android.widget.Toast
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.asin
+import kotlin.math.atan2
 
 /**
  * Live stereo preview of the XREAL Air 2 Ultra tracking cameras.
@@ -46,6 +49,7 @@ class MainActivity : Activity() {
     private lateinit var usbManager: UsbManager
     private lateinit var imageView: ImageView
     private lateinit var statusView: TextView
+    private lateinit var imuStatusView: TextView
     private lateinit var toggleButton: Button
 
     private var connection: UsbDeviceConnection? = null
@@ -53,6 +57,8 @@ class MainActivity : Activity() {
     private var showClean = true
     private var bitmap: Bitmap? = null
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
+    private val imuBuffer: ByteBuffer =
+        ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
     private val handler = Handler(Looper.getMainLooper())
 
     private val pollFrame = object : Runnable {
@@ -77,8 +83,40 @@ class MainActivity : Activity() {
                     counter, fps, if (showClean) "CLEAN" else "SCRAMBLED"
                 )
             }
+            if (XrealNative.nativeGrabImu(imuBuffer)) {
+                imuBuffer.position(0)
+                val ts = imuBuffer.long
+                val g = FloatArray(3) { imuBuffer.float }
+                val a = FloatArray(3) { imuBuffer.float }
+                val q = FloatArray(4) { imuBuffer.float }
+                val rate = imuBuffer.float
+                val hasQuat = imuBuffer.int != 0
+                imuStatusView.text = if (hasQuat) {
+                    val (yaw, pitch, roll) = eulerDeg(q)
+                    String.format(
+                        Locale.US,
+                        "IMU %4.0f Hz  gyro(%+6.1f,%+6.1f,%+6.1f)deg/s  " +
+                            "acc(%+5.2f,%+5.2f,%+5.2f)g  ypr(%+5.0f,%+4.0f,%+5.0f)deg",
+                        rate, g[0], g[1], g[2], a[0], a[1], a[2], yaw, pitch, roll
+                    )
+                } else {
+                    String.format(
+                        Locale.US,
+                        "IMU %4.0f Hz  capturing gyro bias - hold still... ts=%d",
+                        rate, ts
+                    )
+                }
+            }
             if (streaming) handler.postDelayed(this, FRAME_INTERVAL_MS)
         }
+    }
+
+    private fun eulerDeg(q: FloatArray): Triple<Double, Double, Double> {
+        val (w, x, y, z) = q.map { it.toDouble() }
+        val yaw = Math.toDegrees(atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
+        val pitch = Math.toDegrees(asin((2 * (w * y - z * x)).coerceIn(-1.0, 1.0)))
+        val roll = Math.toDegrees(atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)))
+        return Triple(yaw, pitch, roll)
     }
 
     private val usbReceiver = object : BroadcastReceiver() {
@@ -111,6 +149,7 @@ class MainActivity : Activity() {
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         imageView = findViewById(R.id.preview)
         statusView = findViewById(R.id.status)
+        imuStatusView = findViewById(R.id.imu_status)
         toggleButton = findViewById(R.id.toggle)
 
         toggleButton.setOnClickListener {
