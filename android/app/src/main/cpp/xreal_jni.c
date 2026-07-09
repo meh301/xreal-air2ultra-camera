@@ -19,6 +19,7 @@
 #include <libusb.h>
 #include <libuvc/libuvc.h>
 
+#include "xreal_align.h"
 #include "xreal_core.h"
 #include "xreal_imu.h"
 
@@ -54,6 +55,16 @@ static struct {
     ANativeWindow *win;
     int win_w, win_h;
 
+    /* factory calibration blob (fetched over the IMU command channel) and
+     * the world-aligned per-eye passthrough state built from it */
+    uint8_t *config;
+    uint32_t config_len;
+    xr_eye_calib eye_calib[2];        /* [0]=left eye, [1]=right eye */
+    atomic_int align_have;            /* calibration params received */
+    atomic_int align_dirty;           /* maps need (re)building */
+    atomic_int align_variant;
+    int32_t *amap[2];                 /* per-eye sample maps, PE_W*PE_H */
+
     int fps_count;
     int64_t fps_t0;
     int fps_x10;
@@ -79,7 +90,12 @@ static struct {
     xr_imu_sample ring[1024];
     uint32_t ring_head, ring_tail;          /* head = write, tail = read */
 } S = { .show_clean = 1, .lock = PTHREAD_MUTEX_INITIALIZER,
-        .imu_lock = PTHREAD_MUTEX_INITIALIZER };
+        .imu_lock = PTHREAD_MUTEX_INITIALIZER,
+        .align_variant = XR_ALIGN_VARIANT_DEFAULT };
+
+/* aligned passthrough render size per eye (the compositor upscales; the
+ * source is only a ~350 px crop of the camera, so this loses nothing) */
+enum { PE_W = 960, PE_H = 540 };
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -114,7 +130,50 @@ static void compose(int counter) {
     }
     S.seq++;
 
-    if (S.win) {
+    if (S.win && atomic_load(&S.align_have)) {
+        /* world-aligned per-eye passthrough (VR-compositor style: one
+         * calibrated virtual display per eye) */
+        if (atomic_load(&S.align_dirty)) {
+            int variant = atomic_load(&S.align_variant);
+            for (int e = 0; e < 2; e++) {
+                if (!S.amap[e]) S.amap[e] = malloc(sizeof(int32_t) * PE_W * PE_H);
+                xr_align_build(&S.eye_calib[e], variant, PE_W, PE_H,
+                               1920, 1080, S.amap[e]);
+            }
+            atomic_store(&S.align_dirty, 0);
+            S.win_w = 0;   /* force buffer geometry update */
+            LOGI("aligned maps built (variant %d)", variant);
+        }
+        if (S.win_w != 2 * PE_W || S.win_h != PE_H) {
+            ANativeWindow_setBuffersGeometry(S.win, 2 * PE_W, PE_H,
+                                             WINDOW_FORMAT_RGBA_8888);
+            S.win_w = 2 * PE_W;
+            S.win_h = PE_H;
+        }
+        ANativeWindow_Buffer nb;
+        if (ANativeWindow_lock(S.win, &nb, NULL) == 0) {
+            int rows = PE_H < nb.height ? PE_H : nb.height;
+            int cols = PE_W < nb.width / 2 ? PE_W : nb.width / 2;
+            for (int eye = 0; eye < 2; eye++) {
+                /* left eye view samples cam1 (physical left camera) */
+                int cam = swap ? eye : 1 - eye;
+                const uint8_t *src = S.clean[cam];
+                const int32_t *map = S.amap[eye];
+                for (int y = 0; y < rows; y++) {
+                    uint8_t *dst = (uint8_t *)nb.bits +
+                                   ((size_t)y * nb.stride + eye * PE_W) * 4;
+                    const int32_t *m = map + (size_t)y * PE_W;
+                    for (int x = 0; x < cols; x++) {
+                        int32_t i = m[x];
+                        uint8_t v = i >= 0 ? src[i] : 0;
+                        dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 0xFF;
+                        dst += 4;
+                    }
+                }
+            }
+            ANativeWindow_unlockAndPost(S.win);
+        }
+    } else if (S.win) {
         if (S.win_w != S.cw || S.win_h != S.ch) {
             ANativeWindow_setBuffersGeometry(S.win, S.cw, S.ch,
                                              WINDOW_FORMAT_RGBA_8888);
@@ -174,6 +233,71 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
 }
 
 /* ---- IMU: enable + drain thread --------------------------------------------- */
+
+static int imu_send_cmd(uint8_t cmd, const uint8_t *data, size_t n) {
+    uint8_t pkt[XR_IMU_CMD_LEN];
+    xr_imu_command(pkt, cmd, data, n);
+    if (S.imu_ep_out) {
+        int sent = 0;
+        return libusb_interrupt_transfer(S.usb, S.imu_ep_out, pkt,
+                                         XR_IMU_CMD_LEN, &sent, 1000);
+    }
+    return libusb_control_transfer(S.usb, 0x21, 0x09, 0x0200, XR_IMU_INTERFACE,
+                                   pkt, XR_IMU_CMD_LEN, 1000);
+}
+
+/* One synchronous command/reply on the IMU channel (stream must be quiet or
+ * merely interleaved - stream reports are skipped). Returns the payload
+ * length, or -1. */
+static int imu_cmd_sync(uint8_t cmd, const uint8_t *data, size_t n,
+                        uint8_t *reply, size_t cap) {
+    if (imu_send_cmd(cmd, data, n) < 0) return -1;
+    uint8_t buf[XR_IMU_REPORT];
+    for (int tries = 0; tries < 100; tries++) {
+        int got = 0;
+        int rc = libusb_interrupt_transfer(S.usb, S.imu_ep_in, buf, sizeof buf,
+                                           &got, 300);
+        if (rc == LIBUSB_ERROR_TIMEOUT) return -1;
+        if (rc < 0 || got < 8) continue;
+        if (buf[0] != 0xAA || buf[7] != cmd) continue;   /* stream/other */
+        int len = (buf[5] | buf[6] << 8) - 3;
+        if (len < 0) len = 0;
+        if ((size_t)len > cap) len = (int)cap;
+        if (len > got - 8) len = got - 8;
+        memcpy(reply, buf + 8, (size_t)len);
+        return len;
+    }
+    return -1;
+}
+
+/* Fetch the factory calibration JSON (cmds 0x14/0x15) while the stream is
+ * off; it powers the world-aligned passthrough. Failure is non-fatal. */
+static void imu_fetch_config(void) {
+    free(S.config);
+    S.config = NULL;
+    S.config_len = 0;
+    uint8_t r[XR_IMU_REPORT];
+    if (imu_cmd_sync(0x14, NULL, 0, r, sizeof r) < 4) {
+        LOGE("calibration: length query failed (aligned passthrough off)");
+        return;
+    }
+    uint32_t total = (uint32_t)r[0] | (uint32_t)r[1] << 8 |
+                     (uint32_t)r[2] << 16 | (uint32_t)r[3] << 24;
+    if (total == 0 || total > 1 << 20) return;
+    uint8_t *cfg = malloc(total);
+    uint32_t got = 0;
+    while (got < total) {
+        int pl = imu_cmd_sync(0x15, NULL, 0, r, sizeof r);
+        if (pl <= 0) { free(cfg); LOGE("calibration: read stalled at %u/%u",
+                                       got, total); return; }
+        if ((uint32_t)pl > total - got) pl = (int)(total - got);
+        memcpy(cfg + got, r, (size_t)pl);
+        got += (uint32_t)pl;
+    }
+    S.config = cfg;
+    S.config_len = total;
+    LOGI("calibration fetched: %u bytes", total);
+}
 
 static int imu_enable(void) {
     uint8_t cmd[XR_IMU_CMD_LEN], on = 1;
@@ -278,6 +402,11 @@ static void imu_start(void) {
         libusb_release_interface(S.usb, XR_IMU_INTERFACE);
         return;
     }
+    /* quiet the channel, pull the factory calibration, then start streaming */
+    uint8_t off = 0;
+    imu_cmd_sync(0x19, &off, 1, (uint8_t[8]){0}, 8);
+    imu_fetch_config();
+
     xr_ahrs_init(&S.ahrs);
     S.imu_seq = S.imu_grabbed = 0;
     S.imu_has_q = 0;
@@ -445,6 +574,51 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetSwap(JNIEnv *env, jclass cls,
                                                        jboolean swap) {
     (void)env; (void)cls;
     atomic_store(&S.swap_eyes, swap ? 1 : 0);
+}
+
+/* The factory calibration JSON fetched at start, or null. */
+JNIEXPORT jbyteArray JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeGetConfig(JNIEnv *env, jclass cls) {
+    (void)cls;
+    if (!S.config || !S.config_len) return NULL;
+    jbyteArray out = (*env)->NewByteArray(env, (jsize)S.config_len);
+    if (out)
+        (*env)->SetByteArrayRegion(env, out, 0, (jsize)S.config_len,
+                                   (const jbyte *)S.config);
+    return out;
+}
+
+/* 66 floats: per eye (left, then right): K[9], q_display[4], q_cam[4],
+ * fc[2], cc[2], kc[12]. Enables the world-aligned passthrough. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass cls,
+                                                            jfloatArray arr) {
+    (void)cls;
+    if ((*env)->GetArrayLength(env, arr) < 66) return;
+    float f[66];
+    (*env)->GetFloatArrayRegion(env, arr, 0, 66, f);
+    for (int e = 0; e < 2; e++) {
+        const float *p = f + e * 33;
+        xr_eye_calib *c = &S.eye_calib[e];
+        memcpy(c->K, p, 9 * sizeof(float));
+        memcpy(c->q_disp, p + 9, 4 * sizeof(float));
+        memcpy(c->q_cam, p + 13, 4 * sizeof(float));
+        memcpy(c->fc, p + 17, 2 * sizeof(float));
+        memcpy(c->cc, p + 19, 2 * sizeof(float));
+        memcpy(c->kc, p + 21, 12 * sizeof(float));
+    }
+    atomic_store(&S.align_dirty, 1);
+    atomic_store(&S.align_have, 1);
+    LOGI("alignment calibration set");
+}
+
+/* Cycle the rotation-convention variant (0..3) for on-device calibration. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignVariant(JNIEnv *env, jclass cls,
+                                                               jint variant) {
+    (void)env; (void)cls;
+    atomic_store(&S.align_variant, variant & 3);
+    atomic_store(&S.align_dirty, 1);
 }
 
 /* Attach/detach the glasses' Surface; composed frames are then presented

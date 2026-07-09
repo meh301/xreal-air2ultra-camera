@@ -234,6 +234,9 @@ def main():
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("x"):
                     swap = not swap
+                elif key == ord("v") and aligner:
+                    aligner.set_variant(aligner.variant + 1)
+                    print(f"alignment variant -> {aligner.variant}")
                 elif key == ord("r"):
                     rot = (rot + 1) % 4
                 elif key == ord("m"):

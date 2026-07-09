@@ -108,6 +108,8 @@ class MainActivity : Activity() {
     private lateinit var displayManager: DisplayManager
     private var lastFrameAt = 0L        // watchdog: last time a frame arrived
     private var lastReconnectAt = 0L
+    private var alignReady = false
+    private var alignVariant = 3        // XR_ALIGN_VARIANT_DEFAULT
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
     private val imuBatch: ByteBuffer =                 // 256 samples x 32 B
         ByteBuffer.allocateDirect(256 * 32).order(ByteOrder.nativeOrder())
@@ -152,7 +154,11 @@ class MainActivity : Activity() {
                 statusView.text = getString(
                     R.string.status_streaming,
                     counter, fps, if (showClean) "CLEAN" else "SCRAMBLED"
-                ) + if (presentation != null) "  [glasses]" else "  [no ext display]"
+                ) + when {
+                    presentation == null -> "  [no ext display]"
+                    alignReady -> "  [glasses cal:$alignVariant]"
+                    else -> "  [glasses]"
+                }
             }
             val n = XrealNative.nativeGrabImuBatch(imuBatch)
             if (n > 0) {
@@ -257,6 +263,15 @@ class MainActivity : Activity() {
             XrealNative.nativeSetSwap(swapEyes)   // phone view, glasses, snapshots
         }
 
+        // tapping the status line cycles the alignment rotation-convention
+        // variant (0..3) — pick the one where the passthrough lines up
+        statusView.setOnClickListener {
+            if (alignReady) {
+                alignVariant = (alignVariant + 1) % 4
+                XrealNative.nativeSetAlignVariant(alignVariant)
+            }
+        }
+
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         displayManager.registerDisplayListener(displayListener, handler)
         updatePresentation()
@@ -345,7 +360,41 @@ class MainActivity : Activity() {
         streaming = true
         lastFrameAt = System.currentTimeMillis()   // arm the watchdog from start
         statusView.text = getString(R.string.status_starting)
+        setupAlignment()
         handler.post(pollFrame)
+    }
+
+    /** Parse the on-device factory calibration and enable the world-aligned
+     * per-eye passthrough (each eye is its own calibrated virtual display). */
+    private fun setupAlignment() {
+        alignReady = false
+        val raw = XrealNative.nativeGetConfig() ?: return
+        try {
+            val cfg = org.json.JSONObject(String(raw))
+            val disp = cfg.getJSONObject("display")
+            val cams = cfg.getJSONObject("SLAM_camera")
+            val params = FloatArray(66)
+            var o = 0
+            for (eye in arrayOf("left", "right")) {
+                // left eye pairs with device_1 (= cam1, the left camera)
+                val cam = cams.getJSONObject(if (eye == "left") "device_1" else "device_2")
+                for (arr in arrayOf(disp.getJSONArray("k_${eye}_display"),
+                                    disp.getJSONArray("target_q_${eye}_display"),
+                                    cam.getJSONArray("imu_q_cam"),
+                                    cam.getJSONArray("fc"),
+                                    cam.getJSONArray("cc"),
+                                    cam.getJSONArray("kc"))) {
+                    for (i in 0 until arr.length()) params[o++] = arr.getDouble(i).toFloat()
+                }
+            }
+            if (o != 66) throw IllegalStateException("unexpected calibration shape ($o)")
+            XrealNative.nativeSetAlignment(params)
+            XrealNative.nativeSetAlignVariant(alignVariant)
+            alignReady = true
+            android.util.Log.i("xrealcam", "world-aligned passthrough enabled")
+        } catch (e: Exception) {
+            android.util.Log.e("xrealcam", "calibration parse failed: $e")
+        }
     }
 
     private fun stopStreaming() {

@@ -37,6 +37,19 @@ object XrealNative {
      */
     external fun nativeSetSurface(surface: Surface?)
 
+    /** The factory calibration JSON fetched from the glasses, or null. */
+    external fun nativeGetConfig(): ByteArray?
+
+    /**
+     * Enable the world-aligned per-eye passthrough. 66 floats — per eye
+     * (left, then right): display K[9], display quaternion[4], camera
+     * quaternion[4], fc[2], cc[2], kc[12], all from the calibration JSON.
+     */
+    external fun nativeSetAlignment(params: FloatArray)
+
+    /** Cycle the rotation-convention variant (0..3) used by the alignment. */
+    external fun nativeSetAlignVariant(variant: Int)
+
     /**
      * Copy the newest composed side-by-side RGBA frame into [buf] (a direct
      * ByteBuffer, capacity >= 1280*640*4). Returns 0 when there is no new

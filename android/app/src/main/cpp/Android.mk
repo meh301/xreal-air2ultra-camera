@@ -41,7 +41,7 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 LOCAL_PATH := $(XREAL_LOCAL_PATH)
 LOCAL_MODULE := xrealcam
-LOCAL_SRC_FILES := xreal_core.c xreal_imu.c xreal_jni.c
+LOCAL_SRC_FILES := xreal_align.c xreal_core.c xreal_imu.c xreal_jni.c
 LOCAL_STATIC_LIBRARIES := uvc
 LOCAL_SHARED_LIBRARIES := libusb1.0
 LOCAL_CFLAGS := -O2 -std=c11 -Wall

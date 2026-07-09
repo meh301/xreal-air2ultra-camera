@@ -30,13 +30,18 @@ import cv2
 import numpy as np
 
 
-def quat_to_rot(q, jpl=True):
-    """3x3 rotation matrix from a quaternion given as [x, y, z, w]."""
+def quat_to_rot(q, conj=True):
+    """3x3 rotation matrix from a quaternion given as [x, y, z, w].
+
+    conj flips the vector part - JPL and Hamilton conventions differ exactly
+    by this, which is what the runtime "variant" cycling toggles per
+    quaternion (variant 3 = both conjugated = the JPL reading, expected
+    correct for this calibration).
+    """
     x, y, z, w = q
     n = (x * x + y * y + z * z + w * w) ** 0.5
     x, y, z, w = x / n, y / n, z / n, w / n
-    if jpl:
-        # JPL and Hamilton differ by conjugation of the vector part
+    if conj:
         x, y, z = -x, -y, -z
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
@@ -74,7 +79,7 @@ def fisheye624_project(pts, fc, cc, kc):
     return np.stack([u, v], axis=1)
 
 
-def build_eye_maps(calib, eye, out_size, depth=np.inf):
+def build_eye_maps(calib, eye, out_size, depth=np.inf, variant=3):
     """cv2.remap maps for one eye.
 
     calib: parsed calibration JSON. eye: 'left'/'right'. out_size: (w, h) of
@@ -86,9 +91,9 @@ def build_eye_maps(calib, eye, out_size, depth=np.inf):
     disp = calib["display"]
     cam = calib["SLAM_camera"]["device_1" if eye == "left" else "device_2"]
     K = np.array(disp[f"k_{eye}_display"], float).reshape(3, 3)
-    R_imu_disp = quat_to_rot(disp[f"target_q_{eye}_display"])
+    R_imu_disp = quat_to_rot(disp[f"target_q_{eye}_display"], conj=bool(variant & 1))
     p_imu_disp = np.array(disp[f"target_p_{eye}_display"], float)
-    R_imu_cam = quat_to_rot(cam["imu_q_cam"])
+    R_imu_cam = quat_to_rot(cam["imu_q_cam"], conj=bool(variant >> 1 & 1))
     p_imu_cam = np.array(cam["imu_p_cam"], float)
 
     w, h = out_size
@@ -124,12 +129,23 @@ def load_calib(path):
 class Aligner:
     """Precomputed 1:1 warp for both eyes; call with the two cleaned images."""
 
-    def __init__(self, calib_path, half_size=(960, 1080), depth=np.inf):
-        calib = load_calib(calib_path)
+    def __init__(self, calib_path, half_size=(960, 1080), depth=np.inf,
+                 variant=3):
+        self._calib = load_calib(calib_path)
+        self._half_size, self._depth = half_size, depth
+        self.variant = variant
+        self._build()
+
+    def _build(self):
         self.maps = {
-            "left": build_eye_maps(calib, "left", half_size, depth),
-            "right": build_eye_maps(calib, "right", half_size, depth),
+            eye: build_eye_maps(self._calib, eye, self._half_size,
+                                self._depth, self.variant)
+            for eye in ("left", "right")
         }
+
+    def set_variant(self, variant):
+        self.variant = variant & 3
+        self._build()
 
     def warp(self, img_cam1_left, img_cam0_right):
         """(left_view, right_view) for the two descrambled 480x640 images."""
