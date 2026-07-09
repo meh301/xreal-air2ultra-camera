@@ -23,6 +23,9 @@
 #ifndef EGL_SINGLE_BUFFER
 #define EGL_SINGLE_BUFFER 0x3085
 #endif
+#ifndef EGL_FRONT_BUFFER_AUTO_REFRESH_ANDROID
+#define EGL_FRONT_BUFFER_AUTO_REFRESH_ANDROID 0x314C
+#endif
 
 enum { GRID_X = 64, GRID_Y = 36 };                 /* distortion mesh cells */
 enum { VERTS = (GRID_X + 1) * (GRID_Y + 1), IDX = GRID_X * GRID_Y * 6 };
@@ -40,6 +43,10 @@ static struct {
     xr_eye_calib eyes_calib[2];
     int calib_variant;
     int calib_staged;
+    int calib_valid;     /* calibration persists: meshes (re)build whenever a
+                            surface exists — the surface often arrives AFTER
+                            the calibration (the 3D-mode switch creates the
+                            presentation display) */
     uint8_t eye_img[2][XR_OW * XR_OH];
     uint8_t *pair_img;                              /* MAX pair RGBA */
     int pair_w, pair_h;
@@ -242,9 +249,21 @@ static int egl_bind_window(ANativeWindow *win) {
     }
     eglSwapInterval(G.dpy, 0);
 
+    /* Front-buffer mode needs BOTH extensions: mutable_render_buffer to
+     * switch the surface, and front_buffer_auto_refresh so the compositor
+     * keeps scanning the shared buffer (without it exactly one frame shows
+     * and the layer freezes). The mode change latches on the next
+     * eglSwapBuffers; afterwards frames are just flushed. */
     G.single_buffer = 0;
-    if (mutable_rb &&
-        eglSurfaceAttrib(G.dpy, G.surf, EGL_RENDER_BUFFER, EGL_SINGLE_BUFFER)) {
+    int auto_refresh = exts &&
+        strstr(exts, "EGL_ANDROID_front_buffer_auto_refresh") != NULL;
+    if (mutable_rb && auto_refresh &&
+        eglSurfaceAttrib(G.dpy, G.surf, EGL_RENDER_BUFFER, EGL_SINGLE_BUFFER) &&
+        eglSurfaceAttrib(G.dpy, G.surf, EGL_FRONT_BUFFER_AUTO_REFRESH_ANDROID,
+                         EGL_TRUE)) {
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        eglSwapBuffers(G.dpy, G.surf);          /* latch single-buffer mode */
         EGLint rb = 0;
         eglQuerySurface(G.dpy, G.surf, EGL_RENDER_BUFFER, &rb);
         G.single_buffer = rb == EGL_SINGLE_BUFFER;
@@ -267,7 +286,7 @@ static void render_frame(int mode) {
     glActiveTexture(GL_TEXTURE0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, G.ibo);
 
-    if (mode == MODE_EYES && G.mesh_ready) {
+    if (mode == MODE_EYES) {
         for (int e = 0; e < 2; e++) {
             glBindTexture(GL_TEXTURE_2D, G.tex_eye[e]);
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, XR_OW, XR_OH,
@@ -303,8 +322,8 @@ static void render_frame(int mode) {
         glEnableVertexAttribArray((GLuint)G.loc_uv);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
-    eglSwapBuffers(G.dpy, G.surf);   /* single-buffer: acts as a flush */
-    if (G.single_buffer) glFinish();
+    if (G.single_buffer) glFlush();          /* front buffer: no swap needed */
+    else eglSwapBuffers(G.dpy, G.surf);
 }
 
 static void *render_thread(void *arg) {
@@ -322,8 +341,11 @@ static void *render_thread(void *arg) {
             G.pending_win = NULL;
             G.win_changed = 0;
         }
-        int rebuild = G.calib_staged;
-        G.calib_staged = 0;
+        if (G.calib_staged) {
+            G.calib_staged = 0;
+            G.calib_valid = 1;
+            G.mesh_ready = 0;                 /* (re)build below */
+        }
         int mode = G.frame_mode;
         uint32_t seq = G.frame_seq;
         int64_t submitted = G.submit_ms;
@@ -336,10 +358,16 @@ static void *render_thread(void *arg) {
                 ANativeWindow_release(new_win);
             }
         }
-        if (rebuild && G.surf != EGL_NO_SURFACE) build_meshes();
-        else if (rebuild) G.mesh_ready = 0;   /* build after surface arrives */
+        /* meshes need both a GL surface and the calibration, which arrive in
+         * either order (the 3D-mode switch creates the display late) */
+        if (G.surf != EGL_NO_SURFACE && G.calib_valid && !G.mesh_ready)
+            build_meshes();
 
-        if (seq != done_seq && G.surf != EGL_NO_SURFACE && mode != MODE_NONE) {
+        if (mode == MODE_EYES && !G.mesh_ready) {
+            done_seq = seq;                    /* nothing to draw with yet */
+        } else if (mode == MODE_PAIR && G.pair_w <= 0) {
+            done_seq = seq;
+        } else if (seq != done_seq && G.surf != EGL_NO_SURFACE && mode != MODE_NONE) {
             int64_t t0 = now_ms64();
             render_frame(mode);
             int64_t t1 = now_ms64();
