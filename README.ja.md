@@ -83,6 +83,7 @@ APKをインストールし、グラスをスマホのUSB-Cポートに接続し
 | `python/xreal_cam.py` | クロスプラットフォームのレコーダー: `python xreal_cam.py <フレーム数> <出力dir>` で生の `cam0_*.pgm` / `cam1_*.pgm`(スクランブルされたまま)と `meta.csv` を保存。macOS版レコーダーと同一形式。 |
 | `python/xreal_uvc.py` | 上記2ツールが使うキャプチャモジュール(バックエンド探索、ffmpegフォールバック、テレメトリによる自動検出、バイト順補正)。直接実行するとXREALストリームをスキャン。 |
 | `python/xreal_fb.py` | 共有メモリフレームバッファ: レイアウト定義、Writer/Readerクラス、デモコンシューマ(`python xreal_fb.py --show`)。 |
+| `python/xreal_imu.py` | **1kHz IMUリーダー**(要 `pip install hidapi`): ライブ表示、`--csv` ログ、`--fb` 共有メモリリング、`--config calib.json` でデバイス内の工場キャリブレーション(IMUバイアス/ノイズ+両トラッキングカメラの魚眼内部パラメータとカメラ↔IMU外部パラメータ — VIOに必要な全て)をダンプ。 |
 | `preview_clean` (macOS) | ビューアのネイティブSwift版、60fps。キー・フラグは共通。 |
 | `xreal_cam` (macOS) | レコーダーのネイティブSwift版。 |
 | `enumerate` (macOS) | AVFoundationのカメラ一覧とXREALデバイスのフォーマットを表示。 |
@@ -105,8 +106,14 @@ APKをインストールし、グラスをスマホのUSB-Cポートに接続し
 - YUVラベルが偽物なので、UVCスタックによっては16bitペアの2バイトが入れ替わって届きます。
   テレメトリのマーカーでこれを検出でき、本リポジトリの全キャプチャ経路が自動補正します。
 
+グラスはベンダーHIDインターフェース経由で**1kHzのIMU**もストリームしており、
+工場キャリブレーション一式(両トラッキングカメラの魚眼内部パラメータと
+カメラ↔IMU外部パラメータ、IMUバイアス・ノイズ密度)をJSONとしてデバイス内に
+保持しています — どちらも `python/xreal_imu.py` で読み出せます。
+
 プロトコルの詳細(USBレイアウト、テレメトリ行のマップ、スクランブルアルゴリズム、
-UVC露出コントロール、ベンダーHIDプロトコル、OS別キャプチャノート): **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
+IMUパケットフォーマットとキャリブレーションブロブ、UVC露出コントロール、
+ベンダーHIDプロトコル、OS別キャプチャノート): **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
 
 ## クレジット
 

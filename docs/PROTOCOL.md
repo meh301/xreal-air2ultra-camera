@@ -143,9 +143,69 @@ Packet format (64 bytes, `IOHIDDeviceSetReport` Output, report ID 0), per
 ```
 
 Validated on-device: cmd `0x15` returns the internal serial number; cmd `0x19` with
-data `01` enables the IMU stream (ack `0x04`). The IMU channel (interface 2) uses a
-different header (`0xAA`, request_id `0x0437`). Tools: `research/hid_cmd.swift`,
+data `01` enables the IMU stream (ack `0x04`). Tools: `research/hid_cmd.swift`,
 `research/hid_read.swift`, `research/cam_probe.swift`.
+
+## IMU stream (vendor HID interface 2)
+
+Fully decoded and validated on-device (`python/xreal_imu.py`; framing per
+[badicsalex/ar-drivers-rs](https://github.com/badicsalex/ar-drivers-rs)).
+Interface 2 speaks a shorter sibling of the `0xFD` protocol:
+
+```
+[0]     0xAA
+[1..5]  CRC32 (zlib, little-endian) over bytes [5 .. 5+length]
+[5..7]  length = data.len + 3
+[7]     cmd_id
+[8..]   data
+```
+
+| cmd | Meaning |
+|-----|---------|
+| `0x19` data `01`/`00` | IMU stream on / off (reply data `00`) |
+| `0x14` | u32 byte length of the **factory calibration JSON** |
+| `0x15` | next chunk of that JSON |
+
+With the stream on, 512-byte input reports arrive at **1000 Hz** (measured
+1000.0 Hz, no drops):
+
+| bytes | Content |
+|-------|---------|
+| 0–1 | signature `01 02` |
+| 2–3 | u16 temperature, raw (~1080 warm; scale unverified) |
+| 4–11 | u64 timestamp [ns] |
+| 12–13, 14–17 | u16 multiplier, u32 divisor for the gyro |
+| 18–26 | 3 × i24 gyro x,y,z — `raw*mul/div` = deg/s |
+| 27–28, 29–32 | u16 multiplier, u32 divisor for the accelerometer |
+| 33–41 | 3 × i24 accel x,y,z — `raw*mul/div` = g |
+| 42–47 | u16 mul + u32 div for the magnetometer |
+| 48–53 | 3 × i16 mag x,y,z — **read 0 on the tested unit** |
+| 54–57 | u32 secondary counter, 976,562 ns/tick = the sensor's internal 1024 Hz ODR |
+| 58– | zero padding |
+
+Values are in the raw sensor frame (at rest: \|accel\| = 1.010 g, gyro bias
+≈ (−1.0, −0.5, 0.0) deg/s on the tested unit). ar-drivers-rs maps to its
+world convention as `(-x, z, y)` and subtracts the config biases.
+
+### Factory calibration JSON
+
+The `0x14`/`0x15` blob (~55 kB) is the complete VIO calibration set,
+written at the factory:
+
+- `IMU.device_1`: `accel_bias`, `gyro_bias` (+ a per-temperature bias table),
+  `imu_noises` = [gyro noise, gyro walk, accel noise, accel walk],
+  `accel_q_gyro`, `gyro_q_mag` (JPL quaternions).
+- `SLAM_camera.device_1/device_2`: **both tracking cameras**, `camera_model:
+  fisheye624`, `fc`/`cc`/`kc` intrinsics at `resolution [480, 640]` (exactly
+  the descrambled output of this repo), and `imu_p_cam`/`imu_q_cam`
+  camera↔IMU extrinsics (translation [m] + JPL quaternion). The two camera
+  positions imply a ~13.7 cm stereo baseline.
+- `display`: per-eye virtual-display intrinsics + pose, and a
+  `display_distortion` mesh.
+- `RGB_camera.num_of_cameras = 0` (no RGB camera on the Ultra).
+
+`python python/xreal_imu.py --config calib.json` dumps it. Note it contains
+the device serial (`FSN`).
 
 ## Capturing on other platforms
 
@@ -182,7 +242,12 @@ getting the **untouched bytes** out, because the nominal `640×241 @ 60 fps`
 ## Open questions
 
 - Extension Unit 4 selectors (sensor/IR-strobe/SLAM-mode configuration).
-- Driving the IMU stream and fusing it with the stereo feed (VIO/SLAM).
+- Fusing IMU + stereo into VIO/SLAM — all raw ingredients are now available
+  (1 kHz IMU, ~30 Hz stereo pairs, factory intrinsics/extrinsics/noise
+  parameters).
+- Why the magnetometer fields read zero (no sensor populated, or needs an
+  enable command?).
+- The exact scale of the IMU temperature field.
 - Purpose of the block scrambling (DMA artifact vs. light obfuscation) — unknown.
 - Whether any UVC stack in the wild actually delivers the byte-swapped order
   (macOS delivers `2vuy` as-is; the detection exists because it costs nothing

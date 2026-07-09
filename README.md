@@ -83,6 +83,7 @@ permission prompt, and the live stereo preview starts. See
 | `python/xreal_cam.py` | Cross-platform recorder: `python xreal_cam.py <numFrames> <outDir>` writes raw `cam0_*.pgm` / `cam1_*.pgm` (still scrambled) plus `meta.csv`. Output is identical to the macOS recorder. |
 | `python/xreal_uvc.py` | Capture module used by the two tools (backend scan, ffmpeg fallback, telemetry fingerprint, byte-order fix). Run directly to scan for the XREAL stream. |
 | `python/xreal_fb.py` | Shared-memory framebuffer: layout definition, writer/reader classes, and a demo consumer (`python xreal_fb.py --show`). |
+| `python/xreal_imu.py` | **1 kHz IMU reader** (needs `pip install hidapi`): live console output, `--csv` logging, `--fb` shared-memory ring, and `--config calib.json` to dump the on-device factory calibration (IMU biases/noises + fisheye intrinsics and camera↔IMU extrinsics of both tracking cameras — everything VIO needs). |
 | `preview_clean` (macOS) | Native Swift version of the viewer, 60 fps. Same keys and flags. |
 | `xreal_cam` (macOS) | Native Swift version of the recorder. |
 | `enumerate` (macOS) | List AVFoundation cameras and the XREAL device's formats. |
@@ -109,8 +110,14 @@ permission prompt, and the live stereo preview starts. See
   pair swapped. The telemetry markers make this detectable, and all capture paths in
   this repo normalize it automatically.
 
-Full protocol notes (USB layout, telemetry row map, scramble algorithm, UVC exposure
-controls, vendor HID protocol, per-OS capture notes): **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
+The glasses also stream a **1 kHz IMU** over a vendor HID interface and store
+their complete factory calibration (fisheye intrinsics + camera↔IMU extrinsics
+for both tracking cameras, IMU biases and noise densities) as JSON on the
+device — `python/xreal_imu.py` reads both.
+
+Full protocol notes (USB layout, telemetry row map, scramble algorithm, IMU
+packet format and calibration blob, UVC exposure controls, vendor HID protocol,
+per-OS capture notes): **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
 
 ## Credits
 
