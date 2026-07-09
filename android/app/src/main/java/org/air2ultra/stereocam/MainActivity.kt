@@ -1,8 +1,10 @@
 package org.air2ultra.stereocam
 
+import android.Manifest
 import android.app.Activity
 import android.app.PendingIntent
 import android.app.Presentation
+import android.content.pm.PackageManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -95,6 +97,11 @@ class MainActivity : Activity() {
         const val XREAL_PID = 0x0426
         const val ACTION_USB_PERMISSION = "org.air2ultra.stereocam.USB_PERMISSION"
         const val FRAME_INTERVAL_MS = 33L
+        const val REQ_RUNTIME_PERMS = 1
+        // Android 10+ refuses the USB grant for a device containing a camera
+        // and microphones unless the app holds these runtime permissions
+        val RUNTIME_PERMS = arrayOf(Manifest.permission.CAMERA,
+                                    Manifest.permission.RECORD_AUDIO)
     }
 
     private lateinit var usbManager: UsbManager
@@ -273,10 +280,30 @@ class MainActivity : Activity() {
         connectToGlasses(intent) // plugged in while the app was already open
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int,
+                                            permissions: Array<out String>,
+                                            grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_RUNTIME_PERMS) return
+        if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+            connectToGlasses(null)
+        } else {
+            statusView.text = getString(R.string.status_permissions_denied)
+        }
+    }
+
     private fun isXreal(d: UsbDevice) = d.vendorId == XREAL_VID && d.productId == XREAL_PID
 
     private fun connectToGlasses(intent: Intent?) {
         if (streaming) return
+        val missing = RUNTIME_PERMS.filter {
+            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            statusView.text = getString(R.string.status_need_permissions)
+            requestPermissions(missing.toTypedArray(), REQ_RUNTIME_PERMS)
+            return   // continues from onRequestPermissionsResult
+        }
         // launched by the USB_DEVICE_ATTACHED intent filter? then permission
         // is already implicitly granted
         val fromIntent: UsbDevice? = intent?.getParcelableExtra(UsbManager.EXTRA_DEVICE)

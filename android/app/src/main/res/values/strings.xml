@@ -2,6 +2,8 @@
 <resources>
     <string name="app_name">XREAL Stereo Cam</string>
     <string name="status_plug_in">Plug the XREAL Air 2 Ultra into the USB-C port…</string>
+    <string name="status_need_permissions">Grant camera &amp; microphone access — Android requires them to open a USB device that contains a camera and mics.</string>
+    <string name="status_permissions_denied">Camera/microphone permission denied — Android will not grant USB access to the glasses without them (Settings → Apps → XREAL Stereo Cam → Permissions).</string>
     <string name="status_waiting_permission">Waiting for USB permission…</string>
     <string name="status_permission_denied">USB permission denied — replug or restart the app.</string>
     <string name="status_open_failed">Could not open the USB device.</string>

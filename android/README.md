@@ -40,8 +40,12 @@ Or open `android/` in Android Studio and run — but run `fetch_deps` first.
 
 1. Install the APK (`adb install app/build/outputs/apk/debug/app-debug.apk`).
 2. Plug the glasses into the phone's USB-C port. The app offers to open (or
-   auto-opens) via the `USB_DEVICE_ATTACHED` filter; accept the USB permission
-   prompt if one appears.
+   auto-opens) via the `USB_DEVICE_ATTACHED` filter. **Grant the camera and
+   microphone prompts** — the glasses are a composite USB device containing a
+   UVC camera and microphones, and Android 10+ refuses USB access to such a
+   device unless the app holds those runtime permissions (nothing is captured
+   through Android's own camera/audio APIs). Then accept the USB permission
+   dialog if one appears.
 3. The portrait test screen fills up:
    - **top half** — the live stereo pair (left | right), descrambled and
      denoised. *Raw/Clean* toggles the view, *Snapshot* saves a PNG under
