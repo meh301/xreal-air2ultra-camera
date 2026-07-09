@@ -55,10 +55,10 @@
             android:text="@string/show_raw" />
 
         <Button
-            android:id="@+id/swap"
+            android:id="@+id/view_mode"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/swap_eyes" />
+            android:text="@string/mode_sbs" />
 
         <Button
             android:id="@+id/snapshot"

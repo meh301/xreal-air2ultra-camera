@@ -102,7 +102,7 @@ class MainActivity : Activity() {
     private var connection: UsbDeviceConnection? = null
     private var streaming = false
     private var showClean = true
-    private var swapEyes = false
+    private var stereoMode = true       // stereo+aligned vs plain SBS mirror
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
@@ -156,8 +156,9 @@ class MainActivity : Activity() {
                     counter, fps, if (showClean) "CLEAN" else "SCRAMBLED"
                 ) + when {
                     presentation == null -> "  [no ext display]"
-                    alignReady -> "  [glasses cal:$alignVariant]"
-                    else -> "  [glasses]"
+                    !stereoMode -> "  [glasses sbs]"
+                    alignReady -> "  [glasses stereo cal:$alignVariant]"
+                    else -> "  [glasses stereo uncal]"
                 }
             }
             val n = XrealNative.nativeGrabImuBatch(imuBatch)
@@ -258,9 +259,14 @@ class MainActivity : Activity() {
                 getString(if (showClean) R.string.show_raw else R.string.show_clean)
         }
         findViewById<Button>(R.id.snapshot).setOnClickListener { saveSnapshot() }
-        findViewById<Button>(R.id.swap).setOnClickListener {
-            swapEyes = !swapEyes
-            XrealNative.nativeSetSwap(swapEyes)   // phone view, glasses, snapshots
+        val modeButton = findViewById<Button>(R.id.view_mode)
+        modeButton.setOnClickListener {
+            // Stereo = glasses in per-eye SBS display mode + calibrated
+            // world-aligned warp; SBS = mirror display mode, raw framebuffer
+            stereoMode = !stereoMode
+            XrealNative.nativeSetStereoMode(stereoMode)
+            modeButton.text =
+                getString(if (stereoMode) R.string.mode_sbs else R.string.mode_stereo)
         }
 
         // tapping the status line cycles the alignment rotation-convention

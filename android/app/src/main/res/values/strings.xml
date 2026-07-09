@@ -13,7 +13,9 @@
     <string name="status_unplugged">Glasses unplugged.</string>
     <string name="show_raw">Raw</string>
     <string name="show_clean">Clean</string>
-    <string name="swap_eyes">Swap L/R</string>
+    <!-- the mode button shows the mode you switch TO, like the Raw/Clean one -->
+    <string name="mode_sbs">SBS</string>
+    <string name="mode_stereo">Stereo</string>
     <string name="snapshot">Snapshot</string>
     <string name="status_reconnecting">Stream stalled — reconnecting…</string>
     <string name="snapshot_saved">Snapshot saved: %1$s</string>

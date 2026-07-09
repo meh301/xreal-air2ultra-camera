@@ -71,6 +71,8 @@ static struct {
 
     atomic_int mirror;          /* horizontal per-eye flip of the composed view */
     atomic_int swap_eyes;       /* swap the two panes (debug) */
+    atomic_int stereo_mode;     /* 1: per-eye stereo display + aligned warp;
+                                   0: mirror display + plain framebuffer */
 
     /* IMU (HID interface 2 over the same libusb handle) */
     libusb_device_handle *usb;
@@ -95,7 +97,8 @@ static struct {
     uint32_t ring_head, ring_tail;          /* head = write, tail = read */
 } S = { .show_clean = 1, .lock = PTHREAD_MUTEX_INITIALIZER,
         .imu_lock = PTHREAD_MUTEX_INITIALIZER,
-        .align_variant = XR_ALIGN_VARIANT_DEFAULT };
+        .align_variant = XR_ALIGN_VARIANT_DEFAULT,
+        .stereo_mode = 1 };
 
 /* aligned passthrough render size per eye (the compositor upscales; the
  * source is only a ~350 px crop of the camera, so this loses nothing) */
@@ -134,7 +137,7 @@ static void compose(int counter) {
     }
     S.seq++;
 
-    if (S.win && atomic_load(&S.align_have)) {
+    if (S.win && atomic_load(&S.align_have) && atomic_load(&S.stereo_mode)) {
         /* world-aligned per-eye passthrough (VR-compositor style: one
          * calibrated virtual display per eye) */
         if (atomic_load(&S.align_dirty)) {
@@ -513,7 +516,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
      * both eyes and no side-by-side content can fuse */
     S.usb = uvc_get_libusb_handle(S.devh);
     libusb_set_auto_detach_kernel_driver(S.usb, 1);
-    mcu_set_display_mode(XR_DISPLAY_SBS_60);
+    mcu_set_display_mode(atomic_load(&S.stereo_mode) ? XR_DISPLAY_SBS_60
+                                                     : XR_DISPLAY_MIRROR);
 
     /* the stream advertises itself as 640x241 "YUY2"; trust the descriptor
      * rather than hardcoding, and accept any mode of the right byte size */
@@ -677,6 +681,18 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass 
     atomic_store(&S.align_dirty, 1);
     atomic_store(&S.align_have, 1);
     LOGI("alignment calibration set");
+}
+
+/* Toggle the glasses between per-eye stereo with the calibrated aligned warp
+ * (true) and plain mirror mode showing the raw framebuffer (false). Switches
+ * the display mode over the MCU channel when streaming. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetStereoMode(JNIEnv *env, jclass cls,
+                                                             jboolean stereo) {
+    (void)env; (void)cls;
+    atomic_store(&S.stereo_mode, stereo ? 1 : 0);
+    if (S.streaming && S.usb)
+        mcu_set_display_mode(stereo ? XR_DISPLAY_SBS_60 : XR_DISPLAY_MIRROR);
 }
 
 /* Cycle the rotation-convention variant (0..3) for on-device calibration. */

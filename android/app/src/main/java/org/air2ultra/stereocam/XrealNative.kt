@@ -31,6 +31,13 @@ object XrealNative {
     external fun nativeSetSwap(swap: Boolean)
 
     /**
+     * true: glasses in per-eye stereo display mode with the calibrated
+     * world-aligned warp; false: mirror display mode showing the plain
+     * side-by-side framebuffer. Switches the display over the MCU channel.
+     */
+    external fun nativeSetStereoMode(stereo: Boolean)
+
+    /**
      * Attach the glasses' [Surface]; native code then presents each composed
      * stereo pair directly from the capture thread (lowest latency). Pass
      * null before the surface is destroyed.
