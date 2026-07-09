@@ -17,6 +17,14 @@ VIO/SLAM, robotics, or just poking at the hardware.
 
 ## Quick start
 
+> [!IMPORTANT]
+> **Update the glasses first.** Every tool here requires the latest glasses
+> firmware (MCU `12.1.00.498_20241115`) — older firmware formats the stream's
+> metadata differently and will not decode. Updating takes a minute in the
+> browser: **<https://ota.xreal.com/ultra-update?version=1>** (the tools also
+> print this hint if they detect an old-firmware stream, and
+> `python python/xreal_imu.py --info` shows your current version).
+
 ### Windows / Linux / macOS (Python)
 
 ```sh
