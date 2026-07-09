@@ -1,6 +1,7 @@
 /* xreal_gles.c — see xreal_gles.h. */
 #include "xreal_gles.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,9 @@ static struct {
     int frame_mode;                                 /* MODE_* of newest frame */
     uint32_t frame_seq;
     int64_t submit_ms;
+    uint64_t frame_ts;                              /* exposure, IMU clock ns */
+    int (*pose_fn)(uint64_t, float[9]);             /* timewarp pose delta */
+    int timewarp;
 
     /* GL state (render thread only) */
     EGLDisplay dpy;
@@ -64,13 +68,16 @@ static struct {
     GLint loc_pos, loc_uv, loc_tex;
     GLuint vbo_eye[2], vbo_quad, ibo;
     int mesh_ready, pair_tex_w, pair_tex_h;
+    float mesh_pos[2][VERTS * 2];                   /* static NDC positions */
+    float mesh_ray[2][VERTS * 3];                   /* static IMU-frame rays */
+    float mesh_vtx[VERTS * 4];                      /* per-present scratch */
 
     /* stats */
     int frames;
     double render_ms_acc, wait_ms_acc;
     int64_t stat_t0;
 } G = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
-        .calib_variant = XR_ALIGN_VARIANT_DEFAULT };
+        .calib_variant = XR_ALIGN_VARIANT_DEFAULT, .timewarp = 1 };
 
 static int64_t now_ms64(void) {
     struct timespec ts;
@@ -167,33 +174,49 @@ static int gl_objects_init(void) {
     return 0;
 }
 
-/* Distortion meshes from the calibration: NDC positions over the eye's
- * viewport, UVs into the 480x640 camera texture. */
+/* Distortion mesh statics from the calibration: NDC positions over the
+ * eye's viewport and the IMU-frame ray of every vertex. UVs are computed
+ * per present (the timewarp rotates the rays before projection). */
 static void build_meshes(void) {
-    GLfloat *v = malloc(sizeof(GLfloat) * VERTS * 4);
     for (int e = 0; e < 2; e++) {
         for (int gy = 0; gy <= GRID_Y; gy++) {
             for (int gx = 0; gx <= GRID_X; gx++) {
                 float fx = (float)gx / GRID_X, fy = (float)gy / GRID_Y;
-                float u, vv;
-                if (xr_align_uv(&G.eyes_calib[e], G.calib_variant,
-                                fx * 1920.0f, fy * 1080.0f, &u, &vv) != 0) {
-                    u = vv = 0;
-                }
-                GLfloat *p = v + ((size_t)gy * (GRID_X + 1) + gx) * 4;
-                p[0] = -1.0f + 2.0f * fx;          /* NDC x */
-                p[1] = 1.0f - 2.0f * fy;           /* NDC y (display top = +1) */
-                p[2] = u / (float)XR_OW;           /* camera texture UV */
-                p[3] = vv / (float)XR_OH;
+                size_t i = (size_t)gy * (GRID_X + 1) + gx;
+                G.mesh_pos[e][i * 2] = -1.0f + 2.0f * fx;   /* NDC x */
+                G.mesh_pos[e][i * 2 + 1] = 1.0f - 2.0f * fy; /* top = +1 */
+                xr_align_ray(&G.eyes_calib[e], G.calib_variant,
+                             fx * 1920.0f, fy * 1080.0f, &G.mesh_ray[e][i * 3]);
             }
         }
-        glBindBuffer(GL_ARRAY_BUFFER, G.vbo_eye[e]);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * VERTS * 4, v,
-                     GL_STATIC_DRAW);
     }
-    free(v);
     G.mesh_ready = 1;
     LOGI("distortion meshes built (variant %d)", G.calib_variant);
+}
+
+/* Fill one eye's interleaved vertex buffer, rotating the rays by dR (the
+ * IMU-frame rotation from exposure to now) before camera projection. */
+static void update_eye_vbo(int e, const float dR[9]) {
+    for (size_t i = 0; i < VERTS; i++) {
+        const float *r = &G.mesh_ray[e][i * 3];
+        float w[3];
+        if (dR) {
+            w[0] = dR[0] * r[0] + dR[1] * r[1] + dR[2] * r[2];
+            w[1] = dR[3] * r[0] + dR[4] * r[1] + dR[5] * r[2];
+            w[2] = dR[6] * r[0] + dR[7] * r[1] + dR[8] * r[2];
+        } else {
+            w[0] = r[0]; w[1] = r[1]; w[2] = r[2];
+        }
+        float u = 0, v = 0;
+        xr_align_project(&G.eyes_calib[e], G.calib_variant, w, &u, &v);
+        G.mesh_vtx[i * 4] = G.mesh_pos[e][i * 2];
+        G.mesh_vtx[i * 4 + 1] = G.mesh_pos[e][i * 2 + 1];
+        G.mesh_vtx[i * 4 + 2] = u / (float)XR_OW;
+        G.mesh_vtx[i * 4 + 3] = v / (float)XR_OH;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, G.vbo_eye[e]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * VERTS * 4, G.mesh_vtx,
+                 GL_STREAM_DRAW);
 }
 
 static void egl_teardown_surface(void) {
@@ -279,7 +302,7 @@ static int egl_bind_window(ANativeWindow *win) {
     return 0;
 }
 
-static void render_frame(int mode) {
+static void render_frame(int mode, int fresh, const float *dR) {
     EGLint w = 0, h = 0;
     eglQuerySurface(G.dpy, G.surf, EGL_WIDTH, &w);
     eglQuerySurface(G.dpy, G.surf, EGL_HEIGHT, &h);
@@ -291,10 +314,11 @@ static void render_frame(int mode) {
     if (mode == MODE_EYES) {
         for (int e = 0; e < 2; e++) {
             glBindTexture(GL_TEXTURE_2D, G.tex_eye[e]);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, XR_OW, XR_OH,
-                            GL_LUMINANCE, GL_UNSIGNED_BYTE, G.eye_img[e]);
+            if (fresh)
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, XR_OW, XR_OH,
+                                GL_LUMINANCE, GL_UNSIGNED_BYTE, G.eye_img[e]);
+            update_eye_vbo(e, dR);      /* leaves the eye VBO bound */
             glViewport(e * w / 2, 0, w / 2, h);
-            glBindBuffer(GL_ARRAY_BUFFER, G.vbo_eye[e]);
             glVertexAttribPointer((GLuint)G.loc_pos, 2, GL_FLOAT, GL_FALSE,
                                   4 * sizeof(GLfloat), (void *)0);
             glVertexAttribPointer((GLuint)G.loc_uv, 2, GL_FLOAT, GL_FALSE,
@@ -331,10 +355,30 @@ static void render_frame(int mode) {
 static void *render_thread(void *arg) {
     (void)arg;
     uint32_t done_seq = 0;
+    int warps = 0;
     for (;;) {
         pthread_mutex_lock(&G.lock);
-        while (!G.win_changed && G.frame_seq == done_seq && !G.calib_staged)
-            pthread_cond_wait(&G.cond, &G.lock);
+        /* asynchronous timewarp: once an eyes frame is on screen, wake at
+         * display cadence and re-present it with the freshest pose even
+         * when no new camera frame arrived */
+        int can_atw = G.timewarp && G.pose_fn && G.mesh_ready &&
+                      G.frame_mode == MODE_EYES && G.frame_ts != 0 &&
+                      G.surf != EGL_NO_SURFACE && done_seq != 0;
+        if (can_atw) {
+            struct timespec until;
+            clock_gettime(CLOCK_REALTIME, &until);
+            until.tv_nsec += 8 * 1000000L;
+            if (until.tv_nsec >= 1000000000L) {
+                until.tv_sec++;
+                until.tv_nsec -= 1000000000L;
+            }
+            while (!G.win_changed && G.frame_seq == done_seq && !G.calib_staged)
+                if (pthread_cond_timedwait(&G.cond, &G.lock, &until) == ETIMEDOUT)
+                    break;
+        } else {
+            while (!G.win_changed && G.frame_seq == done_seq && !G.calib_staged)
+                pthread_cond_wait(&G.cond, &G.lock);
+        }
 
         ANativeWindow *new_win = NULL;
         int win_changed = G.win_changed;
@@ -351,6 +395,9 @@ static void *render_thread(void *arg) {
         int mode = G.frame_mode;
         uint32_t seq = G.frame_seq;
         int64_t submitted = G.submit_ms;
+        uint64_t frame_ts = G.frame_ts;
+        int tw = G.timewarp;
+        int (*pose_fn)(uint64_t, float[9]) = G.pose_fn;
         pthread_mutex_unlock(&G.lock);
 
         if (win_changed) {
@@ -365,30 +412,46 @@ static void *render_thread(void *arg) {
         if (G.surf != EGL_NO_SURFACE && G.calib_valid && !G.mesh_ready)
             build_meshes();
 
-        if (mode == MODE_EYES && !G.mesh_ready) {
-            done_seq = seq;                    /* nothing to draw with yet */
-        } else if (mode == MODE_PAIR && G.pair_w <= 0) {
-            done_seq = seq;
-        } else if (seq != done_seq && G.surf != EGL_NO_SURFACE && mode != MODE_NONE) {
-            int64_t t0 = now_ms64();
-            render_frame(mode);
-            int64_t t1 = now_ms64();
-            done_seq = seq;
+        int fresh = seq != done_seq;
+        int drawable = G.surf != EGL_NO_SURFACE && mode != MODE_NONE &&
+                       (mode == MODE_EYES ? G.mesh_ready : G.pair_w > 0);
+        if (!drawable) {
+            if (fresh) done_seq = seq;         /* nothing to draw with yet */
+            continue;
+        }
+        if (!fresh && !can_atw) continue;      /* woken for win/calib only */
+
+        float dR[9];
+        const float *pdR = NULL;
+        if (mode == MODE_EYES && tw && pose_fn && frame_ts &&
+            pose_fn(frame_ts, dR) == 0)
+            pdR = dR;
+
+        int64_t t0 = now_ms64();
+        render_frame(mode, fresh, pdR);
+        int64_t t1 = now_ms64();
+        done_seq = seq;
+        if (fresh) {
             G.frames++;
-            G.render_ms_acc += (double)(t1 - t0);
             G.wait_ms_acc += (double)(t0 - submitted);
-            if (G.stat_t0 == 0) G.stat_t0 = t1;
-            if (t1 - G.stat_t0 >= 1000) {
-                LOGI("glasses present: %d fps, wait %.1f ms, render %.1f ms (%s)",
-                     G.frames, G.wait_ms_acc / G.frames,
-                     G.render_ms_acc / G.frames,
-                     G.single_buffer ? "front-buffer" : "double-buffered");
-                G.frames = 0;
-                G.render_ms_acc = G.wait_ms_acc = 0;
-                G.stat_t0 = t1;
-            }
-        } else if (seq != done_seq) {
-            done_seq = seq;                    /* nothing to draw on */
+        } else {
+            warps++;
+        }
+        G.render_ms_acc += (double)(t1 - t0);
+        if (G.stat_t0 == 0) G.stat_t0 = t1;
+        if (t1 - G.stat_t0 >= 1000) {
+            int total = G.frames + warps;
+            LOGI("glasses present: %d cam + %d warp fps, wait %.1f ms, "
+                 "render %.1f ms (%s%s)",
+                 G.frames, warps,
+                 G.frames ? G.wait_ms_acc / G.frames : 0.0,
+                 total ? G.render_ms_acc / total : 0.0,
+                 G.single_buffer ? "front-buffer" : "double-buffered",
+                 pdR ? ", timewarp" : "");
+            G.frames = 0;
+            warps = 0;
+            G.render_ms_acc = G.wait_ms_acc = 0;
+            G.stat_t0 = t1;
         }
     }
     return NULL;
@@ -423,14 +486,29 @@ void xr_gles_set_alignment(const xr_eye_calib eyes[2], int variant) {
     pthread_mutex_unlock(&G.lock);
 }
 
-void xr_gles_submit_eyes(const uint8_t *left, const uint8_t *right) {
+void xr_gles_submit_eyes(const uint8_t *left, const uint8_t *right,
+                         uint64_t exposure_ts_ns) {
     pthread_mutex_lock(&G.lock);
     ensure_thread();
     memcpy(G.eye_img[0], left, sizeof G.eye_img[0]);
     memcpy(G.eye_img[1], right, sizeof G.eye_img[1]);
     G.frame_mode = MODE_EYES;
+    G.frame_ts = exposure_ts_ns;
     G.frame_seq++;
     G.submit_ms = now_ms64();
+    pthread_cond_signal(&G.cond);
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_pose_fn(int (*fn)(uint64_t, float[9])) {
+    pthread_mutex_lock(&G.lock);
+    G.pose_fn = fn;
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_timewarp(int on) {
+    pthread_mutex_lock(&G.lock);
+    G.timewarp = on ? 1 : 0;
     pthread_cond_signal(&G.cond);
     pthread_mutex_unlock(&G.lock);
 }

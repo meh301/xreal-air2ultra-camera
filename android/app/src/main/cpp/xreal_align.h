@@ -24,9 +24,18 @@ typedef struct {
  * real world through the glasses. */
 enum { XR_ALIGN_VARIANT_DEFAULT = 2 };
 
-/* Project one display pixel (in the calibrated full_w x full_h display
- * coordinates) to camera pixel coordinates. Returns 0, or -1 if the ray
- * points behind the camera. */
+/* Stage 1: display pixel (calibrated 1920x1080 coordinates) -> ray in the
+ * IMU frame (not normalized). Static per mesh vertex. */
+void xr_align_ray(const xr_eye_calib *eye, int variant,
+                  float u_disp, float v_disp, float ray_imu[3]);
+
+/* Stage 2: IMU-frame ray -> camera pixel via the fisheye model. Called per
+ * frame when timewarp rotates the rays. Returns 0, or -1 if the ray points
+ * behind the camera. */
+int xr_align_project(const xr_eye_calib *eye, int variant,
+                     const float ray_imu[3], float *u_cam, float *v_cam);
+
+/* Both stages composed (no timewarp). */
 int xr_align_uv(const xr_eye_calib *eye, int variant,
                 float u_disp, float v_disp, float *u_cam, float *v_cam);
 

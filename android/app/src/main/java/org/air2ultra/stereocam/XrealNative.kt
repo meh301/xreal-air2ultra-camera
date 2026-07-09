@@ -58,6 +58,14 @@ object XrealNative {
     external fun nativeSetAlignVariant(variant: Int)
 
     /**
+     * Enable/disable the IMU timewarp (default on): every present
+     * counter-rotates the stereo view by the head rotation since the
+     * frame's exposure, and the newest frame is re-warped at display rate
+     * between camera frames (asynchronous timewarp).
+     */
+    external fun nativeSetTimewarp(on: Boolean)
+
+    /**
      * Copy the newest composed side-by-side RGBA frame into [buf] (a direct
      * ByteBuffer, capacity >= 1280*640*4). Returns 0 when there is no new
      * frame, else (w shl 48) or (h shl 32) or (fps*10 shl 16) or counter.

@@ -109,6 +109,7 @@ class MainActivity : Activity() {
     private var lastFrameAt = 0L        // watchdog: last time a frame arrived
     private var lastReconnectAt = 0L
     private var alignReady = false
+    private var timewarp = true
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
     private val imuBatch: ByteBuffer =                 // 256 samples x 32 B
         ByteBuffer.allocateDirect(256 * 32).order(ByteOrder.nativeOrder())
@@ -156,7 +157,8 @@ class MainActivity : Activity() {
                 ) + when {
                     presentation == null -> "  [no ext display]"
                     !stereoMode -> "  [glasses sbs]"
-                    alignReady -> "  [glasses stereo]"
+                    alignReady -> "  [glasses stereo tw:" +
+                        (if (timewarp) "on" else "off") + "]"
                     else -> "  [glasses stereo uncal]"
                 }
             }
@@ -266,6 +268,12 @@ class MainActivity : Activity() {
             XrealNative.nativeSetStereoMode(stereoMode)
             modeButton.text =
                 getString(if (stereoMode) R.string.mode_sbs else R.string.mode_stereo)
+        }
+
+        // tapping the status line toggles the IMU timewarp for A/B comparison
+        statusView.setOnClickListener {
+            timewarp = !timewarp
+            XrealNative.nativeSetTimewarp(timewarp)
         }
 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager

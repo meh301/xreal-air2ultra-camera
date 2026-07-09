@@ -89,6 +89,10 @@ static struct {
     /* sample ring so the UI can drain the full 1 kHz stream in batches */
     xr_imu_sample ring[1024];
     uint32_t ring_head, ring_tail;          /* head = write, tail = read */
+
+    /* pose history for the timewarp: (ts, quaternion) at 1 kHz, 0.25 s deep */
+    struct { uint64_t ts; float q[4]; } qhist[256];
+    uint32_t qhist_n;
 } S = { .show_clean = 1, .lock = PTHREAD_MUTEX_INITIALIZER,
         .imu_lock = PTHREAD_MUTEX_INITIALIZER,
         .align_variant = XR_ALIGN_VARIANT_DEFAULT,
@@ -100,7 +104,7 @@ static int64_t now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void compose(int counter) {
+static void compose(int counter, uint64_t exposure_ts) {
     int clean = atomic_load(&S.show_clean);
     int mirror = atomic_load(&S.mirror);
     int swap = atomic_load(&S.swap_eyes);
@@ -133,7 +137,8 @@ static void compose(int counter) {
      * supports it). All source buffers are written only by this thread. */
     if (atomic_load(&S.stereo_mode) && atomic_load(&S.align_have)) {
         /* left eye view samples cam1, the physical left camera */
-        xr_gles_submit_eyes(S.clean[swap ? 0 : 1], S.clean[swap ? 1 : 0]);
+        xr_gles_submit_eyes(S.clean[swap ? 0 : 1], S.clean[swap ? 1 : 0],
+                            exposure_ts);
     } else {
         xr_gles_submit_pair(S.rgba, cw, ch);
     }
@@ -175,7 +180,62 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
         S.fps_t0 = t;
     }
 
-    if (S.have[0] && S.have[1]) compose(xr_counter(S.frame));
+    if (S.have[0] && S.have[1]) {
+        /* unwrap the camera's u32 ns exposure stamp against the IMU's u64
+         * clock (same timebase, see docs/PROTOCOL.md "Clock domains") */
+        uint64_t t_exp = 0;
+        pthread_mutex_lock(&S.imu_lock);
+        uint64_t t_imu = S.imu_latest.ts_ns;
+        pthread_mutex_unlock(&S.imu_lock);
+        if (t_imu)
+            t_exp = t_imu -
+                    ((t_imu - (uint64_t)xr_exposure_ts(S.frame)) & 0xFFFFFFFFull);
+        compose(xr_counter(S.frame), t_exp);
+    }
+}
+
+/* ---- timewarp pose delta ------------------------------------------------------ */
+
+/* Hamilton [w,x,y,z] (the AHRS convention) -> rotation matrix, row-major. */
+static void wxyz_to_rot(const float q[4], float R[9]) {
+    float w = q[0], x = q[1], y = q[2], z = q[3];
+    R[0] = 1 - 2 * (y * y + z * z); R[1] = 2 * (x * y - w * z); R[2] = 2 * (x * z + w * y);
+    R[3] = 2 * (x * y + w * z); R[4] = 1 - 2 * (x * x + z * z); R[5] = 2 * (y * z - w * x);
+    R[6] = 2 * (x * z - w * y); R[7] = 2 * (y * z + w * x); R[8] = 1 - 2 * (x * x + y * y);
+}
+
+/* dR = R(q_exposure)^T * R(q_now): how a fixed world direction moved in the
+ * IMU frame between the camera exposure and now. Drift cancels over this
+ * short window, so the AHRS absolute error is irrelevant. Returns 0, or -1
+ * when no usable pose history exists. */
+static int pose_delta(uint64_t ts_exposure, float dR[9]) {
+    float qe[4], qn[4];
+    pthread_mutex_lock(&S.imu_lock);
+    uint32_t n = S.qhist_n;
+    if (n < 2) {
+        pthread_mutex_unlock(&S.imu_lock);
+        return -1;
+    }
+    uint32_t depth = n < 256 ? n : 256;
+    uint32_t best = n - 1;                     /* default: newest (clamps) */
+    for (uint32_t k = 0; k < depth; k++) {
+        uint32_t i = n - 1 - k;
+        if (S.qhist[i % 256].ts <= ts_exposure) { best = i; break; }
+        best = i;                              /* clamp to oldest available */
+    }
+    memcpy(qe, S.qhist[best % 256].q, sizeof qe);
+    memcpy(qn, S.qhist[(n - 1) % 256].q, sizeof qn);
+    pthread_mutex_unlock(&S.imu_lock);
+
+    float Re[9], Rn[9];
+    wxyz_to_rot(qe, Re);
+    wxyz_to_rot(qn, Rn);
+    for (int r = 0; r < 3; r++)                /* dR = Re^T * Rn */
+        for (int c = 0; c < 3; c++)
+            dR[r * 3 + c] = Re[0 * 3 + r] * Rn[0 * 3 + c] +
+                            Re[1 * 3 + r] * Rn[1 * 3 + c] +
+                            Re[2 * 3 + r] * Rn[2 * 3 + c];
+    return 0;
 }
 
 /* ---- IMU: enable + drain thread --------------------------------------------- */
@@ -247,11 +307,10 @@ static int mcu_set_display_mode(uint8_t mode) {
     return 1;
 }
 
-/* Enter stereo at the highest refresh the glasses accept (less vsync wait
- * = lower passthrough latency), falling back to SBS 60 Hz. */
+/* Enter stereo. SBS 60 Hz is this hardware's limit (mode 9 / 90 Hz never
+ * engages on-device), so go straight there - one clean renegotiation. */
 static void mcu_enter_stereo(void) {
-    if (mcu_set_display_mode(XR_DISPLAY_SBS_90) < 0)
-        mcu_set_display_mode(XR_DISPLAY_SBS_60);
+    mcu_set_display_mode(XR_DISPLAY_SBS_60);
 }
 
 static int imu_send_cmd(uint8_t cmd, const uint8_t *data, size_t n) {
@@ -376,7 +435,13 @@ static void *imu_worker(void *arg) {
 
         pthread_mutex_lock(&S.imu_lock);
         S.imu_latest = s;
-        if (has_q) memcpy(S.imu_q, S.ahrs.q, sizeof S.imu_q);
+        if (has_q) {
+            memcpy(S.imu_q, S.ahrs.q, sizeof S.imu_q);
+            uint32_t qi = S.qhist_n % 256;
+            S.qhist[qi].ts = s.ts_ns;
+            memcpy(S.qhist[qi].q, S.ahrs.q, sizeof S.qhist[qi].q);
+            S.qhist_n++;
+        }
         S.imu_has_q = has_q;
         S.imu_seq++;
         S.ring[S.ring_head % 1024] = s;
@@ -419,6 +484,7 @@ static void imu_start(void) {
     S.imu_has_q = 0;
     S.imu_count = 0; S.imu_t0 = 0; S.imu_rate = 0;
     S.ring_head = S.ring_tail = 0;
+    S.qhist_n = 0;
     imu_enable();
     atomic_store(&S.imu_running, 1);
     pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
@@ -500,7 +566,16 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
     S.streaming = 1;
     LOGI("streaming started");
     imu_start();   /* best effort — camera works without it */
+    xr_gles_set_pose_fn(pose_delta);   /* timewarp pose source */
     return 0;
+}
+
+/* Enable/disable the IMU timewarp on the glasses renderer (default on). */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetTimewarp(JNIEnv *env, jclass cls,
+                                                           jboolean on) {
+    (void)env; (void)cls;
+    xr_gles_set_timewarp(on ? 1 : 0);
 }
 
 JNIEXPORT void JNICALL

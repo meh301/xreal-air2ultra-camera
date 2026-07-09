@@ -31,11 +31,23 @@ void xr_gles_set_window(ANativeWindow *win);
 /* Stage the per-eye calibration for the distortion meshes. */
 void xr_gles_set_alignment(const xr_eye_calib eyes[2], int variant);
 
-/* Submit the two descrambled+cleaned 480x640 eye images (left, right);
- * copied internally, wakes the render thread. */
-void xr_gles_submit_eyes(const uint8_t *left, const uint8_t *right);
+/* Submit the two descrambled+cleaned 480x640 eye images (left, right) with
+ * their exposure timestamp on the IMU clock (0 = unknown, disables warping
+ * for this frame); copied internally, wakes the render thread. */
+void xr_gles_submit_eyes(const uint8_t *left, const uint8_t *right,
+                         uint64_t exposure_ts_ns);
 
 /* Submit the plain composed RGBA pair (w x h) instead. */
 void xr_gles_submit_pair(const uint8_t *rgba, int w, int h);
+
+/* IMU timewarp: fn(ts_exposure, dR) fills the 3x3 rotation of the IMU frame
+ * from the exposure time to now (row-major, IMU-frame vectors), returning 0,
+ * or nonzero when no pose is available. The renderer counter-rotates the
+ * displayed rays by it every present, and re-presents the newest frame at
+ * display rate between camera frames (asynchronous timewarp). */
+void xr_gles_set_pose_fn(int (*fn)(uint64_t ts_exposure_ns, float dR[9]));
+
+/* Enable/disable the timewarp at runtime (default on). */
+void xr_gles_set_timewarp(int on);
 
 #endif

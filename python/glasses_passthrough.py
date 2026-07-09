@@ -175,10 +175,10 @@ def main():
             print("No external display found - falling back to --window. "
                   "(Glasses plugged in and in extend mode?)", file=sys.stderr)
         elif not args.geometry:
-            # per-eye stereo at the highest refresh the glasses accept; the
-            # DP link renegotiates (geometry may change), so switch first
-            # and re-enumerate
-            switched_3d = set_display_mode(9) or set_display_mode(3)
+            # per-eye stereo (SBS 60 Hz - the hardware's limit); the DP link
+            # renegotiates (geometry may change), so switch first and
+            # re-enumerate
+            switched_3d = set_display_mode(3)
             if switched_3d:
                 time.sleep(3.0)
                 target = pick_target(list_monitors()) or target
