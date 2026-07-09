@@ -1,0 +1,4 @@
+# shell scripts must keep LF even on Windows checkouts (autocrlf would
+# break `./gradlew` and fetch_deps.sh under Git Bash / WSL)
+*.sh text eol=lf
+android/gradlew text eol=lf
