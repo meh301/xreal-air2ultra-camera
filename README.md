@@ -1,174 +1,168 @@
-# XREAL Air 2 Ultra — stereo camera viewer
+# XREAL Air 2 Ultra — stereo cameras & IMU, no SDK
 
-**Read the stereo tracking cameras of the XREAL Air 2 Ultra on macOS, Windows, Linux and Android — no SDK, no kext, no drivers.**
+**Everything the Air 2 Ultra's sensors offer, on Windows, Linux, macOS and
+Android: the two tracking cameras descrambled in real time, the 1 kHz IMU, and
+the factory calibration stored on the device — no SDK, no kext, no drivers.**
 
 [日本語のREADMEはこちら](README.ja.md)
 
-The Air 2 Ultra exposes its two tracking cameras as a standard USB Video Class (UVC)
-device, but the video stream is **block-scrambled** and looks like noise in a normal
-webcam viewer. This project descrambles it in real time and gives you a clean
-640×480 stereo grayscale feed — the raw input you'd need for VIO/SLAM experiments,
-robotics, or just poking at the hardware.
+The glasses expose their stereo tracking cameras as a standard UVC webcam, but
+the stream is **block-scrambled** and looks like noise in a normal viewer. This
+project descrambles it live into a clean 640×480 stereo grayscale feed, reads
+the IMU that shares the same nanosecond clock, and pulls the fisheye
+intrinsics + camera↔IMU extrinsics off the device — the complete raw input for
+VIO/SLAM, robotics, or just poking at the hardware.
 
 ![clean stereo preview](docs/images/stereo_preview.png)
 
 ## Quick start
 
-### Windows / Linux (and macOS too)
-
-Requirements: Python 3.9+ with `numpy` and `opencv-python`, and an Air 2 Ultra
-plugged in via USB-C. On Windows you also want `ffmpeg` on PATH
-(`winget install ffmpeg`) — see the platform notes.
+### Windows / Linux / macOS (Python)
 
 ```sh
-pip install numpy opencv-python
-python python/preview_clean.py
+pip install numpy opencv-python hidapi
+python python/preview_clean.py       # live stereo viewer, 60 fps
+python python/xreal_imu_scope.py     # IMU oscilloscope + 3D attitude
 ```
 
-A window opens with the live left/right camera feed, descrambled and denoised,
-at the full 60 fps UVC rate. The XREAL stream is auto-detected among your
-cameras (it is fingerprinted by its telemetry row, so other webcams are
-skipped); `python python/xreal_uvc.py` scans and lists what was found.
-
-Keys: `c` toggle clean/scrambled view · `s` save snapshot PNG · `space` pause · `q` quit
-
-Every clean stereo pair is also published to a **named shared-memory
-framebuffer** (`xreal_stereo_fb`, 960×640 grayscale + seqlock header), so your
-own process — Python, C++, Rust, Unity, … — can consume the live feed with ~1 ms
-latency and no sockets. `python python/xreal_fb.py --show` is a demo consumer;
-the 64-byte header layout is documented in [python/xreal_fb.py](python/xreal_fb.py).
-`--headless` runs the publisher without a window.
-
-All viewers/tools at a glance (Windows/Linux/macOS; IMU tools need
-`pip install hidapi`):
-
-```sh
-python python/preview_clean.py              # stereo camera viewer + framebuffer
-python python/preview_clean.py --headless   # framebuffer publisher only
-python python/xreal_fb.py --show            # consume the framebuffer (demo)
-python python/xreal_imu_scope.py            # IMU oscilloscope + 3D attitude
-python python/xreal_imu.py                  # 1 kHz IMU console reader
-python python/xreal_imu.py --quat           # ... with host-side quaternion
-python python/xreal_imu.py --config c.json  # dump factory VIO calibration
-python python/xreal_imu.py --info           # serial + firmware versions
-python python/xreal_cam.py 120 out/         # record 120 raw frames
-python python/xreal_uvc.py                  # scan/diagnose capture devices
-```
-
-Platform notes:
-- **Windows**: install ffmpeg (`winget install ffmpeg`). OpenCV's Windows
-  backends cannot deliver this device's stream raw (measured: MSMF starts no
-  stream, DirectShow force-converts to BGR), so the tools automatically capture
-  through ffmpeg's dshow input instead, which grabs the native pin format.
-- **Linux**: your user needs access to `/dev/video*` (usually the `video`
-  group: `sudo usermod -aG video $USER`, then re-login). The glasses appear as
-  a regular `uvcvideo` device; no udev rules needed just to view. **IMU access
-  needs the hidraw nodes**: install
-  [linux/99-xreal-air2ultra.rules](linux/99-xreal-air2ultra.rules)
-  (`sudo cp linux/99-xreal-air2ultra.rules /etc/udev/rules.d/ && sudo udevadm
-  control --reload && sudo udevadm trigger`, then replug).
+Viewer keys: `c` clean/scrambled · `s` snapshot · `space` pause · `q` quit.
+The XREAL is auto-detected among your cameras by its telemetry fingerprint.
+On Windows also install ffmpeg (`winget install ffmpeg`); on Linux the IMU
+needs a udev rule — both explained under [Platform notes](#platform-notes).
 
 ### macOS (native tools)
 
-Requirements: Xcode Command Line Tools (`xcode-select --install`).
-
 ```sh
+xcode-select --install   # once
 make
-./preview_clean          # stereo camera viewer
-./xreal_imu              # native 1 kHz IMU reader (--csv/--config/--info)
+./preview_clean          # stereo viewer (same keys/flags as the Python one)
+./xreal_imu              # IMU reader (--csv / --config / --info)
 ```
 
-macOS will ask for camera permission for your terminal on first run. The
-Python tools (including the IMU scope and quaternion fusion) also run on
-macOS if you prefer them.
+macOS asks for camera permission for your terminal on first run. The Python
+tools above work on macOS too.
 
 ### Android
 
-Android has no camera API for external UVC devices, so [`android/`](android/)
-contains a native app (libusb + libuvc + the descrambler in C) that opens the
-glasses through the USB host API. Build it with Android Studio or Gradle:
+Android's camera APIs can't reach external UVC devices, so
+[`android/`](android/) is a native app (libusb + libuvc + the descrambler in
+C) built on the USB host API:
 
 ```sh
 cd android
-./fetch_deps.sh        # fetch_deps.ps1 on Windows — clones libusb/libuvc (pinned tags)
+./fetch_deps.sh          # fetch_deps.ps1 on Windows — clones libusb/libuvc (pinned tags)
 ./gradlew :app:assembleDebug
 ```
 
-Install the APK, plug the glasses into the phone's USB-C port, accept the USB
-permission prompt, and the live stereo preview starts — with a live IMU
-readout (1 kHz gyro/accel + fused yaw/pitch/roll) under the status line. See
-[android/README.md](android/README.md) for details.
+Install the APK and plug the glasses into the phone: live stereo preview plus
+a 1 kHz IMU readout with fused orientation. Details:
+[android/README.md](android/README.md).
 
 ## Tools
 
-| Tool | What it does |
-|------|--------------|
-| `python/preview_clean.py` | Cross-platform real-time stereo viewer (descramble + fixed-pattern-noise removal). Also `--snap out.png` for a headless snapshot, `--test in.pgm prefix` to verify descrambling offline. |
-| `python/xreal_cam.py` | Cross-platform recorder: `python xreal_cam.py <numFrames> <outDir>` writes raw `cam0_*.pgm` / `cam1_*.pgm` (still scrambled) plus `meta.csv`. Output is identical to the macOS recorder. |
-| `python/xreal_uvc.py` | Capture module used by the two tools (backend scan, ffmpeg fallback, telemetry fingerprint, byte-order fix). Run directly to scan for the XREAL stream. |
-| `python/xreal_fb.py` | Shared-memory framebuffer: layout definition, writer/reader classes, and a demo consumer (`python xreal_fb.py --show`). |
-| `python/xreal_imu.py` | **1 kHz IMU reader** (needs `pip install hidapi`): live console output, `--csv` logging, `--fb` shared-memory ring, and `--config calib.json` to dump the on-device factory calibration (IMU biases/noises + fisheye intrinsics and camera↔IMU extrinsics of both tracking cameras — everything VIO needs). |
-| `python/xreal_imu_scope.py` | Live rolling oscilloscope of the IMU (gyro + accel panels) plus a 3D attitude view (`b` re-zeros the gyro bias); runs alongside the camera viewer. |
-| `python/xreal_ahrs.py` | Host-side 6-axis Madgwick fusion + gyro-bias capture (the glasses stream raw data only — no onboard quaternion). Also powers `xreal_imu.py --quat`. |
-| `preview_clean` (macOS) | Native Swift version of the viewer, 60 fps. Same keys and flags. |
-| `xreal_cam` (macOS) | Native Swift version of the recorder. |
-| `xreal_imu` (macOS) | Native Swift IMU reader: console, `--csv`, `--config`, `--info`. |
-| `enumerate` (macOS) | List AVFoundation cameras and the XREAL device's formats. |
-| `android/` | Android app: USB host API + libusb/libuvc, descramble + denoise in C, live side-by-side preview with snapshot. |
-| `python/process_clean.py` | Offline pipeline: `python3 python/process_clean.py <capDir> <outDir>` descrambles + cleans a recording (from either recorder) into PNGs and a side-by-side `stereo_feed.mp4`. |
-| `python/xreal_descramble.py` | Minimal single-frame descrambler, useful as a reference implementation. |
-| `research/` | Reverse-engineering tools (vendor HID commands, UVC controls, USB descriptors). Most build on macOS and Linux. See [research/README.md](research/README.md). |
+**Cameras**
+
+| Command | What it does |
+|---------|--------------|
+| `python python/preview_clean.py` | Real-time stereo viewer; publishes every clean pair to the shared-memory framebuffer. `--headless` (no window), `--snap out.png` (one snapshot), `--test in.pgm pfx` (offline descramble check). |
+| `python python/xreal_cam.py <N> <dir>` | Record N raw (still scrambled) frames as `cam{0,1}_*.pgm` + `meta.csv`; output identical to the macOS recorder. |
+| `python python/process_clean.py <dir> <out>` | Offline pipeline: descramble + denoise a recording into PNGs and a side-by-side `stereo_feed.mp4`. |
+| `python python/xreal_uvc.py` | Scan and diagnose capture backends (this file is also the capture library the other tools import). |
+
+**IMU & calibration**
+
+| Command | What it does |
+|---------|--------------|
+| `python python/xreal_imu.py` | 1 kHz gyro/accel reader. `--quat` adds a host-side quaternion, `--csv` logs every sample, `--fb` publishes the shared-memory ring, `--config c.json` dumps the factory calibration, `--info` prints serial + firmware versions. |
+| `python python/xreal_imu_scope.py` | Rolling oscilloscope (gyro + accel) with a 3D attitude view; `b` re-zeros the gyro bias. Runs alongside the camera viewer. |
+
+**Native macOS binaries** — `make` builds `preview_clean`, `xreal_cam`,
+`xreal_imu` and `enumerate` (device/format lister), mirroring their Python
+counterparts.
+
+**Reference & research** — [`python/xreal_descramble.py`](python/xreal_descramble.py)
+is the minimal single-frame descrambler other implementations are checked
+against; [`research/`](research/README.md) holds the reverse-engineering tools
+(vendor HID commands, UVC controls, USB descriptors).
+
+## Using the data from your own code
+
+Built for feeding a VIO/SLAM pipeline without touching USB yourself:
+
+- **Camera framebuffer** — every clean stereo pair lands in named shared
+  memory `xreal_stereo_fb` (960×640 grayscale, seqlock header carrying the
+  pair counter and the device exposure timestamp). ~1 ms latency, any
+  language. Demo consumer: `python python/xreal_fb.py --show`; the 64-byte
+  header layout is documented in [python/xreal_fb.py](python/xreal_fb.py).
+- **IMU ring** — `xreal_imu.py --fb` publishes every sample to the
+  `xreal_imu_fb` ring (layout in [python/xreal_imu.py](python/xreal_imu.py)).
+- **One clock** — camera exposure timestamps and IMU timestamps are the same
+  free-running nanosecond counter (measured on-device; the camera carries the
+  low 32 bits). No cross-clock calibration needed; unwrap recipe in
+  [PROTOCOL.md](docs/PROTOCOL.md#clock-domains-cameras-vs-imu).
+- **Factory calibration** — `xreal_imu.py --config` dumps fisheye624
+  intrinsics and camera↔IMU extrinsics for both cameras plus IMU biases and
+  noise densities: a ready-made VIO parameter set. (It includes your device
+  serial — keep dumps out of public repos.)
+- **Orientation** — the device streams raw inertial data only; quaternions
+  come from the host-side Madgwick filter in
+  [python/xreal_ahrs.py](python/xreal_ahrs.py).
 
 ## How it works (short version)
 
-- The glasses enumerate as a normal UVC webcam (`640×482 @ 60 fps`, nominally YUV but
-  actually **one byte = one 8-bit mono pixel**). Rows 0–479 are the image, row 480 is
-  telemetry, row 481 is padding.
-- Each frame's 307,200 image bytes are shuffled as **128 blocks × 2,400 bytes** in a
-  fixed permutation, with a phase that rotates every frame. Sync is recovered by
+- The glasses enumerate as a normal UVC webcam (`640×482 @ 60 fps`, nominally
+  YUV but actually **one byte = one 8-bit mono pixel**). Rows 0–479 are the
+  image, row 480 is telemetry, row 481 is padding.
+- Each frame's 307,200 image bytes are shuffled as **128 blocks × 2,400 bytes**
+  in a fixed permutation whose phase rotates every frame. Sync is recovered by
   finding the block that starts in the fisheye lens's black border.
-- Consecutive UVC frames alternate between the two cameras. **The order is not fixed** —
-  byte 58 of the telemetry row (`0x20`/`0x21`) tells you which camera a frame came from.
+- Consecutive UVC frames alternate between the two cameras, but **the order is
+  not fixed** — a telemetry byte identifies the camera.
 - The sensors are mounted rotated 90° (and 180° opposed to each other), so the
   descrambler also rotates; output is 480×640 portrait per eye.
-- Remaining vertical stripes (column fixed-pattern noise) are estimated online and
-  subtracted.
-- Because the YUV label is fake, some UVC stacks deliver the two bytes of each 16-bit
-  pair swapped. The telemetry markers make this detectable, and all capture paths in
-  this repo normalize it automatically.
-- Two **firmware telemetry dialects** exist in the wild (different layouts of the
-  metadata row — counter/camera-ID columns and timestamp fields). Both are
-  auto-detected everywhere; see PROTOCOL.md. Dialect B was observed on MCU firmware
-  `12.1.00.498_20241115`; if your unit speaks dialect A, please run
-  `python python/xreal_imu.py --info` and report your firmware version so the
-  mapping can be documented.
+- Remaining vertical stripes (column fixed-pattern noise) are estimated online
+  and subtracted.
+- Telemetry comes in two **firmware dialects** (different metadata layouts),
+  and some UVC stacks byte-swap the fake-YUV pairs — every capture path in
+  this repo detects and normalizes both automatically.
 
-The glasses also stream a **1 kHz IMU** over a vendor HID interface and store
-their complete factory calibration (fisheye intrinsics + camera↔IMU extrinsics
-for both tracking cameras, IMU biases and noise densities) as JSON on the
-device — `python/xreal_imu.py` reads both.
+Full protocol documentation — USB layout, telemetry dialects (and which
+firmware versions they map to), scramble algorithm, IMU packet format,
+calibration blob, clock domains, UVC exposure controls, vendor HID protocol,
+per-OS capture notes: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
 
-Full protocol notes (USB layout, telemetry row map, scramble algorithm, IMU
-packet format and calibration blob, UVC exposure controls, vendor HID protocol,
-per-OS capture notes): **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
+## Platform notes
+
+- **Windows**: install ffmpeg (`winget install ffmpeg`). OpenCV's Windows
+  backends cannot deliver this device's stream raw (MSMF starts no stream,
+  DirectShow force-converts to BGR), so the tools capture through ffmpeg's
+  dshow input, which grabs the native pin format.
+- **Linux**: camera viewing needs `/dev/video*` access (usually the `video`
+  group: `sudo usermod -aG video $USER`, then re-login). IMU access needs
+  readable hidraw nodes: `sudo cp linux/99-xreal-air2ultra.rules
+  /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger`,
+  then replug.
+- **macOS**: grant the camera permission prompt on first run of the viewer.
 
 ## Credits
 
 - The block-reorder table was discovered by
   [mazeasdamien/myXreal](https://github.com/mazeasdamien/myXreal) (`stereo_camera.cpp`).
-- The vendor HID packet format is documented in
-  [badicsalex/ar-drivers-rs](https://github.com/badicsalex/ar-drivers-rs).
-- The Android app builds on [libusb](https://github.com/libusb/libusb) (LGPL-2.1,
-  kept as its own shared library) and [libuvc](https://github.com/libuvc/libuvc) (BSD).
+- The vendor HID packet formats are documented in
+  [badicsalex/ar-drivers-rs](https://github.com/badicsalex/ar-drivers-rs) and
+  [wheaney/nrealAirLinuxDriver](https://gitlab.com/wheaney/nrealAirLinuxDriver).
+- The Android app builds on [libusb](https://github.com/libusb/libusb)
+  (LGPL-2.1, kept as its own shared library) and
+  [libuvc](https://github.com/libuvc/libuvc) (BSD).
 - Developed with [Claude Code](https://claude.com/claude-code) (Claude Fable 5) —
-  the reverse-engineering analysis, tools, and documentation in this repo were built
-  in collaboration with the AI agent.
+  the reverse-engineering analysis, tools, and documentation in this repo were
+  built in collaboration with the AI agent.
 
 ## Disclaimer
 
-This is an unofficial, reverse-engineered project, not affiliated with or endorsed by
-XREAL. It only *reads* the camera stream over standard UVC — it sends no commands that
-modify the device — but use it at your own risk.
+This is an unofficial, reverse-engineered project, not affiliated with or
+endorsed by XREAL. It only reads the sensor streams and sends the documented,
+community-validated query/enable commands — but use it at your own risk.
 
 ## License
 
