@@ -135,8 +135,9 @@ def main():
 
                     if all(have):
                         pair_ready = True
-                        canvas[:, :OW] = clean[0]
-                        canvas[:, OW:] = clean[1]
+                        # cam1 is the physical LEFT camera (verified on-device)
+                        canvas[:, :OW] = clean[1]
+                        canvas[:, OW:] = clean[0]
                         if fbw:
                             fbw.publish(canvas, f.counter, f.device_ts or 0)
 
@@ -152,7 +153,8 @@ def main():
                         v is not None for v in latest_raw)):
                     snap_request = False
                     path = f"preview_snap_{int(time.time())}.png"
-                    cv2.imwrite(path, canvas if show_clean else np.hstack(latest_raw))
+                    cv2.imwrite(path, canvas if show_clean
+                                else np.hstack((latest_raw[1], latest_raw[0])))
                     print(f"snapshot saved: {path}")
 
                 if gui:
@@ -163,7 +165,7 @@ def main():
                         else:
                             if any(v is None for v in latest_raw):
                                 continue
-                            shown = np.hstack(latest_raw)
+                            shown = np.hstack((latest_raw[1], latest_raw[0]))
                         hud(shown, f"XREAL Air 2 Ultra  L | R  ctr={f.counter}  "
                                    f"{fps:.0f} fps  [{'CLEAN' if show_clean else 'SCRAMBLED'}]"
                                    f"{'  PAUSED' if paused else ''}  "

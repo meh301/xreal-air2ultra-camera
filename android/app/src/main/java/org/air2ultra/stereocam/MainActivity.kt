@@ -46,7 +46,6 @@ import java.util.Locale
  */
 class PassthroughView(context: Context) : View(context) {
     var bitmap: Bitmap? = null
-    var swap = false
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
 
     override fun onDraw(canvas: Canvas) {
@@ -55,8 +54,7 @@ class PassthroughView(context: Context) : View(context) {
         val srcHalf = bm.width / 2
         val dstHalf = width / 2f
         for (eye in 0..1) {
-            val srcIdx = if (swap) 1 - eye else eye
-            val src = Rect(srcIdx * srcHalf, 0, (srcIdx + 1) * srcHalf, bm.height)
+            val src = Rect(eye * srcHalf, 0, (eye + 1) * srcHalf, bm.height)
             val scale = minOf(dstHalf / srcHalf, height.toFloat() / bm.height)
             val dw = srcHalf * scale
             val dh = bm.height * scale
@@ -221,10 +219,7 @@ class MainActivity : Activity() {
         }
         if (presentation?.display?.displayId == display.displayId) return
         presentation?.dismiss()
-        presentation = GlassesPresentation(this, display).also {
-            it.view.swap = swapEyes
-            it.show()
-        }
+        presentation = GlassesPresentation(this, display).also { it.show() }
     }
 
     private val usbReceiver = object : BroadcastReceiver() {
@@ -274,10 +269,7 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.snapshot).setOnClickListener { saveSnapshot() }
         findViewById<Button>(R.id.swap).setOnClickListener {
             swapEyes = !swapEyes
-            presentation?.view?.let {
-                it.swap = swapEyes
-                it.invalidate()
-            }
+            XrealNative.nativeSetSwap(swapEyes)   // phone view, glasses, snapshots
         }
         findViewById<Button>(R.id.mirror).setOnClickListener {
             mirror = !mirror
@@ -387,12 +379,40 @@ class MainActivity : Activity() {
 
     private fun saveSnapshot() {
         val bm = bitmap ?: return
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: filesDir
-        val file = File(dir, "xreal_$stamp.png")
-        FileOutputStream(file).use { bm.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        Toast.makeText(this, getString(R.string.snapshot_saved, file.path), Toast.LENGTH_LONG)
-            .show()
+        val name = "xreal_" +
+            SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png"
+        val where: String
+        if (Build.VERSION.SDK_INT >= 29) {
+            // MediaStore: lands in the gallery, no storage permission needed
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,
+                    Environment.DIRECTORY_PICTURES + "/XREAL")
+            }
+            val uri = contentResolver.insert(
+                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri == null) {
+                Toast.makeText(this, R.string.snapshot_failed, Toast.LENGTH_LONG).show()
+                return
+            }
+            contentResolver.openOutputStream(uri)?.use {
+                bm.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            where = "Pictures/XREAL/$name"
+        } else {
+            // pre-Android-10 fallback: classic public directory
+            val dir = File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_PICTURES), "XREAL")
+            dir.mkdirs()
+            val file = File(dir, name)
+            FileOutputStream(file).use { bm.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            android.media.MediaScannerConnection.scanFile(
+                this, arrayOf(file.path), null, null)
+            where = file.path
+        }
+        Toast.makeText(this, getString(R.string.snapshot_saved, where),
+                       Toast.LENGTH_LONG).show()
     }
 
     override fun onDestroy() {

@@ -23,11 +23,13 @@ void xr_init(void) {
         INV_REORDER[REORDER[i]] = (uint8_t)i;
     /* byte i of the descrambled stream is pixel i%640 of sensor line i/640;
      * sensor lines are columns of the upright portrait image (sensors sit
-     * rotated 90 deg, the two cameras 180 deg opposed) */
+     * rotated 90 deg, the two cameras 180 deg opposed). Horizontal sense
+     * verified against the real scene on-device (the original mapping was
+     * mirrored). */
     for (int32_t i = 0; i < XR_IMG_BYTES; i++) {
         int32_t r = i / XR_W, c = i % XR_W;
-        LUT[0][i] = c * XR_OW + r;                                   /* cam0 */
-        LUT[1][i] = (XR_W - 1 - c) * XR_OW + (XR_H_IMG - 1 - r);     /* cam1 */
+        LUT[0][i] = c * XR_OW + (XR_H_IMG - 1 - r);                  /* cam0 */
+        LUT[1][i] = (XR_W - 1 - c) * XR_OW + r;                      /* cam1 */
     }
 }
 

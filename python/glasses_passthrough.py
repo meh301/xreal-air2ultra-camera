@@ -193,11 +193,12 @@ def main():
                     if time.time() - t0 >= 1:
                         fps, n, t0 = n / (time.time() - t0), 0, time.time()
                     if all(have):
-                        pair[:, :OW] = clean[0]
-                        pair[:, OW:] = clean[1]
+                        # cam1 is the physical LEFT camera (verified on-device)
+                        pair[:, :OW] = clean[1]
+                        pair[:, OW:] = clean[0]
                         fbw.publish(pair, f.counter, f.device_ts)
                         canvas[:] = 0
-                        left, right = (clean[1], clean[0]) if swap else (clean[0], clean[1])
+                        left, right = (clean[0], clean[1]) if swap else (clean[1], clean[0])
                         draw_eye(canvas, left, 0, cw // 2, rot, mirror)
                         draw_eye(canvas, right if sbs else left, cw // 2,
                                  cw - cw // 2, rot, mirror)

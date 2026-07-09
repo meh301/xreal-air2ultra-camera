@@ -47,7 +47,7 @@ func buildLUT(isRight: Bool) -> [Int32] {
             for k in 0..<seg {
                 let r = pX, c = pY + k
                 let y = isRight ? c : 639 - c
-                let x = isRight ? r : 479 - r
+                let x = isRight ? 479 - r : r   // 横方向は実景で検証済み (旧マッピングは鏡像)
                 lut[idx] = Int32(y * 480 + x)
                 idx += 1
             }
@@ -277,7 +277,8 @@ final class Cam: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         let cw = showClean ? 2 * OW : 2 * W
         let ch = showClean ? OH : HIMG
         var combined = [UInt8](repeating: 0, count: cw * ch)
-        let (a, b, sw) = showClean ? (c0, c1, OW) : (r0, r1, W)
+        // cam1 が物理的な左カメラ (実機検証済み) なので左ペインに
+        let (a, b, sw) = showClean ? (c1, c0, OW) : (r1, r0, W)
         for y in 0..<ch {
             for x in 0..<sw {
                 combined[y * cw + x] = a[y * sw + x]

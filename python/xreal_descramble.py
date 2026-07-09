@@ -20,6 +20,8 @@ REORDER = [119,54,21,0,108,22,51,63,93,99,67,7,32,112,52,43,
 NB, BS = 128, 2400  # 128ブロック x 2400バイト = 307200
 
 def build_lut(is_right):
+    # 横方向の向きは実景と照合して検証済み (2026-07): myXreal 由来の元テーブル
+    # ((c, r) / (639-c, 479-r)) は左右反転した像を出していたため x を反転している
     lut = np.zeros(NB*BS, np.int32)
     p_y = p_x = idx = 0
     for _ in range(NB):
@@ -28,7 +30,7 @@ def build_lut(is_right):
             seg = min(p_y + (BS - off), 640) - p_y
             for k in range(seg):
                 r, c = p_x, p_y + k
-                y, x = (c, r) if is_right else (639 - c, 479 - r)
+                y, x = (c, 479 - r) if is_right else (639 - c, r)
                 lut[idx] = y * 480 + x
                 idx += 1
             off += seg; p_y += seg

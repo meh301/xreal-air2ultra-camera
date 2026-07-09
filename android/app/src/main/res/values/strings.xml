@@ -18,4 +18,5 @@
     <string name="snapshot">Snapshot</string>
     <string name="status_reconnecting">Stream stalled — reconnecting…</string>
     <string name="snapshot_saved">Snapshot saved: %1$s</string>
+    <string name="snapshot_failed">Could not create the snapshot file.</string>
 </resources>

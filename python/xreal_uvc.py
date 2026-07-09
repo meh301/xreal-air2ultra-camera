@@ -62,14 +62,16 @@ def build_lut(is_right):
 
     Byte i of the stream is pixel i%640 of sensor line i//640; the sensors sit
     rotated 90 deg (and the two cameras 180 deg opposed), so sensor lines are
-    columns of the upright 480x640 portrait image.
+    columns of the upright 480x640 portrait image. The horizontal sense was
+    verified against the real scene on-device (the original myXreal-derived
+    mapping was mirrored).
     """
     idx = np.arange(NB * BS, dtype=np.int32)
     r, c = idx // W, idx % W
     if is_right:
-        y, x = c, r
+        y, x = c, (H_IMG - 1) - r
     else:
-        y, x = (W - 1) - c, (H_IMG - 1) - r
+        y, x = (W - 1) - c, r
     return y * OW + x
 
 

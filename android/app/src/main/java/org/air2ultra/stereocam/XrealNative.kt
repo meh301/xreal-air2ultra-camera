@@ -25,6 +25,10 @@ object XrealNative {
      * glasses passthrough). */
     external fun nativeSetMirror(mirror: Boolean)
 
+    /** Swap the two panes of the composed view (also affects the glasses
+     * passthrough and snapshots). */
+    external fun nativeSetSwap(swap: Boolean)
+
     /**
      * Copy the newest composed side-by-side RGBA frame into [buf] (a direct
      * ByteBuffer, capacity >= 1280*640*4). Returns 0 when there is no new

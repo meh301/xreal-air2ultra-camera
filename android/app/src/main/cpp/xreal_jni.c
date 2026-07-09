@@ -51,6 +51,7 @@ static struct {
     int fps_x10;
 
     atomic_int mirror;          /* horizontal per-eye flip of the composed view */
+    atomic_int swap_eyes;       /* swap the two panes (debug) */
 
     /* IMU (HID interface 2 over the same libusb handle) */
     libusb_device_handle *usb;
@@ -81,6 +82,7 @@ static int64_t now_ms(void) {
 static void compose(int counter) {
     int clean = atomic_load(&S.show_clean);
     int mirror = atomic_load(&S.mirror);
+    int swap = atomic_load(&S.swap_eyes);
     int sw = clean ? XR_OW : XR_W;
     int sh = clean ? XR_OH : XR_H_IMG;
     pthread_mutex_lock(&S.lock);
@@ -88,9 +90,12 @@ static void compose(int counter) {
     S.ch = sh;
     S.counter = counter;
     for (int cam = 0; cam < 2; cam++) {
+        /* cam1 is the physical LEFT camera (verified on-device): left pane */
+        int pane = (cam == 1) ? 0 : 1;
+        if (swap) pane = 1 - pane;
         const uint8_t *src = clean ? S.clean[cam] : S.raweq[cam];
         for (int y = 0; y < sh; y++) {
-            uint8_t *dst = S.rgba + (y * S.cw + cam * sw) * 4;
+            uint8_t *dst = S.rgba + (y * S.cw + pane * sw) * 4;
             const uint8_t *s = src + y * sw;
             for (int x = 0; x < sw; x++) {
                 uint8_t v = s[mirror ? sw - 1 - x : x];
@@ -407,6 +412,13 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetMirror(JNIEnv *env, jclass cls
                                                          jboolean mirror) {
     (void)env; (void)cls;
     atomic_store(&S.mirror, mirror ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetSwap(JNIEnv *env, jclass cls,
+                                                       jboolean swap) {
+    (void)env; (void)cls;
+    atomic_store(&S.swap_eyes, swap ? 1 : 0);
 }
 
 /* Copy the latest composed RGBA frame into `buf` (a direct ByteBuffer of at

@@ -72,7 +72,8 @@ def main(cap_dir, out_dir):
         for i in range(n):
             a = cv2.imread(os.path.join(out_dir, f"clean_cam0_{i:04d}.png"), 0)
             b = cv2.imread(os.path.join(out_dir, f"clean_cam1_{i:04d}.png"), 0)
-            vw.write(cv2.cvtColor(np.hstack([a, b]), cv2.COLOR_GRAY2BGR))
+            # cam1 = 左カメラ (実機検証済み) を左側に
+            vw.write(cv2.cvtColor(np.hstack([b, a]), cv2.COLOR_GRAY2BGR))
         vw.release()
         print(f"stereo_feed.mp4: {n} pairs")
 

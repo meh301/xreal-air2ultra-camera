@@ -53,7 +53,7 @@ these tools support; parsing is implemented in
 | 22–27 | auxiliary payload, present only on aux frames (see below) |
 | 34 | constant `0x01` |
 | 51–56 | **frame dimensions as LE u16: 640, 480, 640** — use as the fingerprint |
-| 59 | **camera bit: `0x01` = cam0 (the right-LUT camera), `0x00` = cam1** |
+| 59 | **camera bit: `0x01` = cam0 = the physical RIGHT camera, `0x00` = cam1 = LEFT** (verified on-device; all viewers draw cam1 in the left pane) |
 | 60 | constant `0x80` |
 | 62, 63 | per-camera values (purpose unknown) |
 
@@ -94,7 +94,10 @@ but in practice it is rock solid.)
 640-byte lines that correspond to *columns* of the upright image — the sensors are
 mounted rotated 90°, and the two cameras are mounted 180° opposed to each other. The
 descrambler's LUT therefore transposes into a 480×640 portrait raster, using
-`(y, x) = (c, r)` for cam0 and `(639-c, 479-r)` for cam1.
+`(y, x) = (c, 479−r)` for cam0 and `(639−c, r)` for cam1 (line index `r`, byte
+within line `c`). The horizontal sense was verified against the real scene
+on-device — the mapping originally lifted from myXreal (`(c, r)` / `(639−c,
+479−r)`) produced horizontally mirrored images.
 
 ## Sensor artifacts and cleanup
 

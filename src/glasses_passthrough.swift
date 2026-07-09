@@ -49,7 +49,7 @@ func buildLUT(isRight: Bool) -> [Int32] {
             for k in 0..<seg {
                 let r = pX, c = pY + k
                 let y = isRight ? c : 639 - c
-                let x = isRight ? r : 479 - r
+                let x = isRight ? 479 - r : r   // 横方向は実景で検証済み (旧マッピングは鏡像)
                 lut[idx] = Int32(y * 480 + x)
                 idx += 1
             }
@@ -274,8 +274,9 @@ final class Cam: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         if dt >= 1 { fps = Double(fpsCount) / dt; fpsCount = 0; fpsStart = Date() }
 
         guard let c0 = latest[0], let c1 = latest[1] else { return }   // 両カメラ揃うまで待つ
-        let leftCam = swapEyes ? c1 : c0
-        let rightCam = swapEyes ? c0 : c1
+        // cam1 が物理的な左カメラ (実機検証済み)
+        let leftCam = swapEyes ? c0 : c1
+        let rightCam = swapEyes ? c1 : c0
         guard let lImg = cgGray(leftCam, OW, OH), let rImg = cgGray(rightCam, OW, OH) else { return }
         let lbl = String(format: "L|R ctr=%d %.0f fps  x:swap r:rot m:mirror s:sbs q:quit", counter, fps)
         DispatchQueue.main.async {
