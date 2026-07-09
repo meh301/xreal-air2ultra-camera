@@ -10,11 +10,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.RectF
 import android.hardware.display.DisplayManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
@@ -25,7 +20,8 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.view.Display
-import android.view.View
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.TextView
@@ -39,40 +35,33 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Draws the stereo pair onto the glasses' own display: the left half of the
- * source bitmap (left camera) aspect-fit into the left half of the screen,
- * the right half into the right half. With the glasses in 3D/SBS mode each
- * half lands on one eye — camera passthrough.
+ * Fullscreen surface on the glasses' display (external/presentation display).
+ * Native code renders composed stereo pairs straight into the Surface from
+ * the UVC callback thread — no UI polling or bitmap copies on this path,
+ * which keeps passthrough latency to a minimum. With the glasses in 3D/SBS
+ * mode the left half lands on the left eye.
  */
-class PassthroughView(context: Context) : View(context) {
-    var bitmap: Bitmap? = null
-    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-
-    override fun onDraw(canvas: Canvas) {
-        canvas.drawColor(Color.BLACK)
-        val bm = bitmap ?: return
-        val srcHalf = bm.width / 2
-        val dstHalf = width / 2f
-        for (eye in 0..1) {
-            val src = Rect(eye * srcHalf, 0, (eye + 1) * srcHalf, bm.height)
-            val scale = minOf(dstHalf / srcHalf, height.toFloat() / bm.height)
-            val dw = srcHalf * scale
-            val dh = bm.height * scale
-            val ox = eye * dstHalf + (dstHalf - dw) / 2
-            val oy = (height - dh) / 2
-            canvas.drawBitmap(bm, src, RectF(ox, oy, ox + dw, oy + dh), paint)
-        }
-    }
-}
-
-/** Fullscreen [PassthroughView] on an external (presentation) display. */
 class GlassesPresentation(context: Context, display: Display) :
     Presentation(context, display) {
-    val view = PassthroughView(context)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(view)
+        val surfaceView = SurfaceView(context)
+        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                XrealNative.nativeSetSurface(holder.surface)
+            }
+
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int,
+                                        width: Int, height: Int) {
+                XrealNative.nativeSetSurface(holder.surface)
+            }
+
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                XrealNative.nativeSetSurface(null)
+            }
+        })
+        setContentView(surfaceView)
     }
 }
 
@@ -94,7 +83,8 @@ class MainActivity : Activity() {
         const val XREAL_VID = 0x3318
         const val XREAL_PID = 0x0426
         const val ACTION_USB_PERMISSION = "org.air2ultra.stereocam.USB_PERMISSION"
-        const val FRAME_INTERVAL_MS = 33L
+        const val FRAME_INTERVAL_MS = 16L   // phone-UI poll; glasses get frames
+                                            // pushed natively, not polled
         const val REQ_RUNTIME_PERMS = 1
         // Android 10+ refuses the USB grant for a device containing a camera
         // and microphones unless the app holds these runtime permissions
@@ -159,10 +149,6 @@ class MainActivity : Activity() {
                 frameBuffer.position(0)
                 bm.copyPixelsFromBuffer(frameBuffer)
                 imageView.invalidate()
-                presentation?.view?.let {
-                    it.bitmap = bm
-                    it.invalidate()
-                }
                 statusView.text = getString(
                     R.string.status_streaming,
                     counter, fps, if (showClean) "CLEAN" else "SCRAMBLED"

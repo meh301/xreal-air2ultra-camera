@@ -29,6 +29,7 @@ import time
 import cv2
 import numpy as np
 
+from xreal_align import Aligner
 from xreal_fb import FramebufferWriter
 from xreal_uvc import Cleaner, Descrambler, OH, OW, backend_by_name, find_camera
 
@@ -121,6 +122,13 @@ def main():
     ap.add_argument("--window", action="store_true", help="windowed preview")
     ap.add_argument("--geometry", metavar="X,Y,W,H",
                     help="place fullscreen manually (skips display detection)")
+    ap.add_argument("--align", metavar="CALIB.json",
+                    help="1:1 world-aligned passthrough using the factory "
+                         "calibration (dump it with xreal_imu.py --config); "
+                         "disables the r/m keys, geometry is calibrated")
+    ap.add_argument("--depth", type=float, default=float("inf"),
+                    help="assumed scene distance in meters for --align "
+                         "(default: infinity)")
     args = ap.parse_args()
 
     monitors = list_monitors()
@@ -165,6 +173,11 @@ def main():
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN, cw, ch)
 
+    aligner = Aligner(args.align, half_size=(cw // 2, ch),
+                      depth=args.depth) if args.align else None
+    if aligner:
+        print("1:1 world-aligned mode (42x25 deg per eye from the calibration)")
+
     descr = [Descrambler(is_right=True), Descrambler(is_right=False)]  # cam0, cam1
     cleaners = [Cleaner(), Cleaner()]
     clean = [np.empty((OH, OW), np.uint8) for _ in range(2)]
@@ -198,10 +211,18 @@ def main():
                         pair[:, OW:] = clean[0]
                         fbw.publish(pair, f.counter, f.device_ts)
                         canvas[:] = 0
-                        left, right = (clean[0], clean[1]) if swap else (clean[1], clean[0])
-                        draw_eye(canvas, left, 0, cw // 2, rot, mirror)
-                        draw_eye(canvas, right if sbs else left, cw // 2,
-                                 cw - cw // 2, rot, mirror)
+                        if aligner:
+                            lv, rv = aligner.warp(clean[1], clean[0])
+                            if swap:
+                                lv, rv = rv, lv
+                            canvas[:, :cw // 2] = lv
+                            canvas[:, cw // 2:] = rv if sbs else lv
+                        else:
+                            left, right = ((clean[0], clean[1]) if swap
+                                           else (clean[1], clean[0]))
+                            draw_eye(canvas, left, 0, cw // 2, rot, mirror)
+                            draw_eye(canvas, right if sbs else left, cw // 2,
+                                     cw - cw // 2, rot, mirror)
                         if args.window or target is None:
                             cv2.putText(canvas,
                                         f"L|R ctr={f.counter} {fps:.0f} fps  "

@@ -1,5 +1,6 @@
 package org.air2ultra.stereocam
 
+import android.view.Surface
 import java.nio.ByteBuffer
 
 /** JNI bindings to libxrealcam.so (libusb + libuvc + descrambler). */
@@ -28,6 +29,13 @@ object XrealNative {
     /** Swap the two panes of the composed view (also affects the glasses
      * passthrough and snapshots). */
     external fun nativeSetSwap(swap: Boolean)
+
+    /**
+     * Attach the glasses' [Surface]; native code then presents each composed
+     * stereo pair directly from the capture thread (lowest latency). Pass
+     * null before the surface is destroyed.
+     */
+    external fun nativeSetSurface(surface: Surface?)
 
     /**
      * Copy the newest composed side-by-side RGBA frame into [buf] (a direct

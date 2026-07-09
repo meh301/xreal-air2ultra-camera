@@ -14,6 +14,8 @@
 #include <time.h>
 
 #include <android/log.h>
+#include <android/native_window.h>
+#include <android/native_window_jni.h>
 #include <libusb.h>
 #include <libuvc/libuvc.h>
 
@@ -45,6 +47,12 @@ static struct {
     uint8_t rgba[MAX_W * MAX_H * 4];
     int cw, ch, counter;
     uint32_t seq, grabbed;
+
+    /* glasses passthrough: composed frames are pushed straight into this
+     * window from the UVC thread — no UI polling, no bitmap copy, no view
+     * pass; saves roughly one to two display frames of latency */
+    ANativeWindow *win;
+    int win_w, win_h;
 
     int fps_count;
     int64_t fps_t0;
@@ -105,6 +113,24 @@ static void compose(int counter) {
         }
     }
     S.seq++;
+
+    if (S.win) {
+        if (S.win_w != S.cw || S.win_h != S.ch) {
+            ANativeWindow_setBuffersGeometry(S.win, S.cw, S.ch,
+                                             WINDOW_FORMAT_RGBA_8888);
+            S.win_w = S.cw;
+            S.win_h = S.ch;
+        }
+        ANativeWindow_Buffer nb;
+        if (ANativeWindow_lock(S.win, &nb, NULL) == 0) {
+            int rows = S.ch < nb.height ? S.ch : nb.height;
+            int rowbytes = (S.cw < nb.width ? S.cw : nb.width) * 4;
+            for (int y = 0; y < rows; y++)
+                memcpy((uint8_t *)nb.bits + (size_t)y * nb.stride * 4,
+                       S.rgba + (size_t)y * S.cw * 4, rowbytes);
+            ANativeWindow_unlockAndPost(S.win);
+        }
+    }
     pthread_mutex_unlock(&S.lock);
 }
 
@@ -419,6 +445,21 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetSwap(JNIEnv *env, jclass cls,
                                                        jboolean swap) {
     (void)env; (void)cls;
     atomic_store(&S.swap_eyes, swap ? 1 : 0);
+}
+
+/* Attach/detach the glasses' Surface; composed frames are then presented
+ * directly from the UVC thread. Pass null before the surface is destroyed. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetSurface(JNIEnv *env, jclass cls,
+                                                          jobject surface) {
+    (void)cls;
+    ANativeWindow *nw = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
+    pthread_mutex_lock(&S.lock);
+    if (S.win) ANativeWindow_release(S.win);
+    S.win = nw;
+    S.win_w = S.win_h = 0;
+    pthread_mutex_unlock(&S.lock);
+    LOGI("passthrough surface %s", nw ? "attached" : "detached");
 }
 
 /* Copy the latest composed RGBA frame into `buf` (a direct ByteBuffer of at

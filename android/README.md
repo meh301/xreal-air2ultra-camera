@@ -60,7 +60,10 @@ Or open `android/` in Android Studio and run — but run `fetch_deps` first.
 4. When the phone drives the glasses' display (DisplayPort alt-mode), the
    clean stereo pair is also rendered onto it fullscreen as **SBS
    passthrough** (left camera → left eye; put the glasses in 3D/SBS mode).
-   *Swap L/R* flips the eyes if the mapping looks inverted.
+   *Swap L/R* flips the eyes if the mapping looks inverted. Passthrough
+   frames are pushed into the glasses' Surface directly from the native
+   capture thread (no UI polling or bitmap copies on that path); setting the
+   glasses to a higher refresh-rate mode shaves a few more ms of vsync wait.
 
 The app requires the current glasses firmware (MCU `12.1.00.498+`); older
 firmware uses a different telemetry layout — update at

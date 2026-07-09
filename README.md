@@ -75,7 +75,7 @@ a 1 kHz IMU readout with fused orientation. Details:
 | Command | What it does |
 |---------|--------------|
 | `python python/preview_clean.py` | Real-time stereo viewer; publishes every clean pair to the shared-memory framebuffer. `--headless` (no window), `--snap out.png` (one snapshot), `--test in.pgm pfx` (offline descramble check). |
-| `python python/glasses_passthrough.py` | Stereo passthrough onto the glasses' own display (left camera → left eye; put the glasses in 3D/SBS mode). `--list`/`--display N` pick a display, `--window` previews without glasses, `--geometry X,Y,W,H` manual placement. Keys: `x` swap · `r` rotate · `m` mirror · `s` SBS. |
+| `python python/glasses_passthrough.py` | Stereo passthrough onto the glasses' own display (left camera → left eye; put the glasses in 3D/SBS mode). `--align calib.json` renders a **1:1 world-aligned view** from the factory calibration (~42°×25° per eye; `--depth` sets the assumed scene distance, default infinity). `--list`/`--display N` pick a display, `--window` previews without glasses. Keys: `x` swap · `r` rotate · `m` mirror · `s` SBS. |
 | `python python/xreal_cam.py <N> <dir>` | Record N raw (still scrambled) frames as `cam{0,1}_*.pgm` + `meta.csv`; output identical to the macOS recorder. |
 | `python python/process_clean.py <dir> <out>` | Offline pipeline: descramble + denoise a recording into PNGs and a side-by-side `stereo_feed.mp4`. |
 | `python python/xreal_uvc.py` | Scan and diagnose capture backends (this file is also the capture library the other tools import). |

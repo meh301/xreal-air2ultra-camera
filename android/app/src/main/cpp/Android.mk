@@ -45,7 +45,7 @@ LOCAL_SRC_FILES := xreal_core.c xreal_imu.c xreal_jni.c
 LOCAL_STATIC_LIBRARIES := uvc
 LOCAL_SHARED_LIBRARIES := libusb1.0
 LOCAL_CFLAGS := -O2 -std=c11 -Wall
-LOCAL_LDLIBS := -llog
+LOCAL_LDLIBS := -llog -landroid
 include $(BUILD_SHARED_LIBRARY)
 
 # ---- libusb1.0.so (upstream-maintained module definition; include last, it
