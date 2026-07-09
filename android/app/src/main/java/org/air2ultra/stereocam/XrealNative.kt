@@ -21,6 +21,10 @@ object XrealNative {
     /** true = descrambled/denoised view, false = raw scrambled view. */
     external fun nativeSetClean(clean: Boolean)
 
+    /** Horizontal per-eye flip of the composed view (also affects the
+     * glasses passthrough). */
+    external fun nativeSetMirror(mirror: Boolean)
+
     /**
      * Copy the newest composed side-by-side RGBA frame into [buf] (a direct
      * ByteBuffer, capacity >= 1280*640*4). Returns 0 when there is no new

@@ -14,6 +14,8 @@
     <string name="show_raw">Raw</string>
     <string name="show_clean">Clean</string>
     <string name="swap_eyes">Swap L/R</string>
+    <string name="mirror">Mirror</string>
     <string name="snapshot">Snapshot</string>
+    <string name="status_reconnecting">Stream stalled — reconnecting…</string>
     <string name="snapshot_saved">Snapshot saved: %1$s</string>
 </resources>

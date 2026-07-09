@@ -50,9 +50,12 @@ static struct {
     int64_t fps_t0;
     int fps_x10;
 
+    atomic_int mirror;          /* horizontal per-eye flip of the composed view */
+
     /* IMU (HID interface 2 over the same libusb handle) */
     libusb_device_handle *usb;
     int imu_ep_in;
+    int imu_ep_out;             /* interrupt OUT for commands, 0 if absent */
     pthread_t imu_thread;
     atomic_int imu_running;
     pthread_mutex_t imu_lock;
@@ -77,6 +80,7 @@ static int64_t now_ms(void) {
 
 static void compose(int counter) {
     int clean = atomic_load(&S.show_clean);
+    int mirror = atomic_load(&S.mirror);
     int sw = clean ? XR_OW : XR_W;
     int sh = clean ? XR_OH : XR_H_IMG;
     pthread_mutex_lock(&S.lock);
@@ -89,7 +93,7 @@ static void compose(int counter) {
             uint8_t *dst = S.rgba + (y * S.cw + cam * sw) * 4;
             const uint8_t *s = src + y * sw;
             for (int x = 0; x < sw; x++) {
-                uint8_t v = s[x];
+                uint8_t v = s[mirror ? sw - 1 - x : x];
                 dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 0xFF;
                 dst += 4;
             }
@@ -140,24 +144,44 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
 
 /* ---- IMU: enable + drain thread --------------------------------------------- */
 
-static void imu_enable(void) {
+static int imu_enable(void) {
     uint8_t cmd[XR_IMU_CMD_LEN], on = 1;
     xr_imu_command(cmd, 0x19, &on, 1);
-    /* HID SET_REPORT(output, id 0) — universal, no interrupt-out ep needed */
-    libusb_control_transfer(S.usb, 0x21, 0x09, 0x0200, XR_IMU_INTERFACE,
-                            cmd, XR_IMU_CMD_LEN, 1000);
+    int rc;
+    if (S.imu_ep_out) {
+        /* prefer the interrupt OUT pipe — it is what OS HID drivers use, and
+         * hammering ep0 with SET_REPORT wedged the whole device on a phone */
+        int sent = 0;
+        rc = libusb_interrupt_transfer(S.usb, S.imu_ep_out, cmd, XR_IMU_CMD_LEN,
+                                       &sent, 1000);
+        LOGI("IMU enable via interrupt-out 0x%02x: rc=%d sent=%d",
+             S.imu_ep_out, rc, sent);
+    } else {
+        rc = libusb_control_transfer(S.usb, 0x21, 0x09, 0x0200, XR_IMU_INTERFACE,
+                                     cmd, XR_IMU_CMD_LEN, 1000);
+        LOGI("IMU enable via SET_REPORT: rc=%d", rc);
+    }
+    return rc;
 }
 
 static void *imu_worker(void *arg) {
     (void)arg;
     uint8_t buf[XR_IMU_REPORT];
-    int stalls = 0;
+    int stalls = 0, reenabled = 0;
     while (atomic_load(&S.imu_running)) {
         int got = 0;
         int rc = libusb_interrupt_transfer(S.usb, S.imu_ep_in, buf, sizeof buf,
                                            &got, 500);
         if (rc == LIBUSB_ERROR_TIMEOUT || (rc == 0 && got == 0)) {
-            if (++stalls >= 3) { imu_enable(); stalls = 0; }
+            stalls++;
+            /* one cautious re-enable, then give up quietly — never risk
+             * disturbing the camera stream with repeated commands */
+            if (stalls == 3 && !reenabled) { reenabled = 1; imu_enable(); }
+            if (stalls >= 10) {
+                LOGE("IMU stream silent, giving up (camera unaffected)");
+                atomic_store(&S.imu_running, 0);
+                return NULL;
+            }
             continue;
         }
         if (rc < 0) { LOGE("IMU transfer failed: %d", rc); break; }
@@ -189,27 +213,35 @@ static void *imu_worker(void *arg) {
     return NULL;
 }
 
+static int imu_started;   /* thread created + interface claimed this session */
+
 static void imu_start(void) {
     S.usb = uvc_get_libusb_handle(S.devh);
-    S.imu_ep_in = 0;
+    S.imu_ep_in = S.imu_ep_out = 0;
+    imu_started = 0;
     libusb_set_auto_detach_kernel_driver(S.usb, 1);
-    if (libusb_claim_interface(S.usb, XR_IMU_INTERFACE) != 0) {
-        LOGE("IMU: could not claim interface %d (camera unaffected)",
-             XR_IMU_INTERFACE);
+    int rc = libusb_claim_interface(S.usb, XR_IMU_INTERFACE);
+    if (rc != 0) {
+        LOGE("IMU: could not claim interface %d: rc=%d (camera unaffected)",
+             XR_IMU_INTERFACE, rc);
         return;
     }
     struct libusb_config_descriptor *cfg;
     if (libusb_get_active_config_descriptor(libusb_get_device(S.usb), &cfg) == 0) {
-        for (int i = 0; i < cfg->bNumInterfaces && !S.imu_ep_in; i++) {
+        for (int i = 0; i < cfg->bNumInterfaces; i++) {
             const struct libusb_interface_descriptor *alt =
                 &cfg->interface[i].altsetting[0];
             if (alt->bInterfaceNumber != XR_IMU_INTERFACE) continue;
-            for (int e = 0; e < alt->bNumEndpoints; e++)
-                if (alt->endpoint[e].bEndpointAddress & LIBUSB_ENDPOINT_IN)
-                    S.imu_ep_in = alt->endpoint[e].bEndpointAddress;
+            for (int e = 0; e < alt->bNumEndpoints; e++) {
+                uint8_t addr = alt->endpoint[e].bEndpointAddress;
+                if (addr & LIBUSB_ENDPOINT_IN) S.imu_ep_in = addr;
+                else S.imu_ep_out = addr;
+            }
         }
         libusb_free_config_descriptor(cfg);
     }
+    LOGI("IMU interface %d endpoints: in=0x%02x out=0x%02x",
+         XR_IMU_INTERFACE, S.imu_ep_in, S.imu_ep_out);
     if (!S.imu_ep_in) {
         LOGE("IMU: no interrupt-in endpoint on interface %d", XR_IMU_INTERFACE);
         libusb_release_interface(S.usb, XR_IMU_INTERFACE);
@@ -223,14 +255,15 @@ static void imu_start(void) {
     imu_enable();
     atomic_store(&S.imu_running, 1);
     pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
-    LOGI("IMU streaming (interface %d, ep 0x%02x)", XR_IMU_INTERFACE, S.imu_ep_in);
+    imu_started = 1;
 }
 
 static void imu_stop(void) {
-    if (atomic_load(&S.imu_running)) {
+    if (imu_started) {
         atomic_store(&S.imu_running, 0);
-        pthread_join(S.imu_thread, NULL);
+        pthread_join(S.imu_thread, NULL);   /* fine if the worker already left */
         libusb_release_interface(S.usb, XR_IMU_INTERFACE);
+        imu_started = 0;
     }
     S.usb = NULL;
 }
@@ -367,6 +400,13 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetClean(JNIEnv *env, jclass cls,
                                                         jboolean clean) {
     (void)env; (void)cls;
     atomic_store(&S.show_clean, clean ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetMirror(JNIEnv *env, jclass cls,
+                                                         jboolean mirror) {
+    (void)env; (void)cls;
+    atomic_store(&S.mirror, mirror ? 1 : 0);
 }
 
 /* Copy the latest composed RGBA frame into `buf` (a direct ByteBuffer of at

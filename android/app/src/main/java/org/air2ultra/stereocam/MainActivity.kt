@@ -115,9 +115,12 @@ class MainActivity : Activity() {
     private var streaming = false
     private var showClean = true
     private var swapEyes = false
+    private var mirror = false
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
+    private var lastFrameAt = 0L        // watchdog: last time a frame arrived
+    private var lastReconnectAt = 0L
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
     private val imuBatch: ByteBuffer =                 // 256 samples x 32 B
         ByteBuffer.allocateDirect(256 * 32).order(ByteOrder.nativeOrder())
@@ -129,8 +132,23 @@ class MainActivity : Activity() {
 
     private val pollFrame = object : Runnable {
         override fun run() {
+            // watchdog: a mid-stream device hiccup (e.g. DP alt-mode
+            // renegotiation right after plug-in) silently kills every
+            // transfer; a full reopen recovers without replugging
+            val now = System.currentTimeMillis()
+            if (streaming && now - lastFrameAt > 4000 &&
+                now - lastReconnectAt > 6000) {
+                lastReconnectAt = now
+                lastFrameAt = 0L
+                statusView.text = getString(R.string.status_reconnecting)
+                stopStreaming()
+                connectToGlasses(null)
+                return   // connect flow restarts the poll loop
+            }
+
             val packed = XrealNative.nativeGrabFrame(frameBuffer)
             if (packed != 0L) {
+                lastFrameAt = now
                 val w = (packed ushr 48).toInt()
                 val h = ((packed ushr 32) and 0xFFFF).toInt()
                 val fps = ((packed ushr 16) and 0xFFFF).toInt() / 10.0
@@ -151,7 +169,7 @@ class MainActivity : Activity() {
                 statusView.text = getString(
                     R.string.status_streaming,
                     counter, fps, if (showClean) "CLEAN" else "SCRAMBLED"
-                )
+                ) + if (presentation != null) "  [glasses]" else "  [no ext display]"
             }
             val n = XrealNative.nativeGrabImuBatch(imuBatch)
             if (n > 0) {
@@ -189,6 +207,10 @@ class MainActivity : Activity() {
 
     /** Show the passthrough on the first external/presentation display. */
     private fun updatePresentation() {
+        for (d in displayManager.displays) {
+            android.util.Log.i("xrealcam",
+                "display ${d.displayId}: '${d.name}' flags=0x${d.flags.toString(16)}")
+        }
         val display = displayManager
             .getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
             .firstOrNull()
@@ -256,6 +278,10 @@ class MainActivity : Activity() {
                 it.swap = swapEyes
                 it.invalidate()
             }
+        }
+        findViewById<Button>(R.id.mirror).setOnClickListener {
+            mirror = !mirror
+            XrealNative.nativeSetMirror(mirror)
         }
 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -344,6 +370,7 @@ class MainActivity : Activity() {
             return
         }
         streaming = true
+        lastFrameAt = System.currentTimeMillis()   // arm the watchdog from start
         statusView.text = getString(R.string.status_starting)
         handler.post(pollFrame)
     }
