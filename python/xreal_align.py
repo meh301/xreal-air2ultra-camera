@@ -8,8 +8,9 @@ For every display pixel of one eye:
   1. unproject through that eye's virtual-display intrinsics (`k_*_display`
      from the calibration JSON; ~2484 px focal over 1920x1080 = ~42x25 deg),
   2. rotate the ray display->IMU->camera using the calibrated poses
-     (`target_q_*_display`, `imu_q_cam`; quaternions are JPL xyzw per the
-     calibration's own comment),
+     (`target_q_*_display`, `imu_q_cam`; both xyzw — the camera quaternion
+     follows the JPL convention, the display one Hamilton, as verified
+     on-device),
   3. project through the same-side tracking camera's fisheye624 model
      (fc/cc + 12 kc: 6 radial theta-polynomial, 2 tangential, 4 thin-prism),
   4. sample the descrambled 480x640 image there.
@@ -35,8 +36,8 @@ def quat_to_rot(q, conj=True):
 
     conj flips the vector part - JPL and Hamilton conventions differ exactly
     by this, which is what the runtime "variant" cycling toggles per
-    quaternion (variant 3 = both conjugated = the JPL reading, expected
-    correct for this calibration).
+    quaternion. Variant 2 (camera quaternion conjugated, display quaternion
+    not) was verified on-device: the passthrough lines up with reality.
     """
     x, y, z, w = q
     n = (x * x + y * y + z * z + w * w) ** 0.5
@@ -79,7 +80,7 @@ def fisheye624_project(pts, fc, cc, kc):
     return np.stack([u, v], axis=1)
 
 
-def build_eye_maps(calib, eye, out_size, depth=np.inf, variant=3):
+def build_eye_maps(calib, eye, out_size, depth=np.inf, variant=2):
     """cv2.remap maps for one eye.
 
     calib: parsed calibration JSON. eye: 'left'/'right'. out_size: (w, h) of
@@ -130,7 +131,7 @@ class Aligner:
     """Precomputed 1:1 warp for both eyes; call with the two cleaned images."""
 
     def __init__(self, calib_path, half_size=(960, 1080), depth=np.inf,
-                 variant=3):
+                 variant=2):
         self._calib = load_calib(calib_path)
         self._half_size, self._depth = half_size, depth
         self.variant = variant

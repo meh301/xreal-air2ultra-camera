@@ -109,7 +109,6 @@ class MainActivity : Activity() {
     private var lastFrameAt = 0L        // watchdog: last time a frame arrived
     private var lastReconnectAt = 0L
     private var alignReady = false
-    private var alignVariant = 3        // XR_ALIGN_VARIANT_DEFAULT
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
     private val imuBatch: ByteBuffer =                 // 256 samples x 32 B
         ByteBuffer.allocateDirect(256 * 32).order(ByteOrder.nativeOrder())
@@ -157,7 +156,7 @@ class MainActivity : Activity() {
                 ) + when {
                     presentation == null -> "  [no ext display]"
                     !stereoMode -> "  [glasses sbs]"
-                    alignReady -> "  [glasses stereo cal:$alignVariant]"
+                    alignReady -> "  [glasses stereo]"
                     else -> "  [glasses stereo uncal]"
                 }
             }
@@ -267,15 +266,6 @@ class MainActivity : Activity() {
             XrealNative.nativeSetStereoMode(stereoMode)
             modeButton.text =
                 getString(if (stereoMode) R.string.mode_sbs else R.string.mode_stereo)
-        }
-
-        // tapping the status line cycles the alignment rotation-convention
-        // variant (0..3) — pick the one where the passthrough lines up
-        statusView.setOnClickListener {
-            if (alignReady) {
-                alignVariant = (alignVariant + 1) % 4
-                XrealNative.nativeSetAlignVariant(alignVariant)
-            }
         }
 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -395,7 +385,6 @@ class MainActivity : Activity() {
             }
             if (o != 66) throw IllegalStateException("unexpected calibration shape ($o)")
             XrealNative.nativeSetAlignment(params)
-            XrealNative.nativeSetAlignVariant(alignVariant)
             alignReady = true
             android.util.Log.i("xrealcam", "world-aligned passthrough enabled")
         } catch (e: Exception) {

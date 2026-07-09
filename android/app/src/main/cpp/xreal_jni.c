@@ -263,13 +263,14 @@ static void find_interface_eps(int ifnum, int *ep_in, int *ep_out) {
 
 /* Set the glasses' display mode (XR_DISPLAY_*). Stereo is what makes the
  * left half of the frame reach only the left eye - without it both eyes see
- * the whole side-by-side canvas, exactly what AR apps switch on themselves. */
-static void mcu_set_display_mode(uint8_t mode) {
+ * the whole side-by-side canvas, exactly what AR apps switch on themselves.
+ * Returns 0 on acked success, 1 on sent-without-ack, -1 on rejection/error. */
+static int mcu_set_display_mode(uint8_t mode) {
     if (!S.mcu_claimed) {
         if (libusb_claim_interface(S.usb, XR_MCU_INTERFACE) != 0) {
             LOGE("MCU: could not claim interface %d, display mode unchanged",
                  XR_MCU_INTERFACE);
-            return;
+            return -1;
         }
         S.mcu_claimed = 1;
         find_interface_eps(XR_MCU_INTERFACE, &S.mcu_ep_in, &S.mcu_ep_out);
@@ -287,7 +288,7 @@ static void mcu_set_display_mode(uint8_t mode) {
         rc = libusb_control_transfer(S.usb, 0x21, 0x09, 0x0200,
                                      XR_MCU_INTERFACE, pkt, XR_MCU_CMD_LEN, 1000);
     }
-    if (rc < 0) { LOGE("display mode %d: send failed rc=%d", mode, rc); return; }
+    if (rc < 0) { LOGE("display mode %d: send failed rc=%d", mode, rc); return -1; }
     /* read the ack (cmd echo; first data byte 0 = success) */
     if (S.mcu_ep_in) {
         uint8_t buf[XR_MCU_CMD_LEN];
@@ -299,11 +300,19 @@ static void mcu_set_display_mode(uint8_t mode) {
             if (buf[0] == 0xFD && buf[15] == 0x08 && buf[16] == 0x00) {
                 LOGI("display mode %d: %s", mode,
                      buf[22] == 0 ? "ok" : "rejected");
-                return;
+                return buf[22] == 0 ? 0 : -1;
             }
         }
     }
     LOGI("display mode %d: sent (no ack read)", mode);
+    return 1;
+}
+
+/* Enter stereo at the highest refresh the glasses accept (less vsync wait
+ * = lower passthrough latency), falling back to SBS 60 Hz. */
+static void mcu_enter_stereo(void) {
+    if (mcu_set_display_mode(XR_DISPLAY_SBS_90) < 0)
+        mcu_set_display_mode(XR_DISPLAY_SBS_60);
 }
 
 static int imu_send_cmd(uint8_t cmd, const uint8_t *data, size_t n) {
@@ -516,8 +525,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
      * both eyes and no side-by-side content can fuse */
     S.usb = uvc_get_libusb_handle(S.devh);
     libusb_set_auto_detach_kernel_driver(S.usb, 1);
-    mcu_set_display_mode(atomic_load(&S.stereo_mode) ? XR_DISPLAY_SBS_60
-                                                     : XR_DISPLAY_MIRROR);
+    if (atomic_load(&S.stereo_mode)) mcu_enter_stereo();
+    else mcu_set_display_mode(XR_DISPLAY_MIRROR);
 
     /* the stream advertises itself as 640x241 "YUY2"; trust the descriptor
      * rather than hardcoding, and accept any mode of the right byte size */
@@ -691,8 +700,10 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetStereoMode(JNIEnv *env, jclass
                                                              jboolean stereo) {
     (void)env; (void)cls;
     atomic_store(&S.stereo_mode, stereo ? 1 : 0);
-    if (S.streaming && S.usb)
-        mcu_set_display_mode(stereo ? XR_DISPLAY_SBS_60 : XR_DISPLAY_MIRROR);
+    if (S.streaming && S.usb) {
+        if (stereo) mcu_enter_stereo();
+        else mcu_set_display_mode(XR_DISPLAY_MIRROR);
+    }
 }
 
 /* Cycle the rotation-convention variant (0..3) for on-device calibration. */

@@ -18,11 +18,11 @@ typedef struct {
     float fc[2], cc[2], kc[12];   /* fisheye624 of that camera */
 } xr_eye_calib;
 
-/* Rotation-convention variant, cycled at runtime for on-device calibration:
- * bit 0 = conjugate the display quaternion, bit 1 = conjugate the camera
- * quaternion. Variant 3 (both conjugated = the JPL reading of the JSON) is
- * the expected correct one. */
-enum { XR_ALIGN_VARIANT_DEFAULT = 3 };
+/* Rotation-convention variant: bit 0 = conjugate the display quaternion,
+ * bit 1 = conjugate the camera quaternion. Variant 2 (camera conjugated,
+ * display not) was verified on-device — the passthrough lines up with the
+ * real world through the glasses. */
+enum { XR_ALIGN_VARIANT_DEFAULT = 2 };
 
 /* Build the sample map for one eye: out_idx[y*w + x] = index into the
  * 480x640 camera image (or -1 for out-of-view). (w, h) is the rendered
