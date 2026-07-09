@@ -137,7 +137,7 @@ def main():
                         canvas[:, :OW] = clean[0]
                         canvas[:, OW:] = clean[1]
                         if fbw:
-                            fbw.publish(canvas, f.counter)
+                            fbw.publish(canvas, f.counter, f.device_ts or 0)
 
                 if pair_ready and args.snap:
                     snap_count += 1

@@ -154,11 +154,10 @@ class XrealImu:
         return self
 
     def __exit__(self, *exc):
-        try:
-            if self._streaming:
-                self.stream(False)
-        finally:
-            self.dev.close()
+        # deliberately leave the stream running: it is free-running and
+        # costless with no listener, and turning it off here would cut the
+        # feed under any other process reading it in parallel
+        self.dev.close()
 
 
 class ImuRingWriter:

@@ -58,7 +58,7 @@ Two firmware **dialects** have been observed so far; auto-detect per frame
 
 | col | Meaning |
 |-----|---------|
-| 0, 1 | timestamp-like values |
+| 0–3 | **u32 LE exposure timestamp [ns]** — low 32 bits of the device clock, **the same timebase as the IMU stream** (see [Clock domains](#clock-domains-cameras-vs-imu)); wraps every 4.295 s |
 | 4 | constant `0x64` |
 | 18 | **pair counter** — shared by both frames of a stereo pair |
 | 22–27 | auxiliary payload, present only on aux frames (see below) |
@@ -206,6 +206,32 @@ written at the factory:
 
 `python python/xreal_imu.py --config calib.json` dumps it. Note it contains
 the device serial (`FSN`).
+
+### Clock domains: cameras vs. IMU
+
+Validated on-device (dialect B unit): **the camera exposure timestamps and the
+IMU timestamps are the same clock** — a free-running nanosecond counter
+(starts near device power-on).
+
+- IMU reports carry the full u64 ns value; camera frames carry the low u32
+  (telemetry cols 0–3), wrapping every 2³² ns = 4.295 s.
+- Measurement (12 s, 720 frames, 13k IMU samples, both streams host-stamped
+  with the same monotonic clock): every camera stamp lands `(IMU clock at
+  arrival − stamp) = 70…104 ms`, i.e. one tight cluster = USB/driver/pipe
+  delivery latency; ±6.6 ms spread is delivery jitter, not stamp jitter. A
+  different clock would have spread the differences uniformly over 4.295 s.
+- The stamps are hardware exposure times: the two frames of a stereo pair are
+  stamped **within ~16 µs of each other** (median; the sensors are triggered
+  together), and same-camera spacing is exactly 33.333 ms.
+- Unwrap recipe for VIO: with any recent IMU u64 `t_imu`, the full camera
+  time is the value congruent to the u32 stamp (mod 2³²) nearest to
+  `t_imu − latency`. Since the wrap period (4.295 s) vastly exceeds the
+  latency (<0.15 s), this is unambiguous:
+  `t_cam = t_imu − ((t_imu − stamp32) mod 2³²)`, taking the mod into
+  `[0, 2³²)`.
+- So cameras and IMU need **no cross-clock calibration** — feed both
+  timestamps straight into a VIO pipeline (the camera-side latency does not
+  matter; only stamp correctness does).
 
 ## Capturing on other platforms
 

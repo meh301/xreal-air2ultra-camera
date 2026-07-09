@@ -165,6 +165,10 @@ class _DialectA:
         # cam0 uses the right-LUT
         return int(trow[19]), int(trow[58]) & 1
 
+    @staticmethod
+    def stamp(trow):
+        return None            # timestamp field not identified on dialect A
+
 
 class _DialectB:
     """Newer firmware: dims marker at 51-56, counter 18, camera bit 59."""
@@ -175,6 +179,13 @@ class _DialectB:
         # cam bit 1 is the camera that decodes upright with the right-LUT,
         # i.e. the same physical camera dialect A calls cam0
         return int(trow[18]), 1 - (int(trow[59]) & 1)
+
+    @staticmethod
+    def stamp(trow):
+        # cols 0-3: u32 exposure timestamp [ns] — the low 32 bits of the SAME
+        # nanosecond clock the IMU reports (validated on-device, see
+        # docs/PROTOCOL.md); wraps every 4.295 s, unwrap against the IMU u64
+        return int.from_bytes(trow[:4].tobytes(), "little")
 
 
 _B_NATIVE = np.array([0x00, 0x80, 0x02, 0xE0, 0x01, 0x80, 0x02, 0x00], np.uint8)
@@ -220,11 +231,13 @@ def _raw_bytes(frame):
 class XrealFrame:
     """One UVC frame: full 482-row raster + parsed telemetry."""
 
-    __slots__ = ("gray", "counter", "cam")
+    __slots__ = ("gray", "counter", "cam", "device_ts")
 
     def __init__(self, gray, dialect):
         self.gray = gray                                  # (482, 640) uint8
         self.counter, self.cam = dialect.parse(gray[META_ROW])
+        # u32 ns on the device/IMU clock (dialect B), or None (dialect A)
+        self.device_ts = dialect.stamp(gray[META_ROW])
 
     @property
     def image(self):

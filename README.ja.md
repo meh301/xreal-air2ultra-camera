@@ -84,6 +84,7 @@ APKをインストールし、グラスをスマホのUSB-Cポートに接続し
 | `python/xreal_uvc.py` | 上記2ツールが使うキャプチャモジュール(バックエンド探索、ffmpegフォールバック、テレメトリによる自動検出、バイト順補正)。直接実行するとXREALストリームをスキャン。 |
 | `python/xreal_fb.py` | 共有メモリフレームバッファ: レイアウト定義、Writer/Readerクラス、デモコンシューマ(`python xreal_fb.py --show`)。 |
 | `python/xreal_imu.py` | **1kHz IMUリーダー**(要 `pip install hidapi`): ライブ表示、`--csv` ログ、`--fb` 共有メモリリング、`--config calib.json` でデバイス内の工場キャリブレーション(IMUバイアス/ノイズ+両トラッキングカメラの魚眼内部パラメータとカメラ↔IMU外部パラメータ — VIOに必要な全て)をダンプ。 |
+| `python/xreal_imu_scope.py` | IMUのライブオシロスコープ(ジャイロ+加速度パネル)。カメラビューアと並行動作可。 |
 | `preview_clean` (macOS) | ビューアのネイティブSwift版、60fps。キー・フラグは共通。 |
 | `xreal_cam` (macOS) | レコーダーのネイティブSwift版。 |
 | `enumerate` (macOS) | AVFoundationのカメラ一覧とXREALデバイスのフォーマットを表示。 |

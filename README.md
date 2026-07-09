@@ -84,6 +84,7 @@ permission prompt, and the live stereo preview starts. See
 | `python/xreal_uvc.py` | Capture module used by the two tools (backend scan, ffmpeg fallback, telemetry fingerprint, byte-order fix). Run directly to scan for the XREAL stream. |
 | `python/xreal_fb.py` | Shared-memory framebuffer: layout definition, writer/reader classes, and a demo consumer (`python xreal_fb.py --show`). |
 | `python/xreal_imu.py` | **1 kHz IMU reader** (needs `pip install hidapi`): live console output, `--csv` logging, `--fb` shared-memory ring, and `--config calib.json` to dump the on-device factory calibration (IMU biases/noises + fisheye intrinsics and camera↔IMU extrinsics of both tracking cameras — everything VIO needs). |
+| `python/xreal_imu_scope.py` | Live rolling oscilloscope of the IMU (gyro + accel panels); runs alongside the camera viewer. |
 | `preview_clean` (macOS) | Native Swift version of the viewer, 60 fps. Same keys and flags. |
 | `xreal_cam` (macOS) | Native Swift version of the recorder. |
 | `enumerate` (macOS) | List AVFoundation cameras and the XREAL device's formats. |

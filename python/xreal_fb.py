@@ -18,7 +18,11 @@ the block by name and consume the live feed without sockets or disk.
                             re-read until it is even and unchanged
       off 20  u32  pair counter (from the telemetry row)
       off 24  f64  time.time() at publish
-      off 32  ..   reserved to 64
+      off 32  u32  device exposure timestamp [ns] of the pair - low 32 bits
+                   of the glasses' clock, the SAME timebase the IMU stream
+                   reports (0 if the firmware dialect has no known stamp);
+                   wraps every 4.295 s, unwrap against the IMU u64
+      off 36  ..   reserved to 64
 
 Run directly to consume the feed:  python xreal_fb.py [--show]
 """
@@ -48,13 +52,14 @@ class FramebufferWriter:
         struct.pack_into("<IIII", buf, 0, FB_MAGIC, 1, FB_W, FB_H)
         self._pixels = np.ndarray((FB_H, FB_W), np.uint8, buf, HDR_SIZE)
 
-    def publish(self, stereo, counter):
+    def publish(self, stereo, counter, device_ts=0):
         """stereo: (640, 960) uint8. One copy into the mapped region."""
         buf = self.shm.buf
         self._seq += 1                                   # odd: update begins
         struct.pack_into("<I", buf, 16, self._seq & 0xFFFFFFFF)
         np.copyto(self._pixels, stereo)
-        struct.pack_into("<Id", buf, 20, counter & 0xFFFFFFFF, time.time())
+        struct.pack_into("<IdI", buf, 20, counter & 0xFFFFFFFF, time.time(),
+                        (device_ts or 0) & 0xFFFFFFFF)
         self._seq += 1                                   # even: stable
         struct.pack_into("<I", buf, 16, self._seq & 0xFFFFFFFF)
 
@@ -77,8 +82,9 @@ class FramebufferReader:
         self._last_seq = 0
 
     def read(self):
-        """Latest stable frame as (image copy, counter, timestamp), or None
-        if nothing new since the previous call."""
+        """Latest stable frame as (image copy, counter, wall_time, device_ts),
+        or None if nothing new since the previous call. device_ts is the u32
+        exposure timestamp on the glasses'/IMU nanosecond clock (0 if n/a)."""
         for _ in range(1000):
             seq1, = struct.unpack_from("<I", self.shm.buf, 16)
             if seq1 & 1:
@@ -86,11 +92,11 @@ class FramebufferReader:
             if seq1 == self._last_seq:
                 return None                     # nothing new
             img = self._pixels.copy()
-            counter, ts = struct.unpack_from("<Id", self.shm.buf, 20)
+            counter, ts, device_ts = struct.unpack_from("<IdI", self.shm.buf, 20)
             seq2, = struct.unpack_from("<I", self.shm.buf, 16)
             if seq1 == seq2:                    # torn read? retry
                 self._last_seq = seq1
-                return img, counter, ts
+                return img, counter, ts, device_ts
         return None
 
     def close(self):
@@ -116,12 +122,12 @@ def main():
             if got is None:
                 time.sleep(0.002)
                 continue
-            img, counter, ts = got
+            img, counter, ts, device_ts = got
             n += 1
             if time.time() - t0 >= 1:
                 age_ms = (time.time() - ts) * 1000
                 print(f"{n} pairs/s  counter={int(counter)}  latency={age_ms:.0f} ms "
-                      f"mean={img.mean():.0f}")
+                      f"exposure_ts={device_ts} ns  mean={img.mean():.0f}")
                 n, t0 = 0, time.time()
             if show:
                 cv2.imshow("xreal_fb consumer", img)
