@@ -2,11 +2,18 @@ package org.air2ultra.stereocam
 
 import android.app.Activity
 import android.app.PendingIntent
+import android.app.Presentation
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
+import android.hardware.display.DisplayManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
@@ -15,6 +22,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
+import android.view.View
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.TextView
@@ -30,12 +39,56 @@ import kotlin.math.asin
 import kotlin.math.atan2
 
 /**
+ * Draws the stereo pair onto the glasses' own display: the left half of the
+ * source bitmap (left camera) aspect-fit into the left half of the screen,
+ * the right half into the right half. With the glasses in 3D/SBS mode each
+ * half lands on one eye — camera passthrough.
+ */
+class PassthroughView(context: Context) : View(context) {
+    var bitmap: Bitmap? = null
+    var swap = false
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    override fun onDraw(canvas: Canvas) {
+        canvas.drawColor(Color.BLACK)
+        val bm = bitmap ?: return
+        val srcHalf = bm.width / 2
+        val dstHalf = width / 2f
+        for (eye in 0..1) {
+            val srcIdx = if (swap) 1 - eye else eye
+            val src = Rect(srcIdx * srcHalf, 0, (srcIdx + 1) * srcHalf, bm.height)
+            val scale = minOf(dstHalf / srcHalf, height.toFloat() / bm.height)
+            val dw = srcHalf * scale
+            val dh = bm.height * scale
+            val ox = eye * dstHalf + (dstHalf - dw) / 2
+            val oy = (height - dh) / 2
+            canvas.drawBitmap(bm, src, RectF(ox, oy, ox + dw, oy + dh), paint)
+        }
+    }
+}
+
+/** Fullscreen [PassthroughView] on an external (presentation) display. */
+class GlassesPresentation(context: Context, display: Display) :
+    Presentation(context, display) {
+    val view = PassthroughView(context)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(view)
+    }
+}
+
+/**
  * Live stereo preview of the XREAL Air 2 Ultra tracking cameras.
  *
  * Android exposes no camera API for external UVC devices, so the app opens
  * the glasses through the USB host API and hands the raw file descriptor to
  * native code (libusb + libuvc), which streams, descrambles and denoises the
- * frames. See docs/PROTOCOL.md in the repository root.
+ * frames. Requires the current glasses firmware (MCU 12.1.00.498+ — update at
+ * https://ota.xreal.com/ultra-update?version=1). See docs/PROTOCOL.md.
+ *
+ * When the glasses' display is available (DisplayPort alt-mode), the clean
+ * stereo pair is additionally rendered onto it as SBS passthrough.
  */
 class MainActivity : Activity() {
 
@@ -55,7 +108,10 @@ class MainActivity : Activity() {
     private var connection: UsbDeviceConnection? = null
     private var streaming = false
     private var showClean = true
+    private var swapEyes = false
     private var bitmap: Bitmap? = null
+    private var presentation: GlassesPresentation? = null
+    private lateinit var displayManager: DisplayManager
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
     private val imuBuffer: ByteBuffer =
         ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
@@ -78,6 +134,10 @@ class MainActivity : Activity() {
                 frameBuffer.position(0)
                 bm.copyPixelsFromBuffer(frameBuffer)
                 imageView.invalidate()
+                presentation?.view?.let {
+                    it.bitmap = bm
+                    it.invalidate()
+                }
                 statusView.text = getString(
                     R.string.status_streaming,
                     counter, fps, if (showClean) "CLEAN" else "SCRAMBLED"
@@ -117,6 +177,30 @@ class MainActivity : Activity() {
         val pitch = Math.toDegrees(asin((2 * (w * y - z * x)).coerceIn(-1.0, 1.0)))
         val roll = Math.toDegrees(atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)))
         return Triple(yaw, pitch, roll)
+    }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = updatePresentation()
+        override fun onDisplayRemoved(displayId: Int) = updatePresentation()
+        override fun onDisplayChanged(displayId: Int) {}
+    }
+
+    /** Show the passthrough on the first external/presentation display. */
+    private fun updatePresentation() {
+        val display = displayManager
+            .getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+            .firstOrNull()
+        if (display == null) {
+            presentation?.dismiss()
+            presentation = null
+            return
+        }
+        if (presentation?.display?.displayId == display.displayId) return
+        presentation?.dismiss()
+        presentation = GlassesPresentation(this, display).also {
+            it.view.swap = swapEyes
+            it.show()
+        }
     }
 
     private val usbReceiver = object : BroadcastReceiver() {
@@ -159,6 +243,17 @@ class MainActivity : Activity() {
                 getString(if (showClean) R.string.show_raw else R.string.show_clean)
         }
         findViewById<Button>(R.id.snapshot).setOnClickListener { saveSnapshot() }
+        findViewById<Button>(R.id.swap).setOnClickListener {
+            swapEyes = !swapEyes
+            presentation?.view?.let {
+                it.swap = swapEyes
+                it.invalidate()
+            }
+        }
+
+        displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayManager.registerDisplayListener(displayListener, handler)
+        updatePresentation()
 
         val filter = IntentFilter(ACTION_USB_PERMISSION).apply {
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
@@ -249,6 +344,9 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         stopStreaming()
+        presentation?.dismiss()
+        presentation = null
+        displayManager.unregisterDisplayListener(displayListener)
         unregisterReceiver(usbReceiver)
     }
 }

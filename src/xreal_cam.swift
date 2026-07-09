@@ -5,10 +5,12 @@
 //   * 640 x 482, 8-bit monochrome (delivered by AVFoundation as a 2vuy/UYVY buffer whose
 //     bytes are actually raw luma — one byte per pixel, row stride 640).
 //   * Rows 0..479  = the 640x480 camera image.
-//   * Row 480      = a telemetry row (frame counter at col 19, markers 0x19/0xAD/0xDA).
-//   * Row 481      = constant 0x5C padding.
+//   * Row 480      = a telemetry row (pair counter at col 18, camera bit at col 59).
+//   * Row 481      = constant 0x5C padding (except aux frames).
 //   * Consecutive UVC frames alternate between the LEFT and RIGHT camera; a frame pair
-//     shares one counter value (col 19 of row 480). Effective stereo rate ~30 pairs/s.
+//     shares one counter value. Effective stereo rate ~30 pairs/s.
+//   * Requires the current glasses firmware (MCU 12.1.00.498_20241115); older firmware
+//     uses a different telemetry layout — update at https://ota.xreal.com/ultra-update?version=1
 //
 // Usage:
 //   swiftc xreal_cam.swift -o xreal_cam
@@ -25,7 +27,7 @@ let maxFrames = args.count > 1 ? Int(args[1]) ?? 60 : 60
 let outDir = args.count > 2 ? args[2] : "./xreal_out"
 try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
 
-let W = 640, HFULL = 482, HIMG = 480, META_ROW = 480, CTR_COL = 19
+let W = 640, HFULL = 482, HIMG = 480, META_ROW = 480, CTR_COL = 18, CAM_COL = 59
 
 func writePGM(_ path: String, _ pixels: UnsafePointer<UInt8>, stride: Int, w: Int, h: Int) {
     var data = Data("P5\n\(w) \(h)\n255\n".utf8)
@@ -80,7 +82,7 @@ final class XREALCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         var sum = 0
         for i in 0..<(HIMG * W) { sum += Int(mono[i]) }
         let mean = Double(sum) / Double(HIMG * W)
-        let camIndex = Int(mono[META_ROW * W + 58]) & 1  // row480 col58: 0x20 = cam0, 0x21 = cam1 (到着順は固定でない)
+        let camIndex = 1 - (Int(mono[META_ROW * W + CAM_COL]) & 1)  // row480 col59: 1 = cam0, 0 = cam1 (到着順は固定でない)
 
         mono.withUnsafeBufferPointer { buf in
             let name = String(format: "%@/cam%d_%04d.pgm", outDir, camIndex, count)

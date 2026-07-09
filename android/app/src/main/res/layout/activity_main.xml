@@ -43,6 +43,12 @@
                 android:text="@string/show_raw" />
 
             <Button
+                android:id="@+id/swap"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/swap_eyes" />
+
+            <Button
                 android:id="@+id/snapshot"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

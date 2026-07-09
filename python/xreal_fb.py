@@ -20,8 +20,7 @@ the block by name and consume the live feed without sockets or disk.
       off 24  f64  time.time() at publish
       off 32  u32  device exposure timestamp [ns] of the pair - low 32 bits
                    of the glasses' clock, the SAME timebase the IMU stream
-                   reports (0 if the firmware dialect has no known stamp);
-                   wraps every 4.295 s, unwrap against the IMU u64
+                   reports; wraps every 4.295 s, unwrap against the IMU u64
       off 36  ..   reserved to 64
 
 Run directly to consume the feed:  python xreal_fb.py [--show]

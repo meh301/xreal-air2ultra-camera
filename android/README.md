@@ -50,6 +50,14 @@ Or open `android/` in Android Studio and run — but run `fetch_deps` first.
    (the glasses stream raw inertial data only). The IMU is read from HID
    interface 2 over the same libusb handle as the camera; if claiming that
    interface fails the camera still works.
+5. When the phone drives the glasses' display (DisplayPort alt-mode), the
+   clean stereo pair is also rendered onto it fullscreen as **SBS
+   passthrough** (left camera → left eye; put the glasses in 3D/SBS mode).
+   *Swap L/R* flips the eyes if the mapping looks inverted.
+
+The app requires the current glasses firmware (MCU `12.1.00.498+`); older
+firmware uses a different telemetry layout — update at
+<https://ota.xreal.com/ultra-update?version=1>.
 
 The phone must support USB host mode (any modern phone does). The glasses
 also drive the display via DisplayPort alt-mode at the same time; the camera

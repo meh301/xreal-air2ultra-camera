@@ -16,14 +16,12 @@ Capture paths (auto-selected by find_camera):
     ffmpeg connects the DirectShow pin at its native yuyv422 type and pipes
     the untouched frames.
 
-Firmware telemetry dialects (both auto-detected per frame):
-  A: the layout in docs/PROTOCOL.md - counter col 19, camera id 0x20/0x21 at
-     col 58, markers 0xAD,0xDA at cols 22,23, padding row always 0x5C.
-  B: (observed on MCU FW 12.1.00.498_20241115) u32 ns exposure timestamp at
-     cols 0-3, counter col 18, camera bit at col 59, frame dimensions
-     640/480/640 as LE u16 at cols 51-56 (used as the fingerprint), padding
-     row 0x5C except on every 2nd cam-bit-1 frame, which carries extra data
-     in row 481 and cols 22-27.
+Requires the current glasses firmware (MCU 12.1.00.498_20241115 - the latest;
+update at https://ota.xreal.com/ultra-update?version=1). Its telemetry row
+carries a u32 ns exposure timestamp at cols 0-3, the pair counter at col 18,
+the camera bit at col 59, and the frame dimensions 640/480/640 as LE u16 at
+cols 51-56 (used as the device fingerprint). Older firmware used a different
+layout that these tools no longer support.
 
 Because the fourcc is fake, a UVC stack may also deliver the two bytes of
 each 16-bit pair swapped; the fingerprint detects that and read() fixes it.
@@ -154,65 +152,40 @@ class Cleaner:
         return equalize(u8, out=out)
 
 
-# ---- telemetry dialects --------------------------------------------------------
+# ---- telemetry (current firmware, see module doc) --------------------------------
 
-class _DialectA:
-    """Layout documented in docs/PROTOCOL.md (earlier firmware)."""
-    name = "A"
+# frame dimensions 640,480,640 as little-endian u16 at cols 51-56, in native
+# and 16-bit-pair-swapped byte order — the device fingerprint
+_MARK_NATIVE = np.array([0x00, 0x80, 0x02, 0xE0, 0x01, 0x80, 0x02, 0x00], np.uint8)
+_MARK_SWAPPED = np.array([0x80, 0x00, 0xE0, 0x02, 0x80, 0x01, 0x00, 0x02], np.uint8)
 
-    @staticmethod
-    def parse(trow):
-        # col 19 = pair counter, col 58 = 0x20 (cam0) / 0x21 (cam1);
-        # cam0 uses the right-LUT
-        return int(trow[19]), int(trow[58]) & 1
-
-    @staticmethod
-    def stamp(trow):
-        return None            # timestamp field not identified on dialect A
-
-
-class _DialectB:
-    """Dims marker at 51-56, counter 18, camera bit 59 (see module doc)."""
-    name = "B"
-
-    @staticmethod
-    def parse(trow):
-        # cam bit 1 is the camera that decodes upright with the right-LUT,
-        # i.e. the same physical camera dialect A calls cam0
-        return int(trow[18]), 1 - (int(trow[59]) & 1)
-
-    @staticmethod
-    def stamp(trow):
-        # cols 0-3: u32 exposure timestamp [ns] — the low 32 bits of the SAME
-        # nanosecond clock the IMU reports (validated on-device, see
-        # docs/PROTOCOL.md); wraps every 4.295 s, unwrap against the IMU u64
-        return int.from_bytes(trow[:4].tobytes(), "little")
-
-
-_B_NATIVE = np.array([0x00, 0x80, 0x02, 0xE0, 0x01, 0x80, 0x02, 0x00], np.uint8)
-_B_SWAPPED = np.array([0x80, 0x00, 0xE0, 0x02, 0x80, 0x01, 0x00, 0x02], np.uint8)
+OLD_FIRMWARE_MSG = ("this unit runs an old glasses firmware with a different "
+                    "telemetry layout - update it at "
+                    "https://ota.xreal.com/ultra-update?version=1")
 
 
 def _classify(flat):
-    """(order, dialect) for one raw frame's bytes, or None.
+    """'ok' / 'swapped' for one raw frame's bytes, or None.
 
-    order is 'ok' or 'swapped' (fake-YUY2 vs fake-UYVY delivery: a byte swap
-    within every 16-bit pair).
+    'swapped' = fake-YUY2 vs fake-UYVY delivery: a byte swap within every
+    16-bit pair, undone by read().
     """
+    t = flat.reshape(H_FULL, W)[META_ROW]
+    if np.array_equal(t[50:58], _MARK_NATIVE):
+        return "ok"
+    if np.array_equal(t[50:58], _MARK_SWAPPED):
+        return "swapped"
+    return None
+
+
+def _old_firmware(flat):
+    """True if the frame matches the pre-12.1 telemetry layout (marker bytes
+    0xAD,0xDA at cols 22,23 + constant 0x5C padding row). Used only to give a
+    helpful update hint - the layout itself is not supported."""
     rows = flat.reshape(H_FULL, W)
     t = rows[META_ROW]
-    # dialect B: 640,480,640 as little-endian u16 at cols 51-56
-    if np.array_equal(t[50:58], _B_NATIVE):
-        return "ok", _DialectB
-    if np.array_equal(t[50:58], _B_SWAPPED):
-        return "swapped", _DialectB
-    # dialect A: 0xAD,0xDA markers + constant 0x5C padding row
-    if np.count_nonzero(rows[PAD_ROW] == PAD_VAL) >= W - 64:
-        if t[22] == 0xAD and t[23] == 0xDA:
-            return "ok", _DialectA
-        if t[22] == 0xDA and t[23] == 0xAD:
-            return "swapped", _DialectA
-    return None
+    return (np.count_nonzero(rows[PAD_ROW] == PAD_VAL) >= W - 64
+            and {int(t[22]), int(t[23])} == {0xAD, 0xDA})
 
 
 def _unswap(flat):
@@ -234,11 +207,16 @@ class XrealFrame:
 
     __slots__ = ("gray", "counter", "cam", "device_ts")
 
-    def __init__(self, gray, dialect):
+    def __init__(self, gray):
         self.gray = gray                                  # (482, 640) uint8
-        self.counter, self.cam = dialect.parse(gray[META_ROW])
-        # u32 ns on the device/IMU clock (dialect B), or None (dialect A)
-        self.device_ts = dialect.stamp(gray[META_ROW])
+        t = gray[META_ROW]
+        self.counter = int(t[18])                         # shared by a stereo pair
+        # bit 1 = the camera that decodes upright with the right-LUT (cam0)
+        self.cam = 1 - (int(t[59]) & 1)
+        # cols 0-3: u32 exposure timestamp [ns] — the low 32 bits of the SAME
+        # nanosecond clock the IMU reports (wraps every 4.295 s; unwrap
+        # against the IMU u64, see docs/PROTOCOL.md)
+        self.device_ts = int.from_bytes(t[:4].tobytes(), "little")
 
     @property
     def image(self):
@@ -280,14 +258,13 @@ def default_backends():
 class XrealCapture:
     """An opened, byte-order-normalized XREAL camera stream (OpenCV)."""
 
-    def __init__(self, cap, backend, index, swapped, dialect):
+    def __init__(self, cap, backend, index, swapped):
         self.cap, self.backend, self.index = cap, backend, index
-        self.swapped, self.dialect = swapped, dialect
+        self.swapped = swapped
 
     @property
     def description(self):
         return (f"{_BACKEND_NAMES.get(self.backend, self.backend)}:{self.index}"
-                f" dialect {self.dialect.name}"
                 + (" (byte-swapped delivery)" if self.swapped else ""))
 
     def read(self, tries=8):
@@ -299,7 +276,7 @@ class XrealCapture:
                 continue
             if self.swapped:
                 flat = _unswap(flat)
-            return XrealFrame(flat.reshape(H_FULL, W), self.dialect)
+            return XrealFrame(flat.reshape(H_FULL, W))
         return None
 
     def release(self):
@@ -330,9 +307,10 @@ def _looks_like_xreal(cap):
 
 
 def _probe(cap, budget_s=6.0):
-    """Read frames for up to budget_s and fingerprint them."""
+    """Read frames for up to budget_s and fingerprint them ('ok'/'swapped')."""
     t0 = time.time()
     decoded = 0
+    warned = False
     while time.time() - t0 < budget_s:
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -345,9 +323,12 @@ def _probe(cap, budget_s=6.0):
             if decoded >= 5:
                 return None
             continue
-        got = _classify(flat)
-        if got:
-            return got
+        order = _classify(flat)
+        if order:
+            return order
+        if not warned and _old_firmware(flat):
+            warned = True
+            print(f"WARNING: {OLD_FIRMWARE_MSG}", flush=True)
     return None
 
 
@@ -403,18 +384,18 @@ class FFmpegCapture:
              "-f", "rawvideo", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
         self.swapped = False
-        self.dialect = None
+        self._classified = False
         self._latest_only = latest_only
         self._cond = threading.Condition()
         self._frames = []            # pending frames (len<=1 if latest_only)
         self._eof = False
+        self._warned_old_fw = False
         self._thread = threading.Thread(target=self._drain, daemon=True)
         self._thread.start()
 
     @property
     def description(self):
-        d = self.dialect.name if self.dialect else "?"
-        return (f"ffmpeg:dshow:{self.device_name} dialect {d}"
+        return (f"ffmpeg:dshow:{self.device_name}"
                 + (" (byte-swapped delivery)" if self.swapped else ""))
 
     def _drain(self):
@@ -446,17 +427,20 @@ class FFmpegCapture:
                 if not self._frames:
                     return None      # EOF
                 flat = self._frames.pop(0)
-            if self.dialect is None:
-                got = _classify(flat)
-                if got is None:
+            if not self._classified:
+                order = _classify(flat)
+                if order is None:
+                    if not self._warned_old_fw and _old_firmware(flat):
+                        self._warned_old_fw = True
+                        print(f"WARNING: {OLD_FIRMWARE_MSG}", flush=True)
                     if time.time() < deadline:
-                        continue     # startup black frame
+                        continue     # startup black frame (or old firmware)
                     return None
-                order, self.dialect = got
                 self.swapped = order == "swapped"
+                self._classified = True
             if self.swapped:
                 flat = _unswap(flat)
-            return XrealFrame(flat.reshape(H_FULL, W).copy(), self.dialect)
+            return XrealFrame(flat.reshape(H_FULL, W).copy())
 
     def release(self):
         if self._proc.poll() is None:
@@ -528,13 +512,12 @@ def find_camera(index=None, backend=None, verbose=False, max_index=10,
                 if only_candidates and not _looks_like_xreal(cap):
                     cap.release()
                     continue
-                got = _probe(cap)
+                order = _probe(cap)
                 if verbose:
                     print(f"  {_BACKEND_NAMES.get(be, be)}:{i} -> "
-                          f"{'%s/%s' % (got[0], got[1].name) if got else 'not an XREAL stream'}")
-                if got:
-                    order, dialect = got
-                    return XrealCapture(cap, be, i, order == "swapped", dialect)
+                          f"{order or 'not an XREAL stream'}")
+                if order:
+                    return XrealCapture(cap, be, i, order == "swapped")
                 cap.release()
     return None
 
@@ -575,9 +558,9 @@ def _scan():
             h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
             note = ""
             if _looks_like_xreal(cap):
-                got = _probe(cap)
-                note = (" <- XREAL, raw %s, dialect %s" % (got[0], got[1].name)
-                        if got else " <- XREAL-shaped but no raw frames")
+                order = _probe(cap)
+                note = (f" <- XREAL, raw {order}" if order
+                        else " <- XREAL-shaped but no raw frames")
             print(f"  index {i}: {w:.0f}x{h:.0f}{note}")
             cap.release()
         if not found_any:

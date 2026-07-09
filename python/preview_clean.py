@@ -75,7 +75,8 @@ def main():
     if cap is None:
         sys.exit("XREAL UVC camera not found. Is the Air 2 Ultra plugged in? "
                  "Try 'python xreal_uvc.py' to scan; see README for OS camera "
-                 "permission notes.")
+                 "permission notes. If the glasses run old firmware, update at "
+                 "https://ota.xreal.com/ultra-update?version=1")
     print(f"Opening XREAL stream at {cap.description}")
 
     descramblers = [Descrambler(is_right=True), Descrambler(is_right=False)]  # cam0, cam1

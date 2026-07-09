@@ -37,7 +37,8 @@ def main():
                       backend=backend_by_name(args.backend) if args.backend else None,
                       latest_only=False)   # a recorder wants every frame
     if cap is None:
-        sys.exit("XREAL UVC camera not found.")
+        sys.exit("XREAL UVC camera not found (plugged in? old firmware? "
+                 "update at https://ota.xreal.com/ultra-update?version=1)")
     print(f"Opening XREAL stream at {cap.description}")
 
     os.makedirs(args.outDir, exist_ok=True)

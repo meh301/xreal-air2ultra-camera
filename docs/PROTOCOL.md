@@ -39,32 +39,11 @@ row  481      constant 0x5C padding
 
 ### Telemetry row (row 480)
 
-Two firmware **dialects** have been observed so far; auto-detect per frame
-(implemented in `python/xreal_uvc.py::_classify` and the Android core).
-
-**Dialect A** (unit measured on macOS):
-
-| col | Meaning |
-|-----|---------|
-| 2, 3 | timestamp-like values |
-| 5 | constant `0x19` |
-| 6 | frame counter, high byte |
-| 19 | **frame counter, low byte** — shared by both frames of a stereo pair |
-| 22, 23 | constant markers `0xAD`, `0xDA` |
-| 25, 26, 27, 35 | config-like constants |
-| 58 | **camera ID: `0x20` = cam0, `0x21` = cam1** |
-
-**Dialect B is the current format**: the dialect-B unit reports MCU app FW
-`12.1.00.498_20241115` (DSP `12.1.00.001_1.0.1.7_1.1`), and the official
-XREAL updater confirms both MCU and DP firmware are **the latest available**
-(checked 2026-07). Since the telemetry layout is a firmware behavior, any
-unit speaking dialect A is necessarily on an older firmware (the dialect-A
-unit's exact version was never recorded — if you have one, run
-`python python/xreal_imu.py --info` / `./xreal_imu --info` and report it, and
-note that updating via the official app will presumably switch the unit to
-dialect B).
-
-**Dialect B** (a second retail unit, measured on Windows; no `0xAD/0xDA` markers):
+The layout below is what the **current firmware** produces — MCU app FW
+`12.1.00.498_20241115` (DSP `12.1.00.001_1.0.1.7_1.1`), confirmed the latest
+available by the official updater (checked 2026-07). It is the only layout
+these tools support; parsing is implemented in
+`python/xreal_uvc.py::_classify` and the Android core.
 
 | col | Meaning |
 |-----|---------|
@@ -74,23 +53,27 @@ dialect B).
 | 22–27 | auxiliary payload, present only on aux frames (see below) |
 | 34 | constant `0x01` |
 | 51–56 | **frame dimensions as LE u16: 640, 480, 640** — use as the fingerprint |
-| 59 | **camera bit: `0x01` = the camera dialect A calls cam0, `0x00` = cam1** |
+| 59 | **camera bit: `0x01` = cam0 (the right-LUT camera), `0x00` = cam1** |
 | 60 | constant `0x80` |
 | 62, 63 | per-camera values (purpose unknown) |
 
-Dialect B quirk: **every 2nd frame of the bit-1 camera is an "aux" frame** whose
-row 481 is *not* `0x5C` padding but carries data (as do cols 22–27 that frame) —
+Quirk: **every 2nd frame of the bit-1 camera is an "aux" frame** whose row 481
+is *not* `0x5C` padding but carries data (as do cols 22–27 that frame) —
 purpose unknown (IMU/temperature/config echo?). The image rows are unaffected.
 Fingerprints must therefore not require the padding row on every frame.
 
-Consecutive UVC frames alternate between the two cameras and a pair shares one counter
-value (~30 stereo pairs/s at 60 fps UVC). **Do not infer camera identity from arrival
-order**: the L/R order within a pair is not fixed on dialect A (in one 117-frame
-capture, 48 pairs arrived one way and 10 the other; frame drops shift it further; the
-dialect B unit happened to alternate strictly, but don't rely on it). The camera-ID
-column is the only reliable discriminator — on dialect A it matched image-correlation
-ground truth on all 117 frames tested, and on dialect B the bit was verified against
-descramble orientation.
+Consecutive UVC frames alternate between the two cameras and a pair shares one
+counter value (~30 stereo pairs/s at 60 fps UVC). **Do not infer camera
+identity from arrival order** — frame drops shift it, and pre-update firmware
+was even observed delivering pairs in inconsistent order. The camera bit is
+the only reliable discriminator (verified against descramble orientation and,
+historically, image-correlation ground truth).
+
+**Older firmware** used a different telemetry layout (counter at col 19,
+camera ID `0x20`/`0x21` at col 58, marker bytes `0xAD,0xDA` at cols 22–23, no
+known timestamp field). It is **not supported** — the tools print a hint when
+they see it. Update the glasses at
+<https://ota.xreal.com/ultra-update?version=1>.
 
 ## Block scrambling
 
@@ -232,9 +215,9 @@ the device serial (`FSN`).
 
 ### Clock domains: cameras vs. IMU
 
-Validated on-device (dialect B unit): **the camera exposure timestamps and the
-IMU timestamps are the same clock** — a free-running nanosecond counter
-(starts near device power-on).
+Validated on-device: **the camera exposure timestamps and the IMU timestamps
+are the same clock** — a free-running nanosecond counter (starts near device
+power-on).
 
 - IMU reports carry the full u64 ns value; camera frames carry the low u32
   (telemetry cols 0–3), wrapping every 2³² ns = 4.295 s.

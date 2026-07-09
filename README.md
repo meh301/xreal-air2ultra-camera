@@ -21,8 +21,9 @@ VIO/SLAM, robotics, or just poking at the hardware.
 
 ```sh
 pip install numpy opencv-python hidapi
-python python/preview_clean.py       # live stereo viewer, 60 fps
-python python/xreal_imu_scope.py     # IMU oscilloscope + 3D attitude
+python python/preview_clean.py           # live stereo viewer, 60 fps
+python python/xreal_imu_scope.py         # IMU oscilloscope + 3D attitude
+python python/glasses_passthrough.py     # camera feed onto the glasses (SBS)
 ```
 
 Viewer keys: `c` clean/scrambled · `s` snapshot · `space` pause · `q` quit.
@@ -66,6 +67,7 @@ a 1 kHz IMU readout with fused orientation. Details:
 | Command | What it does |
 |---------|--------------|
 | `python python/preview_clean.py` | Real-time stereo viewer; publishes every clean pair to the shared-memory framebuffer. `--headless` (no window), `--snap out.png` (one snapshot), `--test in.pgm pfx` (offline descramble check). |
+| `python python/glasses_passthrough.py` | Stereo passthrough onto the glasses' own display (left camera → left eye; put the glasses in 3D/SBS mode). `--list`/`--display N` pick a display, `--window` previews without glasses, `--geometry X,Y,W,H` manual placement. Keys: `x` swap · `r` rotate · `m` mirror · `s` SBS. |
 | `python python/xreal_cam.py <N> <dir>` | Record N raw (still scrambled) frames as `cam{0,1}_*.pgm` + `meta.csv`; output identical to the macOS recorder. |
 | `python python/process_clean.py <dir> <out>` | Offline pipeline: descramble + denoise a recording into PNGs and a side-by-side `stereo_feed.mp4`. |
 | `python python/xreal_uvc.py` | Scan and diagnose capture backends (this file is also the capture library the other tools import). |
@@ -127,16 +129,16 @@ Built for feeding a VIO/SLAM pipeline without touching USB yourself:
   descrambler also rotates; output is 480×640 portrait per eye.
 - Remaining vertical stripes (column fixed-pattern noise) are estimated online
   and subtracted.
-- Telemetry comes in two **firmware dialects** (different metadata layouts):
-  dialect B is the current firmware (`12.1.00.498`, confirmed latest by the
-  official updater), dialect A is older. Some UVC stacks additionally
-  byte-swap the fake-YUV pairs. Every capture path in this repo detects and
-  normalizes all of it automatically.
+- The tools require the **current glasses firmware** (MCU `12.1.00.498`, the
+  latest — update at <https://ota.xreal.com/ultra-update?version=1>); older
+  firmware formats its telemetry differently and is not supported. Some UVC
+  stacks additionally byte-swap the fake-YUV pairs, which every capture path
+  detects and normalizes automatically.
 
-Full protocol documentation — USB layout, telemetry dialects (and which
-firmware versions they map to), scramble algorithm, IMU packet format,
-calibration blob, clock domains, UVC exposure controls, vendor HID protocol,
-per-OS capture notes: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
+Full protocol documentation — USB layout, telemetry row, scramble algorithm,
+IMU packet format, calibration blob, clock domains, UVC exposure controls,
+vendor HID protocol, per-OS capture notes:
+**[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
 
 ## Platform notes
 

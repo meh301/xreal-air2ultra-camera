@@ -16,10 +16,12 @@
 import AppKit
 import AVFoundation
 
-let W = 640, HIMG = 480, HFULL = 482, META_ROW = 480, CTR_COL = 19
-// row480 col58 はカメラ識別フラグ: 0x20 = cam0 (is_right=True), 0x21 = cam1 (is_right=False)。
-// ペア内の到着順は固定でない(実測で約2割が逆順)ため、順序ベースの判定は使わないこと。
-let CAM_COL = 58
+// 要・最新ファームウェア (MCU 12.1.00.498_20241115)。古い場合は
+// https://ota.xreal.com/ultra-update?version=1 でアップデートしてください。
+let W = 640, HIMG = 480, HFULL = 482, META_ROW = 480, CTR_COL = 18
+// row480 col59 はカメラ識別ビット: 1 = cam0 (is_right=True), 0 = cam1 (is_right=False)。
+// ペア内の到着順は固定でないため、順序ベースの判定は使わないこと。
+let CAM_COL = 59
 let NB = 128, BS = 2400          // 128 blocks x 2400 bytes = 307200 = 640*480
 let OW = 480, OH = 640           // デスクランブル後は縦向き 480x640
 
@@ -257,7 +259,7 @@ final class Cam: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         if sum / (W * HIMG / 7) < 5 { return }                    // 起動直後の黒フレームは無視
 
         let counter = Int(mono[META_ROW * W + CTR_COL])
-        let cam = Int(mono[META_ROW * W + CAM_COL]) & 1           // テレメトリのカメラ識別フラグで確実に判定
+        let cam = 1 - (Int(mono[META_ROW * W + CAM_COL]) & 1)     // テレメトリのカメラ識別ビットで確実に判定
 
         mono.withUnsafeBufferPointer { buf in
             latestClean[cam] = cleaners[cam].clean(descramble(buf.baseAddress!, lut: luts[cam]))

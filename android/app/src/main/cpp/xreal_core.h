@@ -11,8 +11,8 @@
 
 enum {
     XR_W = 640, XR_H_IMG = 480, XR_H_FULL = 482,
-    XR_META_ROW = 480, XR_PAD_ROW = 481, XR_PAD_VAL = 0x5C,
-    XR_CTR_COL = 19, XR_CAM_COL = 58,
+    XR_META_ROW = 480,
+    XR_CTR_COL = 18, XR_CAM_COL = 59,       /* telemetry: pair counter, camera bit */
     XR_FRAME_BYTES = XR_W * XR_H_FULL,      /* 308480 */
     XR_IMG_BYTES = XR_W * XR_H_IMG,         /* 307200 */
     XR_NB = 128, XR_BS = 2400,              /* scramble blocks */
@@ -21,30 +21,30 @@ enum {
 
 /* Byte order of the delivered stream. The fourcc is fake, so a UVC stack may
  * hand us the bytes of each 16-bit "YUV" pair in either order; constant
- * telemetry bytes reveal which. */
+ * telemetry bytes reveal which. Requires the current glasses firmware
+ * (MCU 12.1.00.498+; https://ota.xreal.com/ultra-update?version=1). */
 typedef enum {
     XR_ORDER_UNKNOWN = -1,
     XR_ORDER_OK = 0,
     XR_ORDER_SWAPPED = 1
 } xr_order;
 
-/* Firmware telemetry dialect (see docs/PROTOCOL.md "Telemetry row"):
- * A: counter col 19, camera id 0x20/0x21 at col 58, 0xAD,0xDA markers.
- * B: counter col 18, camera bit at col 59, dims marker at cols 51-56. */
-typedef enum {
-    XR_DIALECT_UNKNOWN = -1,
-    XR_DIALECT_A = 0,
-    XR_DIALECT_B = 1
-} xr_dialect;
-
 void xr_init(void);                            /* build LUTs; call once */
-/* fingerprint one XR_FRAME_BYTES frame; sets *dialect on success */
-xr_order xr_classify(const uint8_t *flat, xr_dialect *dialect);
+xr_order xr_classify(const uint8_t *flat);     /* fingerprint XR_FRAME_BYTES */
 void xr_unswap16(uint8_t *flat, size_t n);     /* undo the pairwise swap */
 
-/* camera index (0 = the camera using the right-LUT) and stereo pair counter */
-int xr_cam(const uint8_t *flat, xr_dialect d);
-int xr_counter(const uint8_t *flat, xr_dialect d);
+/* camera index (0 = the camera using the right-LUT; telemetry bit 1) */
+static inline int xr_cam(const uint8_t *flat)
+{ return 1 - (flat[XR_META_ROW * XR_W + XR_CAM_COL] & 1); }
+/* stereo pair counter, shared by both frames of a pair */
+static inline int xr_counter(const uint8_t *flat)
+{ return flat[XR_META_ROW * XR_W + XR_CTR_COL]; }
+/* u32 exposure timestamp [ns], low 32 bits of the IMU clock */
+static inline uint32_t xr_exposure_ts(const uint8_t *flat) {
+    const uint8_t *t = flat + XR_META_ROW * XR_W;
+    return (uint32_t)t[0] | (uint32_t)t[1] << 8 |
+           (uint32_t)t[2] << 16 | (uint32_t)t[3] << 24;
+}
 
 /* Descramble the 307200 image bytes of camera `cam` (cam0 = right LUT) into a
  * 480x640 portrait raster. Returns 0, or -1 if phase sync failed. */
