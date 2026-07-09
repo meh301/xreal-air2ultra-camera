@@ -199,6 +199,9 @@ def main():
                     help=f'publish to shared-memory ring "{IMU_FB_NAME}"')
     ap.add_argument("--config", metavar="OUT.json",
                     help="dump the factory calibration JSON and exit")
+    ap.add_argument("--quat", action="store_true",
+                    help="fuse a 6-axis quaternion host-side (Madgwick; the "
+                         "device itself streams raw data only)")
     ap.add_argument("--seconds", type=float, help="stop after this long")
     args = ap.parse_args()
 
@@ -212,10 +215,16 @@ def main():
 
         csv = open(args.csv, "w") if args.csv else None
         if csv:
-            csv.write("ts_ns,counter,temp_raw,gx_dps,gy_dps,gz_dps,ax_g,ay_g,az_g\n")
+            csv.write("ts_ns,counter,temp_raw,gx_dps,gy_dps,gz_dps,ax_g,ay_g,az_g"
+                      + (",qw,qx,qy,qz" if args.quat else "") + "\n")
         ring = ImuRingWriter() if args.fb else None
         if ring:
             print(f'publishing to shared memory "{IMU_FB_NAME}"')
+        ahrs = None
+        if args.quat:
+            from xreal_ahrs import ImuOrientation, quat_to_euler_deg
+            ahrs = ImuOrientation()
+            print("estimating gyro bias, hold the glasses still for ~1 s...")
 
         imu.stream(True)
         print("IMU stream on (1 kHz). Ctrl+C to stop.")
@@ -229,20 +238,31 @@ def main():
                     print("stream stalled...", flush=True)
                     continue
                 n += 1
+                q = ahrs.feed(s) if ahrs else None
                 if csv:
                     csv.write(f"{s.ts_ns},{s.counter},{s.temp_raw},"
                               f"{s.gyro_dps[0]:.4f},{s.gyro_dps[1]:.4f},{s.gyro_dps[2]:.4f},"
-                              f"{s.accel_g[0]:.5f},{s.accel_g[1]:.5f},{s.accel_g[2]:.5f}\n")
+                              f"{s.accel_g[0]:.5f},{s.accel_g[1]:.5f},{s.accel_g[2]:.5f}"
+                              + (",%.6f,%.6f,%.6f,%.6f" % tuple(q) if q else
+                                 ",,,," if ahrs else "") + "\n")
                 if ring:
                     ring.publish(s)
                 dt = time.time() - t0
                 if dt >= 1:
-                    a = s.accel_g
-                    mag = (a[0] ** 2 + a[1] ** 2 + a[2] ** 2) ** 0.5
-                    print(f"{n/dt:6.0f} Hz  gyro=({s.gyro_dps[0]:+8.3f},{s.gyro_dps[1]:+8.3f},"
-                          f"{s.gyro_dps[2]:+8.3f}) deg/s  accel=({a[0]:+6.3f},{a[1]:+6.3f},"
-                          f"{a[2]:+6.3f}) g  |a|={mag:5.3f}  t_raw={s.temp_raw}",
-                          flush=True)
+                    if q:
+                        yaw, pitch, roll = quat_to_euler_deg(q)
+                        print(f"{n/dt:6.0f} Hz  q=({q[0]:+6.3f},{q[1]:+6.3f},{q[2]:+6.3f},"
+                              f"{q[3]:+6.3f})  yaw={yaw:+7.1f} pitch={pitch:+6.1f} "
+                              f"roll={roll:+7.1f} deg"
+                              + ("" if ahrs.still_capture else "  [bias capture was noisy]"),
+                              flush=True)
+                    else:
+                        a = s.accel_g
+                        mag = (a[0] ** 2 + a[1] ** 2 + a[2] ** 2) ** 0.5
+                        print(f"{n/dt:6.0f} Hz  gyro=({s.gyro_dps[0]:+8.3f},{s.gyro_dps[1]:+8.3f},"
+                              f"{s.gyro_dps[2]:+8.3f}) deg/s  accel=({a[0]:+6.3f},{a[1]:+6.3f},"
+                              f"{a[2]:+6.3f}) g  |a|={mag:5.3f}  t_raw={s.temp_raw}",
+                              flush=True)
                     n, t0 = 0, time.time()
         except KeyboardInterrupt:
             print("\nstopped")

@@ -181,11 +181,24 @@ With the stream on, 512-byte input reports arrive at **1000 Hz** (measured
 | 42–47 | u16 mul + u32 div for the magnetometer |
 | 48–53 | 3 × i16 mag x,y,z — **read 0 on the tested unit** |
 | 54–57 | u32 secondary counter, 976,562 ns/tick = the sensor's internal 1024 Hz ODR |
-| 58– | zero padding |
+| 62 | flag, 0/1 (~40% of reports 1; meaning unknown) |
+| 63 | small cycling counter, 0–7 (meaning unknown) |
+| 64–65 | u16, ~0xC09x, rises slowly as the device warms — possibly a second temperature/voltage |
+| rest | zero (verified over 5,000 reports) |
 
 Values are in the raw sensor frame (at rest: \|accel\| = 1.010 g, gyro bias
 ≈ (−1.0, −0.5, 0.0) deg/s on the tested unit). ar-drivers-rs maps to its
 world convention as `(-x, z, y)` and subtracts the config biases.
+
+**The device streams raw inertial data only — there is no onboard
+orientation/quaternion output.** The vendor stack fuses host-side, and so
+does this repo: `python/xreal_ahrs.py` (6-axis Madgwick + gyro-bias capture)
+powers `xreal_imu.py --quat` and the attitude view in `xreal_imu_scope.py`.
+Other things the glasses can report: the MCU channel (interface 0) emits
+async events — cmd `0x6c05` = button press per ar-drivers-rs (interfaces 0/1
+are otherwise silent until spoken to; passively confirmed), and interface 8
+is a standard HID consumer-control endpoint (the brightness/volume buttons as
+media keys, handled by the OS).
 
 ### Factory calibration JSON
 
