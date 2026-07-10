@@ -27,13 +27,22 @@ enum {
  * Without it the mini-ORB fallback is used. */
 void xr_map_set_model(const char *onnx_path);
 
+/* Mapping (default) grows the session map; localization-only freezes it:
+ * the current view is still matched against the stored keyframes (the
+ * relocalization query) but nothing new is stored. */
+void xr_map_set_mapping(int on);
+
 void xr_map_reset(void);
 
 /* Offer a keyframe from the SLAM worker (non-blocking; drops when the
- * map thread is busy). Stored when moved >= 0.3 m or turned >= 15 deg
- * since the last stored keyframe. img = the processed left frame
- * (480x640, same feed Basalt sees). Landmarks (odom-frame xyz + left-cam
- * uv + stable ids) ride along for the future PnP verification. */
+ * map thread is busy). Processed when moved >= 0.3 m or turned >= 15 deg
+ * since the last processed one. img = the conditioned left frame
+ * (480x640, same feed Basalt sees); landmarks ride along for the future
+ * PnP verification. The store is a ROLLING cap: when full, the least-
+ * recently-useful keyframe is evicted — usefulness refreshes on loop
+ * matches AND on spatial proximity (< 2 m) of the current pose, so
+ * staying in the same space never loses its keyframes; only unvisited
+ * places roll off. In localization-only mode nothing is stored. */
 void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
                   const uint8_t *img,
                   const int32_t *lm_id, const float (*lm_xyz)[3],

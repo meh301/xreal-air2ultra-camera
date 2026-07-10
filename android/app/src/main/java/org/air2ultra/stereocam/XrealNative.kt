@@ -51,6 +51,13 @@ object XrealNative {
     external fun nativeSetXfeatModel(path: String)
 
     /**
+     * Mapping (true, default) grows the landmark cloud and keyframe store;
+     * localization-only (false) freezes both — relocalization queries keep
+     * running against the frozen map.
+     */
+    external fun nativeSetMapping(on: Boolean)
+
+    /**
      * Copy the newest pose/SLAM state into [buf] (direct ByteBuffer >= 40
      * bytes, native order): f32 quat_wxyz[4], f32 pos_m[3], i32 tracked
      * features, f32 depth_ms, u32 flags (bit0 depth on, bit1 rectification

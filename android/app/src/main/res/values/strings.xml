@@ -26,6 +26,9 @@
     <!-- phone pane layout (shows the CURRENT layout) -->
     <string name="pane_ldep">L|Dep</string>
     <string name="pane_lr">L|R</string>
+    <!-- session map mode (shows the CURRENT mode) -->
+    <string name="map_on">Map✓</string>
+    <string name="map_loc">Loc</string>
     <!-- the mode button shows the mode you switch TO -->
     <string name="mode_sbs">SBS</string>
     <string name="mode_stereo">3D</string>

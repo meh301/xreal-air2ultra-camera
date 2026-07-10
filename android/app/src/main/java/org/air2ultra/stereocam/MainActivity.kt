@@ -108,6 +108,7 @@ class MainActivity : Activity() {
     private var depthOn = true
     private var eyeMode = 0             // glasses: 0 cam, 1 depth, 2 AR, 3 off
     private var paneMode = 0            // phone: 0 = L|depth, 1 = L|R
+    private var mappingOn = true        // false = localization-only (frozen map)
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
@@ -308,6 +309,15 @@ class MainActivity : Activity() {
                 findViewById<Button>(R.id.toggle_depth).text = getString(R.string.dep_on)
             }
             eyeButton.text = getString(eyeLabels[eyeMode])
+        }
+        val mapButton = findViewById<Button>(R.id.map_mode)
+        mapButton.setOnClickListener {
+            // mapping grows the session map; Loc freezes it and keeps
+            // relocalizing against what exists
+            mappingOn = !mappingOn
+            XrealNative.nativeSetMapping(mappingOn)
+            mapButton.text =
+                getString(if (mappingOn) R.string.map_on else R.string.map_loc)
         }
         val paneButton = findViewById<Button>(R.id.pane_mode)
         paneButton.setOnClickListener {

@@ -81,6 +81,7 @@ static struct {
 
     int map_n;
     uint32_t map_stamp;
+    atomic_int map_on;                      /* 0 = localization-only (frozen) */
     xr_slam_state vio;                      /* newest Basalt state */
     int vio_fresh;
 
@@ -145,7 +146,7 @@ static struct {
         .slam_lock = PTHREAD_MUTEX_INITIALIZER,
         .slam_cond = PTHREAD_COND_INITIALIZER,
         .align_variant = XR_ALIGN_VARIANT_DEFAULT,
-        .stereo_mode = 1, .depth_on = 1, .show_pts = 1 };
+        .stereo_mode = 1, .depth_on = 1, .show_pts = 1, .map_on = 1 };
 
 /* ~14 MB of rectification maps + SGM scratch. Kept outside S: S has nonzero
  * initializers, so its members live in .data and would bloat the .so by
@@ -604,7 +605,9 @@ static void *slam_worker(void *arg) {
                     S.pts_pane_r[i][1] = st.feat_uv_r[i][1];
                 }
                 S.track_count = nr;
-                /* fold this pose's landmarks into the accumulated map */
+                /* fold this pose's landmarks into the accumulated map
+                 * (frozen in localization-only mode) */
+                if (atomic_load(&S.map_on)) {
                 S.map_stamp++;
                 for (int i = 0; i < st.n_landmarks; i++) {
                     uint32_t h = ((uint32_t)st.lm_id[i] * 2654435761u) & 4095u;
@@ -637,6 +640,7 @@ static void *slam_worker(void *arg) {
                         MAP_PT[slot].seen = 1;
                     }
                     MAP_PT[slot].stamp = S.map_stamp;
+                }
                 }
                 /* AR eye mode: snapshot the gated landmark map + this pose
                  * so the renderer can draw world-anchored points */
@@ -1350,6 +1354,17 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetSlamConfig(JNIEnv *env, jclass
     const char *p = path ? (*env)->GetStringUTFChars(env, path, NULL) : NULL;
     xr_slam_set_config(p);
     if (p) (*env)->ReleaseStringUTFChars(env, path, p);
+}
+
+/* Mapping vs localization-only: false freezes both the landmark cloud and
+ * the keyframe store; relocalization queries keep running against the
+ * frozen map. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetMapping(JNIEnv *env, jclass cls,
+                                                          jboolean on) {
+    (void)env; (void)cls;
+    atomic_store(&S.map_on, on ? 1 : 0);
+    xr_map_set_mapping(on ? 1 : 0);
 }
 
 /* Path of the staged XFeat ONNX model for session-map descriptors. */

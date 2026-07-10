@@ -33,7 +33,7 @@
 
 #define KF_DIST_M 0.30f            /* motion gates */
 #define KF_ANGLE_COS 0.99144f      /* cos(15/2 deg) on the quat dot */
-#define KF_TIMEOUT_NS (600ull * 1000000000ull)   /* 10 min session history */
+#define KF_NEAR_M 2.0f             /* proximity that keeps a keyframe fresh */
 
 /* mini-ORB */
 #define FAST_THRESH 18
@@ -53,6 +53,8 @@ enum { DESC_ORB = 0, DESC_XFEAT = 1 };
 
 typedef struct {
     uint64_t ts;
+    uint64_t last_used;            /* rolling eviction: refreshed by loop
+                                      matches and spatial proximity */
     float q[4], p[3];              /* odom pose at capture */
     int desc_type;
     int n_kp;
@@ -84,10 +86,16 @@ static struct {                        /* worker -> map thread mailbox */
 static struct { float q[4], p[3]; int have; } LAST_POSE;
 static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
+static atomic_int MAPPING = 1;
 
 void xr_map_set_model(const char *onnx_path) {
     if (!onnx_path) return;
     strncpy(MODEL_PATH, onnx_path, sizeof MODEL_PATH - 1);
+}
+
+void xr_map_set_mapping(int on) {
+    atomic_store(&MAPPING, on ? 1 : 0);
+    LOGI("session map: %s", on ? "MAPPING" : "LOCALIZATION-ONLY (frozen)");
 }
 
 void xr_map_reset(void) {
@@ -289,43 +297,56 @@ static void process_keyframe(void) {
         orb_extract(img, &work);
     }
 
+    int mapping = atomic_load(&MAPPING);
     pthread_mutex_lock(&MAP_LOCK);
-    /* history timeout + cap */
-    int w = 0;
-    for (int i = 0; i < KF_N; i++) {
-        if (work.ts - KF[i].ts <= KF_TIMEOUT_NS) {
-            if (w != i) KF[w] = KF[i];
-            w++;
-        }
-    }
-    KF_N = w;
-    if (KF_N == XR_MAP_MAX_KF) {
-        memmove(&KF[0], &KF[1], sizeof(xr_kf) * (XR_MAP_MAX_KF - 1));
-        KF_N--;
-    }
-    KF[KF_N] = work;
-    int self = KF_N;
-    KF_N++;
-    atomic_store(&KF_COUNT_PUB, KF_N);
     memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
     memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
     LAST_POSE.have = 1;
 
-    /* loop/reloc candidates: descriptor stage */
+    /* spatial recency: keyframes near the current position stay fresh, so
+     * living in the same space never rolls its map away */
+    for (int i = 0; i < KF_N; i++) {
+        float dx = work.p[0] - KF[i].p[0], dy = work.p[1] - KF[i].p[1],
+              dz = work.p[2] - KF[i].p[2];
+        if (dx * dx + dy * dy + dz * dz < KF_NEAR_M * KF_NEAR_M)
+            KF[i].last_used = work.ts;
+    }
+
+    /* loop/reloc candidates: match the CURRENT view against the store
+     * (runs in both modes — in localization-only this IS the reloc query).
+     * In mapping mode skip the most recent keyframes (always similar). */
+    int lim = KF_N - (mapping ? CAND_SKIP_RECENT : 0);
     int best_m = 0, best_i = -1;
-    for (int i = 0; i < self - CAND_SKIP_RECENT; i++) {
-        int m = match_count(&KF[self], &KF[i]);
+    for (int i = 0; i < lim; i++) {
+        int m = match_count(&work, &KF[i]);
         if (m > best_m) { best_m = m; best_i = i; }
     }
     if (best_i >= 0 && best_m >= CAND_MIN_MATCHES) {
-        LAST_CAND.a = KF[self].ts;
+        KF[best_i].last_used = work.ts;    /* matched = useful */
+        LAST_CAND.a = work.ts;
         LAST_CAND.b = KF[best_i].ts;
         LAST_CAND.matches = best_m;
         LAST_CAND.have = 1;
-        LOGI("session map: LOOP CANDIDATE kf#%d <-> kf#%d (%d matches, "
-             "%s, dt=%.1fs)", self, best_i, best_m,
-             KF[self].desc_type == DESC_XFEAT ? "xfeat" : "orb",
-             (double)(KF[self].ts - KF[best_i].ts) / 1e9);
+        LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs)",
+             mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
+             best_m, work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
+             (double)(work.ts - KF[best_i].ts) / 1e9);
+    }
+
+    /* store (mapping mode only), rolling cap: evict least-recently-useful */
+    if (mapping) {
+        if (KF_N == XR_MAP_MAX_KF) {
+            int victim = 0;
+            for (int i = 1; i < KF_N; i++)
+                if (KF[i].last_used < KF[victim].last_used) victim = i;
+            memmove(&KF[victim], &KF[victim + 1],
+                    sizeof(xr_kf) * (size_t)(KF_N - 1 - victim));
+            KF_N--;
+        }
+        work.last_used = work.ts;
+        KF[KF_N] = work;
+        KF_N++;
+        atomic_store(&KF_COUNT_PUB, KF_N);
     }
     pthread_mutex_unlock(&MAP_LOCK);
 }

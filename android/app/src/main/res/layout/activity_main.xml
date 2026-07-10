@@ -75,6 +75,11 @@
         android:paddingBottom="4dp">
 
         <Button
+            android:id="@+id/map_mode"
+            style="@style/ThinButton"
+            android:text="@string/map_on" />
+
+        <Button
             android:id="@+id/eye_mode"
             style="@style/ThinButton"
             android:text="@string/eye_cam" />
