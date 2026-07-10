@@ -18,8 +18,14 @@
     <string name="pts_off">Pts✕</string>
     <string name="dep_on">Dep✓</string>
     <string name="dep_off">Dep✕</string>
-    <string name="cam_on">Cam✓</string>
-    <string name="cam_off">Cam✕</string>
+    <!-- glasses eye-view mode (shows the CURRENT mode) -->
+    <string name="eye_cam">Eye:Cam</string>
+    <string name="eye_dep">Eye:Dep</string>
+    <string name="eye_ar">Eye:AR</string>
+    <string name="eye_off">Eye:Off</string>
+    <!-- phone pane layout (shows the CURRENT layout) -->
+    <string name="pane_ldep">L|Dep</string>
+    <string name="pane_lr">L|R</string>
     <!-- the mode button shows the mode you switch TO -->
     <string name="mode_sbs">SBS</string>
     <string name="mode_stereo">3D</string>

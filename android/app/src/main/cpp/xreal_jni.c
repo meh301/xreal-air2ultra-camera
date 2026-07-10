@@ -37,10 +37,10 @@
 #define MAX_W (2 * XR_W)     /* scrambled view: 1280x480 */
 #define MAX_H XR_OH          /* clean view:      960x640 */
 
-/* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS).
- * Stays 0 until the IMU pose is verified on-device with the confirmed
- * remap — Basalt only re-enters after that sign-off. */
-#define XR_ENABLE_BASALT 0
+/* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS). The IMU
+ * pose was signed off on-device with the ground-truth remap; Basalt now
+ * receives frames, extrinsics and inertial data in one consistent frame. */
+#define XR_ENABLE_BASALT 1
 
 static struct {
     uvc_context_t *ctx;
@@ -74,6 +74,7 @@ static struct {
     int pts_src;                            /* 1 = Basalt features, 0 = fallback */
     int track_count;
     float depth_ms;
+    atomic_int pane_mode;                   /* 0 = left|depth, 1 = left|right */
     xr_slam_state vio;                      /* newest Basalt state */
     int vio_fresh;
 
@@ -205,8 +206,18 @@ static void compose(int counter, uint64_t exposure_ts) {
             }
         }
     }
-    /* right pane: colorized depth */
-    if (atomic_load(&S.depth_on)) {
+    /* right pane: the right camera, or colorized depth */
+    if (atomic_load(&S.pane_mode) == 1) {
+        for (int y = 0; y < XR_OH; y++) {
+            uint8_t *dst = S.rgba + ((size_t)y * S.cw + XR_OW) * 4;
+            const uint8_t *sr = S.clean[0] + y * XR_OW;
+            for (int x = 0; x < XR_OW; x++) {
+                uint8_t v = sr[x];
+                dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 0xFF;
+                dst += 4;
+            }
+        }
+    } else if (atomic_load(&S.depth_on)) {
         for (int y = 0; y < XR_OH; y++) {
             uint8_t *dst = S.rgba + ((size_t)y * S.cw + XR_OW) * 4;
             const uint8_t *dr = S.disp + (y >> 1) * XS_W;
@@ -415,6 +426,8 @@ static void *slam_worker(void *arg) {
                            atomic_load(&S.align_variant));
             xr_track_reset(&S.track);
             S.stereo_ready = 1;
+            xr_gles_set_rect(ST.R_rect_imu, ST.f_rect,
+                             (XS_W - 1) * 0.5f, (XS_H - 1) * 0.5f);
             LOGI("stereo rectification ready: baseline %.1f cm, f_rect %.0f px",
                  (double)ST.baseline_m * 100.0, (double)ST.f_rect);
         }
@@ -448,9 +461,12 @@ static void *slam_worker(void *arg) {
                 xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0,
                                    st.ts);
             }
-        } else {
-            /* fallback front end: the built-in tracker on the rectified
-             * left image, with a gyro-predicted search window */
+        } else if (!xr_slam_load()) {
+            /* fallback front end (ONLY when libbasalt.so is absent, e.g.
+             * armeabi-v7a): the built-in tracker on the rectified left
+             * image, with a gyro-predicted search window. With Basalt
+             * present the dots are always its own features — nothing is
+             * shown while it starts up. */
             float pdx = 0.0f, pdy = 0.0f;
             float dR[9];
             if (S.slam_prev_ts && ts &&
@@ -523,6 +539,22 @@ static void *slam_worker(void *arg) {
                 memcpy(S.disp, disp_local, sizeof S.disp);
                 S.depth_ms = depth_ms;
                 pthread_mutex_unlock(&S.lock);
+
+                /* colorized copy for the glasses' depth passthrough (black
+                 * border so out-of-image samples clamp to black) */
+                static uint8_t drgba[XS_W * XS_H * 4];   /* slam thread only */
+                for (int y = 0; y < XS_H; y++) {
+                    int border_y = y == 0 || y == XS_H - 1;
+                    for (int x = 0; x < XS_W; x++) {
+                        uint8_t *px = drgba + ((size_t)y * XS_W + x) * 4;
+                        if (border_y || x == 0 || x == XS_W - 1) {
+                            px[0] = px[1] = px[2] = 0; px[3] = 0xFF;
+                        } else {
+                            disp_color(disp_local[y * XS_W + x], px);
+                        }
+                    }
+                }
+                xr_gles_submit_depth(drgba, XS_W, XS_H);
             }
         } else {
             pthread_mutex_lock(&S.lock);
@@ -1059,13 +1091,33 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetDepth(JNIEnv *env, jclass cls,
     atomic_store(&S.depth_on, on ? 1 : 0);
 }
 
-/* Show/hide the passthrough camera image on the glasses (stereo mode).
- * Off = pure AR: only the tracked features over the real world. */
+/* Glasses eye-view mode: 0 = camera passthrough, 1 = depth passthrough
+ * (world-aligned per eye), 2 = AR (tracked points only), 3 = off. */
 JNIEXPORT void JNICALL
-Java_org_air2ultra_stereocam_XrealNative_nativeSetShowCam(JNIEnv *env, jclass cls,
-                                                          jboolean on) {
+Java_org_air2ultra_stereocam_XrealNative_nativeSetEyeMode(JNIEnv *env, jclass cls,
+                                                          jint mode) {
     (void)env; (void)cls;
-    xr_gles_set_show_camera(on ? 1 : 0);
+    xr_gles_set_eye_mode((int)mode);
+    if (mode == XR_EYE_DEPTH) atomic_store(&S.depth_on, 1);
+}
+
+/* Phone pane layout: 0 = left camera | depth, 1 = left | right cameras. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetPaneMode(JNIEnv *env, jclass cls,
+                                                           jint mode) {
+    (void)env; (void)cls;
+    atomic_store(&S.pane_mode, mode & 1);
+}
+
+/* Path of the unified Basalt config (written by the app into its files
+ * dir; sets num-threads and the VioConfig). Call before streaming starts. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetSlamConfig(JNIEnv *env, jclass cls,
+                                                             jstring path) {
+    (void)cls;
+    const char *p = path ? (*env)->GetStringUTFChars(env, path, NULL) : NULL;
+    xr_slam_set_config(p);
+    if (p) (*env)->ReleaseStringUTFChars(env, path, p);
 }
 
 /* Copy the newest pose/SLAM state into `buf` (direct ByteBuffer, >= 40 bytes,

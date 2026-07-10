@@ -104,7 +104,8 @@ class MainActivity : Activity() {
     private var stereoMode = true       // stereo+aligned vs plain SBS mirror
     private var showPoints = true
     private var depthOn = true
-    private var showCam = true          // glasses: passthrough image vs AR-only
+    private var eyeMode = 0             // glasses: 0 cam, 1 depth, 2 AR, 3 off
+    private var paneMode = 0            // phone: 0 = L|depth, 1 = L|R
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
@@ -262,14 +263,25 @@ class MainActivity : Activity() {
             depButton.text =
                 getString(if (depthOn) R.string.dep_on else R.string.dep_off)
         }
-        val camButton = findViewById<Button>(R.id.toggle_cam)
-        camButton.setOnClickListener {
-            // hide the passthrough image on the glasses: pure AR, only the
-            // tracked features over the real world
-            showCam = !showCam
-            XrealNative.nativeSetShowCam(showCam)
-            camButton.text =
-                getString(if (showCam) R.string.cam_on else R.string.cam_off)
+        val eyeLabels = intArrayOf(R.string.eye_cam, R.string.eye_dep,
+                                   R.string.eye_ar, R.string.eye_off)
+        val eyeButton = findViewById<Button>(R.id.eye_mode)
+        eyeButton.setOnClickListener {
+            // glasses view: camera -> depth -> AR points-only -> off
+            eyeMode = (eyeMode + 1) % 4
+            XrealNative.nativeSetEyeMode(eyeMode)
+            if (eyeMode == 1 && !depthOn) {      // depth view forces SGM on
+                depthOn = true
+                findViewById<Button>(R.id.toggle_depth).text = getString(R.string.dep_on)
+            }
+            eyeButton.text = getString(eyeLabels[eyeMode])
+        }
+        val paneButton = findViewById<Button>(R.id.pane_mode)
+        paneButton.setOnClickListener {
+            paneMode = 1 - paneMode
+            XrealNative.nativeSetPaneMode(paneMode)
+            paneButton.text =
+                getString(if (paneMode == 0) R.string.pane_ldep else R.string.pane_lr)
         }
         val modeButton = findViewById<Button>(R.id.view_mode)
         modeButton.setOnClickListener {
@@ -281,6 +293,7 @@ class MainActivity : Activity() {
                 getString(if (stereoMode) R.string.mode_sbs else R.string.mode_stereo)
         }
         findViewById<Button>(R.id.snapshot).setOnClickListener { saveSnapshot() }
+        setupSlamConfig()
 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         displayManager.registerDisplayListener(displayListener, handler)
@@ -372,6 +385,33 @@ class MainActivity : Activity() {
         statusView.text = getString(R.string.status_starting)
         setupAlignment()
         handler.post(pollFrame)
+    }
+
+    /** Write Basalt's config files into the app dir: the phone-tuned
+     * VioConfig (from assets, HMD baseline + realtime enforcement) and the
+     * unified config that points at it and caps the TBB worker count so
+     * the VIO shares the SoC with capture/depth/render. */
+    private fun setupSlamConfig() {
+        try {
+            val vio = java.io.File(filesDir, "basalt_vio_config.json")
+            assets.open("basalt_vio_config.json").use { src ->
+                vio.outputStream().use { dst -> src.copyTo(dst) }
+            }
+            val toml = java.io.File(filesDir, "basalt.toml")
+            toml.writeText(
+                "show-gui=0\n" +
+                "cam-calib=\"\"\n" +                 // calibration stays programmatic
+                "config-path=\"${vio.absolutePath}\"\n" +
+                "marg-data=\"\"\n" +
+                "print-queue=0\n" +
+                "use-double=0\n" +
+                "deterministic=0\n" +
+                "num-threads=3\n")
+            XrealNative.nativeSetSlamConfig(toml.absolutePath)
+            android.util.Log.i("xrealcam", "Basalt config staged: ${toml.absolutePath}")
+        } catch (e: Exception) {
+            android.util.Log.e("xrealcam", "Basalt config staging failed: $e")
+        }
     }
 
     /** Parse the on-device factory calibration and enable the world-aligned

@@ -71,13 +71,19 @@ view then says "Basalt not loaded" and a built-in tracker draws the points.
      headset drawn as a frustum at its current pose plus a breadcrumb
      trail. Orientation comes from the on-device AHRS; position stays at
      the origin until the Basalt VIO backend lands (docs/VSLAM.md).
-   - **buttons** — *Rst* resets the SLAM front end (drops all features and
-     the trail), *Pts* shows/hides the tracked features (phone pane and
-     glasses overlay), *Dep* toggles the depth computation, *Cam* hides the
-     passthrough image on the glasses leaving only the tracked points as
-     native AR markers over the real world, *SBS/3D* switches the glasses
-     between plain side-by-side and calibrated per-eye stereo, *Snap*
-     saves a PNG of the panes to Pictures/XREAL.
+   - **buttons, row 1** — *Rst* resets the SLAM system (pose to origin,
+     features and trail dropped), *Pts* shows/hides the tracked features
+     (phone pane and glasses overlay; green = Basalt's own optical-flow
+     keypoints, orange = the built-in fallback tracker used only when
+     libbasalt.so is absent), *Dep* toggles the stereo-depth computation,
+     *Snap* saves a PNG of the panes to Pictures/XREAL.
+   - **buttons, row 2** — *Eye:…* cycles what the glasses show in 3D mode:
+     **Cam** (camera passthrough) → **Dep** (colorized stereo depth,
+     world-aligned per eye) → **AR** (black background, tracked points
+     floating over the real world) → **Off**; *L|Dep / L|R* switches the
+     phone's right pane between the depth map and the right camera;
+     *SBS/3D* switches the glasses between plain side-by-side and
+     calibrated per-eye stereo.
 4. When the phone drives the glasses' display (DisplayPort alt-mode), the
    world-aligned passthrough renders onto it natively (front-buffer GLES +
    IMU timewarp, always on), with the tracked features overlaid as points

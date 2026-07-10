@@ -32,11 +32,20 @@ object XrealNative {
     external fun nativeSetDepth(on: Boolean)
 
     /**
-     * Show/hide the passthrough camera image on the glasses (stereo mode).
-     * Off = pure AR: only the tracked features, floating over the real
-     * world seen through the lenses.
+     * Glasses eye-view mode: 0 = camera passthrough, 1 = depth passthrough
+     * (colorized stereo depth, world-aligned per eye), 2 = AR (tracked
+     * points only, floating over the real world), 3 = off.
      */
-    external fun nativeSetShowCam(on: Boolean)
+    external fun nativeSetEyeMode(mode: Int)
+
+    /** Phone pane layout: 0 = left camera | depth, 1 = left | right cams. */
+    external fun nativeSetPaneMode(mode: Int)
+
+    /**
+     * Path of the unified Basalt config file (thread count + VioConfig
+     * path). Must be called before streaming starts to take effect.
+     */
+    external fun nativeSetSlamConfig(path: String)
 
     /**
      * Copy the newest pose/SLAM state into [buf] (direct ByteBuffer >= 40

@@ -65,6 +65,13 @@ if (-not (Test-Path $Basalt)) {
 $cml = Join-Path $Basalt "CMakeLists.txt"
 (Get-Content $cml -Raw) -replace "  find_package\(TBB REQUIRED\)", "  find_package(TBB CONFIG REQUIRED)" |
     Set-Content $cml -NoNewline -Encoding utf8
+# allow a unified config file (num-threads, VioConfig path) together with
+# PROGRAMMATIC camera calibration: --cam-calib becomes optional
+$vt = Join-Path $Basalt "src\vit\vit_tracker.cpp"
+$src = Get-Content $vt -Raw
+$src = $src -replace [regex]::Escape('used for simulation.")->required();'), 'used for simulation.");'
+$src = $src -replace [regex]::Escape('    load_calibration_data(cam_calib_path);'), '    if (!cam_calib_path.empty()) load_calibration_data(cam_calib_path);'
+Set-Content $vt -Value $src -NoNewline -Encoding utf8
 
 $OneTbb = Join-Path $ToolDir "onetbb"
 if (-not (Test-Path $OneTbb)) {

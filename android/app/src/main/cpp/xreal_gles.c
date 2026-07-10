@@ -61,7 +61,15 @@ static struct {
     int pt_count;
     uint64_t pt_ts;                                 /* their exposure time */
     int show_points;
-    int show_camera;
+    int eye_mode;                                   /* XR_EYE_* */
+
+    /* depth passthrough: rectified-frame geometry + colorized image */
+    float rect_R[9], rect_f, rect_cx, rect_cy;
+    int rect_valid;
+    uint8_t depth_img[480 * 640 * 4];
+    int depth_w, depth_h;
+    int depth_fresh;
+    int depth_tex_w, depth_tex_h;
 
     /* GL state (render thread only) */
     EGLDisplay dpy;
@@ -69,7 +77,7 @@ static struct {
     EGLSurface surf;
     ANativeWindow *win;
     int single_buffer;
-    GLuint prog, tex_eye[2], tex_pair;
+    GLuint prog, tex_eye[2], tex_pair, tex_depth;
     GLint loc_pos, loc_uv, loc_tex;
     GLuint prog_pt;
     GLint loc_pt_pos;
@@ -86,7 +94,7 @@ static struct {
     int64_t stat_t0;
 } G = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
         .calib_variant = XR_ALIGN_VARIANT_DEFAULT, .timewarp = 1,
-        .show_points = 1, .show_camera = 1 };
+        .show_points = 1, .eye_mode = XR_EYE_CAM };
 
 static int64_t now_ms64(void) {
     struct timespec ts;
@@ -156,6 +164,13 @@ static int gl_objects_init(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    glGenTextures(1, &G.tex_depth);
+    glBindTexture(GL_TEXTURE_2D, G.tex_depth);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
     GLuint vsp = compile(GL_VERTEX_SHADER, VS_PT);
     GLuint fsp = compile(GL_FRAGMENT_SHADER, FS_PT);
     G.prog_pt = glCreateProgram();
@@ -219,8 +234,10 @@ static void build_meshes(void) {
 }
 
 /* Fill one eye's interleaved vertex buffer, rotating the rays by dR (the
- * IMU-frame rotation from exposure to now) before camera projection. */
-static void update_eye_vbo(int e, const float dR[9]) {
+ * IMU-frame rotation from exposure to now) before projection. depth_mode
+ * projects through the rectified pinhole (the depth image's frame) instead
+ * of that eye's fisheye camera. */
+static void update_eye_vbo(int e, const float dR[9], int depth_mode) {
     for (size_t i = 0; i < VERTS; i++) {
         const float *r = &G.mesh_ray[e][i * 3];
         float w[3];
@@ -232,11 +249,27 @@ static void update_eye_vbo(int e, const float dR[9]) {
             w[0] = r[0]; w[1] = r[1]; w[2] = r[2];
         }
         float u = 0, v = 0;
-        xr_align_project(&G.eyes_calib[e], G.calib_variant, w, &u, &v);
+        if (depth_mode) {
+            /* IMU ray -> rect frame (columns of rect_R are the rect axes) */
+            const float *R = G.rect_R;
+            float rx = R[0] * w[0] + R[3] * w[1] + R[6] * w[2];
+            float ry = R[1] * w[0] + R[4] * w[1] + R[7] * w[2];
+            float rz = R[2] * w[0] + R[5] * w[1] + R[8] * w[2];
+            if (rz > 1e-3f) {
+                u = (G.rect_f * rx / rz + G.rect_cx) / (float)G.depth_w;
+                v = (G.rect_f * ry / rz + G.rect_cy) / (float)G.depth_h;
+            } else {
+                u = -1.0f; v = -1.0f;          /* behind: clamps to border */
+            }
+            G.mesh_vtx[i * 4 + 2] = u;
+            G.mesh_vtx[i * 4 + 3] = v;
+        } else {
+            xr_align_project(&G.eyes_calib[e], G.calib_variant, w, &u, &v);
+            G.mesh_vtx[i * 4 + 2] = u / (float)XR_OW;
+            G.mesh_vtx[i * 4 + 3] = v / (float)XR_OH;
+        }
         G.mesh_vtx[i * 4] = G.mesh_pos[e][i * 2];
         G.mesh_vtx[i * 4 + 1] = G.mesh_pos[e][i * 2 + 1];
-        G.mesh_vtx[i * 4 + 2] = u / (float)XR_OW;
-        G.mesh_vtx[i * 4 + 3] = v / (float)XR_OH;
     }
     glBindBuffer(GL_ARRAY_BUFFER, G.vbo_eye[e]);
     glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * VERTS * 4, G.mesh_vtx,
@@ -337,23 +370,47 @@ static void render_frame(int mode, int fresh, const float *dR,
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, G.ibo);
 
     if (mode == MODE_EYES) {
-        int show_cam = G.show_camera;
-        if (!show_cam) {
-            /* AR mode: only the point overlay over black */
+        int eye_mode = G.eye_mode;
+        /* depth mode needs the rectification and at least one depth image */
+        if (eye_mode == XR_EYE_DEPTH && (!G.rect_valid || G.depth_w == 0))
+            eye_mode = XR_EYE_AR;
+        int draw_mesh = eye_mode == XR_EYE_CAM || eye_mode == XR_EYE_DEPTH;
+        if (!draw_mesh) {
+            /* AR/off: point overlay (or nothing) over black */
             glClearColor(0, 0, 0, 1);
             glClear(GL_COLOR_BUFFER_BIT);
         }
+        if (eye_mode == XR_EYE_DEPTH) {
+            glBindTexture(GL_TEXTURE_2D, G.tex_depth);
+            if (G.depth_tex_w != G.depth_w || G.depth_tex_h != G.depth_h) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, G.depth_w, G.depth_h,
+                             0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                G.depth_tex_w = G.depth_w;
+                G.depth_tex_h = G.depth_h;
+                G.depth_fresh = 1;
+            }
+            if (G.depth_fresh) {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, G.depth_w, G.depth_h,
+                                GL_RGBA, GL_UNSIGNED_BYTE, G.depth_img);
+                G.depth_fresh = 0;
+            }
+        }
         for (int e = 0; e < 2; e++) {
-            if (show_cam) {
+            if (draw_mesh) {
                 glUseProgram(G.prog);
-                glBindTexture(GL_TEXTURE_2D, G.tex_eye[e]);
-                if (fresh)
-                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, XR_OW, XR_OH,
-                                    GL_LUMINANCE, GL_UNSIGNED_BYTE, G.eye_img[e]);
-                update_eye_vbo(e, dR);  /* leaves the eye VBO bound */
+                if (eye_mode == XR_EYE_CAM) {
+                    glBindTexture(GL_TEXTURE_2D, G.tex_eye[e]);
+                    if (fresh)
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, XR_OW, XR_OH,
+                                        GL_LUMINANCE, GL_UNSIGNED_BYTE,
+                                        G.eye_img[e]);
+                } else {
+                    glBindTexture(GL_TEXTURE_2D, G.tex_depth);
+                }
+                update_eye_vbo(e, dR, eye_mode == XR_EYE_DEPTH);
             }
             glViewport(e * w / 2, 0, w / 2, h);
-            if (show_cam) {
+            if (draw_mesh) {
             glVertexAttribPointer((GLuint)G.loc_pos, 2, GL_FLOAT, GL_FALSE,
                                   4 * sizeof(GLfloat), (void *)0);
             glVertexAttribPointer((GLuint)G.loc_uv, 2, GL_FLOAT, GL_FALSE,
@@ -366,7 +423,7 @@ static void render_frame(int mode, int fresh, const float *dR,
 
             /* tracked-point overlay, timewarped with its OWN pose delta:
              * the points usually come from an older frame than the image */
-            if (G.show_points && G.pt_count > 0) {
+            if (G.show_points && eye_mode != XR_EYE_OFF && G.pt_count > 0) {
                 const float *pw = dR_pts ? dR_pts : dR;
                 float ndc[XR_GLES_MAX_POINTS * 2];
                 int n = 0;
@@ -608,10 +665,31 @@ void xr_gles_set_show_points(int on) {
     pthread_mutex_unlock(&G.lock);
 }
 
-void xr_gles_set_show_camera(int on) {
+void xr_gles_set_eye_mode(int mode) {
     pthread_mutex_lock(&G.lock);
-    G.show_camera = on ? 1 : 0;
+    G.eye_mode = mode & 3;
     pthread_cond_signal(&G.cond);      /* re-present with the new look */
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_rect(const float R_rect_imu[9], float f, float cx, float cy) {
+    pthread_mutex_lock(&G.lock);
+    memcpy(G.rect_R, R_rect_imu, sizeof G.rect_R);
+    G.rect_f = f;
+    G.rect_cx = cx;
+    G.rect_cy = cy;
+    G.rect_valid = 1;
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_submit_depth(const uint8_t *rgba, int w, int h) {
+    if (w <= 0 || h <= 0 || w > 480 || h > 640) return;
+    pthread_mutex_lock(&G.lock);
+    memcpy(G.depth_img, rgba, (size_t)w * h * 4);
+    G.depth_w = w;
+    G.depth_h = h;
+    G.depth_fresh = 1;
+    pthread_cond_signal(&G.cond);
     pthread_mutex_unlock(&G.lock);
 }
 

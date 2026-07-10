@@ -58,12 +58,27 @@ void xr_gles_set_timewarp(int on);
 enum { XR_GLES_MAX_POINTS = 256 };
 void xr_gles_set_points(const float *rays_imu, int n, uint64_t exposure_ts_ns);
 
-/* Show/hide the point overlay (default on). */
+/* Show/hide the point overlay (default on; drawn in every eye mode
+ * except OFF). */
 void xr_gles_set_show_points(int on);
 
-/* Show/hide the passthrough camera image in the aligned stereo mode
- * (default on). Off = black background with only the point overlay — the
- * tracked features float in the real world as native AR markers. */
-void xr_gles_set_show_camera(int on);
+/* What the glasses show in the aligned stereo mode. */
+enum {
+    XR_EYE_CAM = 0,     /* camera passthrough (default) */
+    XR_EYE_DEPTH = 1,   /* colorized stereo depth, world-aligned per eye */
+    XR_EYE_AR = 2,      /* black background: tracked points only */
+    XR_EYE_OFF = 3      /* nothing */
+};
+void xr_gles_set_eye_mode(int mode);
+
+/* Rectified-frame parameters for the depth passthrough: R maps rect->IMU
+ * (row-major, columns = the rect axes), pinhole f/cx/cy in rect pixels.
+ * Set once when the rectification is built. */
+void xr_gles_set_rect(const float R_rect_imu[9], float f, float cx, float cy);
+
+/* Submit the colorized depth image (RGBA, w x h, up to 480x640); copied
+ * internally. The border pixels should be black — samples that leave the
+ * image clamp to them. */
+void xr_gles_submit_depth(const uint8_t *rgba, int w, int h);
 
 #endif

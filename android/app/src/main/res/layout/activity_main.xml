@@ -29,7 +29,8 @@
         android:background="#88000000"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="4dp">
+        android:paddingHorizontal="4dp"
+        android:paddingTop="4dp">
 
         <TextView
             android:id="@+id/status"
@@ -59,18 +60,33 @@
             android:text="@string/dep_on" />
 
         <Button
-            android:id="@+id/toggle_cam"
+            android:id="@+id/snapshot"
             style="@style/ThinButton"
-            android:text="@string/cam_on" />
+            android:text="@string/snapshot" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#88000000"
+        android:gravity="center_vertical|end"
+        android:orientation="horizontal"
+        android:paddingHorizontal="4dp"
+        android:paddingBottom="4dp">
+
+        <Button
+            android:id="@+id/eye_mode"
+            style="@style/ThinButton"
+            android:text="@string/eye_cam" />
+
+        <Button
+            android:id="@+id/pane_mode"
+            style="@style/ThinButton"
+            android:text="@string/pane_ldep" />
 
         <Button
             android:id="@+id/view_mode"
             style="@style/ThinButton"
             android:text="@string/mode_sbs" />
-
-        <Button
-            android:id="@+id/snapshot"
-            style="@style/ThinButton"
-            android:text="@string/snapshot" />
     </LinearLayout>
 </LinearLayout>

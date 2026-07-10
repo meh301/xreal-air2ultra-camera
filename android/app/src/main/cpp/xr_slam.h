@@ -34,6 +34,11 @@ typedef struct {
  * Returns 1 when the backend is available. */
 int xr_slam_load(void);
 
+/* Path to the unified Basalt config file (num-threads, VioConfig path —
+ * written by the app into its files dir). Call before xr_slam_start;
+ * without it Basalt runs on library defaults (all cores, desktop tuning). */
+void xr_slam_set_config(const char *unified_config_path);
+
 /* Create + start the tracker from the factory calibration (left = the eye
  * calib holding cam1, right = cam0). gyro_bias [rad/s] / accel_bias [m/s^2]
  * are the factory bias vectors (the raw stream is uncorrected!) and noises

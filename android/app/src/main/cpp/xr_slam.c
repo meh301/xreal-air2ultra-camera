@@ -40,14 +40,27 @@ static struct {
     float kb4[2][8];        /* per cam: fx fy cx cy k1..k4 (for unproject) */
     float R_ic[2][9];       /* camera -> IMU rotation, row-major */
     uint64_t last_pair_ts;
+    char config_path[512];
 } B;
+
+void xr_slam_set_config(const char *unified_config_path) {
+    if (!unified_config_path) {
+        B.config_path[0] = 0;
+        return;
+    }
+    strncpy(B.config_path, unified_config_path, sizeof B.config_path - 1);
+    B.config_path[sizeof B.config_path - 1] = 0;
+}
 
 /* the VIO initializes its world from the first accel samples: give it some
  * IMU history before the first frame arrives */
 #define IMU_WARMUP_SAMPLES 300
 
 int xr_slam_load(void) {
+    static int attempted;
     if (B.dl) return 1;
+    if (attempted) return 0;
+    attempted = 1;
     B.dl = dlopen("libbasalt.so", RTLD_NOW | RTLD_LOCAL);
     if (!B.dl) {
         LOGI("Basalt backend not present (%s) — using built-in tracker", dlerror());
@@ -183,8 +196,9 @@ int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
     if (!xr_slam_load()) return -1;
     if (B.tracker) return 0;
 
-    vit_config_t cfg = { .file = NULL, .cam_count = 2, .imu_count = 1,
-                         .show_ui = false };
+    vit_config_t cfg = { .file = B.config_path[0] ? B.config_path : NULL,
+                         .cam_count = 2, .imu_count = 1, .show_ui = false };
+    if (cfg.file) LOGI("Basalt: using config %s", cfg.file);
     if (B.create(&cfg, &B.tracker) != VIT_SUCCESS || !B.tracker) {
         LOGE("Basalt: tracker create failed");
         B.tracker = NULL;
