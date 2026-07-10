@@ -16,6 +16,7 @@ typedef struct {
     float q_disp[4];   /* target_q_{eye}_display, xyzw */
     float q_cam[4];    /* imu_q_cam of the same-side camera, xyzw */
     float fc[2], cc[2], kc[12];   /* fisheye624 of that camera */
+    float p_cam[3];    /* imu_p_cam of that camera [m] (stereo baseline) */
 } xr_eye_calib;
 
 /* Rotation-convention variant: bit 0 = conjugate the display quaternion,
@@ -38,6 +39,12 @@ int xr_align_project(const xr_eye_calib *eye, int variant,
 /* Both stages composed (no timewarp). */
 int xr_align_uv(const xr_eye_calib *eye, int variant,
                 float u_disp, float v_disp, float *u_cam, float *v_cam);
+
+/* Inverse of stage 1: IMU-frame ray -> display pixel (calibrated 1920x1080
+ * coordinates) of this eye. Used to overlay world points/landmarks on the
+ * passthrough. Returns 0, or -1 if the ray points behind the display. */
+int xr_align_ray_to_display(const xr_eye_calib *eye, int variant,
+                            const float ray_imu[3], float *u_disp, float *v_disp);
 
 /* Build the sample map for one eye: out_idx[y*w + x] = index into the
  * 480x640 camera image (or -1 for out-of-view). (w, h) is the rendered

@@ -70,6 +70,20 @@ int xr_align_uv(const xr_eye_calib *eye, int variant,
     return xr_align_project(eye, variant, ray, u_cam, v_cam);
 }
 
+int xr_align_ray_to_display(const xr_eye_calib *eye, int variant,
+                            const float ray_imu[3], float *u_disp, float *v_disp) {
+    float Rd[9];
+    quat_to_rot(eye->q_disp, variant & 1, Rd);
+    /* Rd maps display->imu; transpose takes the ray into the display frame */
+    float x = Rd[0] * ray_imu[0] + Rd[3] * ray_imu[1] + Rd[6] * ray_imu[2];
+    float y = Rd[1] * ray_imu[0] + Rd[4] * ray_imu[1] + Rd[7] * ray_imu[2];
+    float z = Rd[2] * ray_imu[0] + Rd[5] * ray_imu[1] + Rd[8] * ray_imu[2];
+    if (z <= 1e-6f) return -1;
+    *u_disp = eye->K[0] * (x / z) + eye->K[2];
+    *v_disp = eye->K[4] * (y / z) + eye->K[5];
+    return 0;
+}
+
 void xr_align_build(const xr_eye_calib *eye, int variant, int w, int h,
                     int full_w, int full_h, int32_t *out_idx) {
     float su = (float)full_w / w, sv = (float)full_h / h;

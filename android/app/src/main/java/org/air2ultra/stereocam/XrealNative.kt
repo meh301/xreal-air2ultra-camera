@@ -19,16 +19,26 @@ object XrealNative {
 
     external fun nativeStop()
 
-    /** true = descrambled/denoised view, false = raw scrambled view. */
-    external fun nativeSetClean(clean: Boolean)
-
-    /** Horizontal per-eye flip of the composed view (also affects the
-     * glasses passthrough). */
-    external fun nativeSetMirror(mirror: Boolean)
-
-    /** Swap the two panes of the composed view (also affects the glasses
-     * passthrough and snapshots). */
+    /** Swap the glasses' two eye views (debug). */
     external fun nativeSetSwap(swap: Boolean)
+
+    /** Drop all tracked features and restart the SLAM front end. */
+    external fun nativeSlamReset()
+
+    /** Show/hide the tracked features (phone pane + glasses overlay). */
+    external fun nativeSetShowPoints(on: Boolean)
+
+    /** Enable/disable stereo depth computation (tracking keeps running). */
+    external fun nativeSetDepth(on: Boolean)
+
+    /**
+     * Copy the newest pose/SLAM state into [buf] (direct ByteBuffer >= 40
+     * bytes, native order): f32 quat_wxyz[4], f32 pos_m[3], i32 tracked
+     * features, f32 depth_ms, u32 flags (bit0 depth on, bit1 rectification
+     * ready, bit2 orientation valid). Position stays zero until the Basalt
+     * backend lands. Returns false while no orientation exists yet.
+     */
+    external fun nativeGrabPose(buf: ByteBuffer): Boolean
 
     /**
      * true: glasses in per-eye stereo display mode with the calibrated
@@ -48,9 +58,10 @@ object XrealNative {
     external fun nativeGetConfig(): ByteArray?
 
     /**
-     * Enable the world-aligned per-eye passthrough. 66 floats — per eye
-     * (left, then right): display K[9], display quaternion[4], camera
-     * quaternion[4], fc[2], cc[2], kc[12], all from the calibration JSON.
+     * Enable the world-aligned per-eye passthrough and the stereo
+     * rectification. 72 floats — per eye (left, then right): display K[9],
+     * display quaternion[4], camera quaternion[4], fc[2], cc[2], kc[12],
+     * p_cam[3], all from the calibration JSON.
      */
     external fun nativeSetAlignment(params: FloatArray)
 

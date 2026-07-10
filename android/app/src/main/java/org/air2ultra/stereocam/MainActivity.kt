@@ -66,16 +66,18 @@ class GlassesPresentation(context: Context, display: Display) :
 }
 
 /**
- * Live stereo preview of the XREAL Air 2 Ultra tracking cameras.
+ * vSLAM research app for the XREAL Air 2 Ultra (research branch).
  *
  * Android exposes no camera API for external UVC devices, so the app opens
  * the glasses through the USB host API and hands the raw file descriptor to
  * native code (libusb + libuvc), which streams, descrambles and denoises the
- * frames. Requires the current glasses firmware (MCU 12.1.00.498+ — update at
- * https://ota.xreal.com/ultra-update?version=1). See docs/PROTOCOL.md.
+ * frames, then runs the SLAM front end (rectification, feature tracking,
+ * stereo depth — see docs/VSLAM.md). Requires the current glasses firmware
+ * (MCU 12.1.00.498+ — update at https://ota.xreal.com/ultra-update?version=1).
  *
- * When the glasses' display is available (DisplayPort alt-mode), the clean
- * stereo pair is additionally rendered onto it as SBS passthrough.
+ * Phone UI: tracking pane | depth pane on top, the 3D pose/map below.
+ * The glasses get the world-aligned passthrough with the tracked features
+ * overlaid, rendered natively (front buffer + IMU timewarp, always on).
  */
 class MainActivity : Activity() {
 
@@ -95,28 +97,24 @@ class MainActivity : Activity() {
     private lateinit var usbManager: UsbManager
     private lateinit var imageView: ImageView
     private lateinit var statusView: TextView
-    private lateinit var gyroGraph: ImuGraphView
-    private lateinit var accelGraph: ImuGraphView
-    private lateinit var toggleButton: Button
+    private lateinit var poseMap: PoseMapView
 
     private var connection: UsbDeviceConnection? = null
     private var streaming = false
-    private var showClean = true
     private var stereoMode = true       // stereo+aligned vs plain SBS mirror
+    private var showPoints = true
+    private var depthOn = true
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
     private var lastFrameAt = 0L        // watchdog: last time a frame arrived
     private var lastReconnectAt = 0L
     private var alignReady = false
-    private var timewarp = true
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
-    private val imuBatch: ByteBuffer =                 // 256 samples x 32 B
-        ByteBuffer.allocateDirect(256 * 32).order(ByteOrder.nativeOrder())
-    private val gyroTriples = FloatArray(256 * 3)
-    private val accelTriples = FloatArray(256 * 3)
-    private var imuSampleCount = 0
-    private var imuRateT0 = 0L
+    private val poseBuffer: ByteBuffer =
+        ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
+    private val poseQ = FloatArray(4)
+    private val poseP = FloatArray(3)
     private val handler = Handler(Looper.getMainLooper())
 
     private val pollFrame = object : Runnable {
@@ -135,13 +133,25 @@ class MainActivity : Activity() {
                 return   // connect flow restarts the poll loop
             }
 
+            // pose/SLAM state feeds both the 3D map and the status line
+            var tracked = 0
+            var depthMs = 0f
+            if (XrealNative.nativeGrabPose(poseBuffer)) {
+                poseBuffer.position(0)
+                for (i in 0..3) poseQ[i] = poseBuffer.float
+                for (i in 0..2) poseP[i] = poseBuffer.float
+                tracked = poseBuffer.int
+                depthMs = poseBuffer.float
+                val flags = poseBuffer.int
+                poseMap.update(poseQ, poseP, tracked, depthMs, flags)
+            }
+
             val packed = XrealNative.nativeGrabFrame(frameBuffer)
             if (packed != 0L) {
                 lastFrameAt = now
                 val w = (packed ushr 48).toInt()
                 val h = ((packed ushr 32) and 0xFFFF).toInt()
-                val fps = ((packed ushr 16) and 0xFFFF).toInt() / 10.0
-                val counter = (packed and 0xFF).toInt()
+                val fps = ((packed ushr 16) and 0xFFFF).toInt() / 10.0f
                 var bm = bitmap
                 if (bm == null || bm.width != w || bm.height != h) {
                     bm = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -152,39 +162,13 @@ class MainActivity : Activity() {
                 bm.copyPixelsFromBuffer(frameBuffer)
                 imageView.invalidate()
                 statusView.text = getString(
-                    R.string.status_streaming,
-                    counter, fps, if (showClean) "CLEAN" else "SCRAMBLED"
+                    R.string.status_streaming, tracked, fps, depthMs
                 ) + when {
                     presentation == null -> "  [no ext display]"
                     !stereoMode -> "  [glasses sbs]"
-                    alignReady -> "  [glasses stereo tw:" +
-                        (if (timewarp) "on" else "off") + "]"
-                    else -> "  [glasses stereo uncal]"
+                    alignReady -> "  [glasses stereo]"
+                    else -> "  [glasses uncal]"
                 }
-            }
-            val n = XrealNative.nativeGrabImuBatch(imuBatch)
-            if (n > 0) {
-                imuBatch.position(0)
-                for (i in 0 until n) {
-                    imuBatch.long                      // ts_ns (graphs don't need it)
-                    for (c in 0..2) gyroTriples[i * 3 + c] = imuBatch.float
-                    for (c in 0..2) accelTriples[i * 3 + c] = imuBatch.float
-                }
-                gyroGraph.addSamples(gyroTriples, n)
-                accelGraph.addSamples(accelTriples, n)
-
-                imuSampleCount += n
-                val now = System.nanoTime()
-                if (imuRateT0 == 0L) imuRateT0 = now
-                if (now - imuRateT0 >= 1_000_000_000L) {
-                    val rate = imuSampleCount * 1e9f / (now - imuRateT0)
-                    gyroGraph.rateHz = rate
-                    accelGraph.rateHz = rate
-                    imuSampleCount = 0
-                    imuRateT0 = now
-                }
-                gyroGraph.invalidate()
-                accelGraph.invalidate()
             }
             if (streaming) handler.postDelayed(this, FRAME_INTERVAL_MS)
         }
@@ -245,21 +229,26 @@ class MainActivity : Activity() {
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         imageView = findViewById(R.id.preview)
         statusView = findViewById(R.id.status)
-        gyroGraph = findViewById(R.id.gyro_graph)
-        accelGraph = findViewById(R.id.accel_graph)
-        gyroGraph.title = "gyro"
-        gyroGraph.unit = "deg/s"
-        accelGraph.title = "accel"
-        accelGraph.unit = "g"
-        toggleButton = findViewById(R.id.toggle)
+        poseMap = findViewById(R.id.pose_map)
 
-        toggleButton.setOnClickListener {
-            showClean = !showClean
-            XrealNative.nativeSetClean(showClean)
-            toggleButton.text =
-                getString(if (showClean) R.string.show_raw else R.string.show_clean)
+        findViewById<Button>(R.id.slam_reset).setOnClickListener {
+            XrealNative.nativeSlamReset()
+            poseMap.reset()
         }
-        findViewById<Button>(R.id.snapshot).setOnClickListener { saveSnapshot() }
+        val ptsButton = findViewById<Button>(R.id.toggle_points)
+        ptsButton.setOnClickListener {
+            showPoints = !showPoints
+            XrealNative.nativeSetShowPoints(showPoints)
+            ptsButton.text =
+                getString(if (showPoints) R.string.pts_on else R.string.pts_off)
+        }
+        val depButton = findViewById<Button>(R.id.toggle_depth)
+        depButton.setOnClickListener {
+            depthOn = !depthOn
+            XrealNative.nativeSetDepth(depthOn)
+            depButton.text =
+                getString(if (depthOn) R.string.dep_on else R.string.dep_off)
+        }
         val modeButton = findViewById<Button>(R.id.view_mode)
         modeButton.setOnClickListener {
             // Stereo = glasses in per-eye SBS display mode + calibrated
@@ -269,12 +258,7 @@ class MainActivity : Activity() {
             modeButton.text =
                 getString(if (stereoMode) R.string.mode_sbs else R.string.mode_stereo)
         }
-        val twButton = findViewById<Button>(R.id.timewarp)
-        twButton.setOnClickListener {
-            timewarp = !timewarp
-            XrealNative.nativeSetTimewarp(timewarp)
-            twButton.text = getString(if (timewarp) R.string.tw_on else R.string.tw_off)
-        }
+        findViewById<Button>(R.id.snapshot).setOnClickListener { saveSnapshot() }
 
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         displayManager.registerDisplayListener(displayListener, handler)
@@ -369,7 +353,8 @@ class MainActivity : Activity() {
     }
 
     /** Parse the on-device factory calibration and enable the world-aligned
-     * per-eye passthrough (each eye is its own calibrated virtual display). */
+     * per-eye passthrough plus the stereo rectification (each eye is its own
+     * calibrated virtual display; the camera positions give the baseline). */
     private fun setupAlignment() {
         alignReady = false
         val raw = XrealNative.nativeGetConfig() ?: return
@@ -377,7 +362,7 @@ class MainActivity : Activity() {
             val cfg = org.json.JSONObject(String(raw))
             val disp = cfg.getJSONObject("display")
             val cams = cfg.getJSONObject("SLAM_camera")
-            val params = FloatArray(66)
+            val params = FloatArray(72)
             var o = 0
             for (eye in arrayOf("left", "right")) {
                 // left eye pairs with device_1 (= cam1, the left camera)
@@ -387,14 +372,15 @@ class MainActivity : Activity() {
                                     cam.getJSONArray("imu_q_cam"),
                                     cam.getJSONArray("fc"),
                                     cam.getJSONArray("cc"),
-                                    cam.getJSONArray("kc"))) {
+                                    cam.getJSONArray("kc"),
+                                    cam.getJSONArray("imu_p_cam"))) {
                     for (i in 0 until arr.length()) params[o++] = arr.getDouble(i).toFloat()
                 }
             }
-            if (o != 66) throw IllegalStateException("unexpected calibration shape ($o)")
+            if (o != 72) throw IllegalStateException("unexpected calibration shape ($o)")
             XrealNative.nativeSetAlignment(params)
             alignReady = true
-            android.util.Log.i("xrealcam", "world-aligned passthrough enabled")
+            android.util.Log.i("xrealcam", "world-aligned passthrough + rectification enabled")
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "calibration parse failed: $e")
         }

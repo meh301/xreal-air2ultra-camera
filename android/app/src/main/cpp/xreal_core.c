@@ -127,7 +127,8 @@ void xr_cleaner_reset(xr_cleaner *c) {
     memset(c->stripe, 0, sizeof c->stripe);
 }
 
-void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out) {
+void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
+              int do_equalize) {
     float pref[XR_OH + 1];   /* fits the longer axis */
     float buf[XR_OH];
 
@@ -183,5 +184,5 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out) {
         float v = g_f[i];
         out[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
     }
-    xr_equalize(out, out, XR_OW * XR_OH);
+    if (do_equalize) xr_equalize(out, out, XR_OW * XR_OH);
 }

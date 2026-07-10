@@ -147,6 +147,45 @@ matures.
 - SGBM half-res: ~10 ms/pair on a big core (run at 10–15 Hz for occlusion).
 - Landmark overlay: trivial (a point-sprite draw in the existing renderer).
 
+## Implementation status (research branch)
+
+The research app skeleton is **live** — everything around the SLAM core
+exists and runs, with a lightweight stand-in front end where Basalt will sit:
+
+| Piece | File(s) | Status |
+|---|---|---|
+| Stereo rectification (factory calib → 240×320 portrait pinhole pair, x = 13.7 cm baseline, f=200) | `android/.../cpp/xr_stereo.c` | ✓ built from `imu_p_cam`/`imu_q_cam` + fisheye624 at runtime |
+| Stereo depth 30 Hz (census 5×5, 48 disp, uniqueness gate, 3×3 median) | `xr_stereo.c` | ✓ on the SLAM worker thread, ~10 ms/pair |
+| Sparse feature tracker (grid-seeded, 7×7 SAD, gyro-predicted search) | `xr_track.c` | ✓ stand-in for Basalt's optical-flow front end |
+| Non-equalized tap for trackers (plan item 2 caveat) | `xreal_core.c` `xr_clean(..., do_equalize)` | ✓ display gets equalized, SLAM gets raw |
+| SLAM worker thread (rectify + track + depth per stereo pair, newest-wins) | `xreal_jni.c` `slam_worker` | ✓ |
+| Landmark overlay on the passthrough (GL_POINTS pass riding the same timewarp dR as the image) | `xreal_gles.c`, `xr_align_ray_to_display()` | ✓ |
+| Phone UI: tracking pane \| depth pane, 3D pose/map view, buttons Rst/Pts/Dep/SBS/Snap | `MainActivity.kt`, `PoseMapView.kt` | ✓ orientation from AHRS; position zeros until Basalt |
+| Pose export | `nativeGrabPose` (q, p, tracked, depth ms, flags) | ✓ same ABI Basalt will fill |
+| Basalt backend | — | **next** (plan below) |
+| GNSS (GP-02), fiducials, WebSocket client | — | deferred per plan |
+
+### Basalt build plan (next session)
+
+1. **Fetch**: `basalt-monado` (Collabora fork) + submodules; deps are
+   header-only or CMake-friendly: Eigen, Sophus, cereal, {fmt}, TBB
+   (oneTBB builds for Android; or swap its task usage for a thread pool),
+   basalt's own `basalt-headers`. No ROS, no Pangolin needed when built
+   headless with the `vit_interface`.
+2. **Build shape**: one `libbasalt_vit.so` prebuilt per ABI via a separate
+   CMake toolchain build (NDK toolchain file), then linked into `xrealcam`
+   by ndk-build as a `PREBUILT_SHARED_LIBRARY` — keeps our fast ndk-build
+   iteration.
+3. **Calibration**: converter refits fisheye624 → Kannala-Brandt (kb4) by
+   sampling `xr_align_project` on a grid (plan item 1); emit basalt's JSON
+   calib (T_imu_cam from `imu_p_cam`/`imu_q_cam`, noise densities from the
+   `imu` block of the device JSON).
+4. **Wire-in**: replace `xr_track_step` inside `slam_worker` with the VIT
+   frame+IMU feed (IMU samples forwarded from the existing 1 kHz drain
+   thread), fill `nativeGrabPose` q/p from VIT pose output, hand VIT
+   landmarks to `xr_gles_set_points` instead of tracker rays. The depth
+   path stays as-is.
+
 Sources: [Basalt for Monado (Collabora)](https://www.collabora.com/news-and-blog/blog/2022/04/05/visual-inertial-tracking-support-for-monado-openxr/),
 [Monado](https://monado.freedesktop.org/),
 [VINS-Fusion](https://github.com/HKUST-Aerial-Robotics/VINS-Fusion),

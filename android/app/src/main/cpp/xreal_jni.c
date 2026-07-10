@@ -20,6 +20,8 @@
 #include <libusb.h>
 #include <libuvc/libuvc.h>
 
+#include "xr_stereo.h"
+#include "xr_track.h"
 #include "xreal_align.h"
 #include "xreal_core.h"
 #include "xreal_gles.h"
@@ -40,11 +42,30 @@ static struct {
     xr_order order;
     xr_cleaner cleaners[2];
     uint8_t frame[XR_FRAME_BYTES];          /* working copy of the UVC frame */
-    uint8_t clean[2][XR_OW * XR_OH];
-    uint8_t raweq[2][XR_W * XR_H_IMG];
+    uint8_t clean[2][XR_OW * XR_OH];        /* equalized, for viewing */
+    uint8_t clean_raw[2][XR_OW * XR_OH];    /* non-equalized, for tracking */
     int have[2];
 
-    atomic_int show_clean;
+    /* SLAM worker (research app): rectify + track + depth at sensor rate.
+     * The tracker is the live front-end stand-in; Basalt plugs in behind
+     * the same data flow (see docs/VSLAM.md). */
+    pthread_t slam_thread;
+    atomic_int slam_running;
+    pthread_mutex_t slam_lock;
+    pthread_cond_t slam_cond;
+    uint32_t pair_seq;
+    uint64_t pair_ts, slam_prev_ts;
+    xr_stereo stereo;
+    xr_track track;
+    int stereo_ready;
+    atomic_int depth_on;
+    atomic_int show_pts;
+    uint8_t slam_in[2][XR_OW * XR_OH];      /* worker's copy of clean_raw */
+    uint8_t disp[XS_W * XS_H];              /* published disparity */
+    float pts_pane[XT_MAX][2];              /* dots for the phone pane (cam px) */
+    int pts_n;
+    int track_count;
+    float depth_ms;
 
     pthread_mutex_t lock;
     uint8_t rgba[MAX_W * MAX_H * 4];
@@ -64,8 +85,7 @@ static struct {
     int64_t fps_t0;
     int fps_x10;
 
-    atomic_int mirror;          /* horizontal per-eye flip of the composed view */
-    atomic_int swap_eyes;       /* swap the two panes (debug) */
+    atomic_int swap_eyes;       /* swap the glasses' eyes (debug) */
     atomic_int stereo_mode;     /* 1: per-eye stereo display + aligned warp;
                                    0: mirror display + plain framebuffer */
 
@@ -94,10 +114,12 @@ static struct {
     /* pose history for the timewarp: (ts, quaternion) at 1 kHz, 0.25 s deep */
     struct { uint64_t ts; float q[4]; } qhist[256];
     uint32_t qhist_n;
-} S = { .show_clean = 1, .lock = PTHREAD_MUTEX_INITIALIZER,
+} S = { .lock = PTHREAD_MUTEX_INITIALIZER,
         .imu_lock = PTHREAD_MUTEX_INITIALIZER,
+        .slam_lock = PTHREAD_MUTEX_INITIALIZER,
+        .slam_cond = PTHREAD_COND_INITIALIZER,
         .align_variant = XR_ALIGN_VARIANT_DEFAULT,
-        .stereo_mode = 1 };
+        .stereo_mode = 1, .depth_on = 1, .show_pts = 1 };
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -105,27 +127,71 @@ static int64_t now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* disparity -> color ramp: far/small = deep blue, near/large = red;
+ * 0 (invalid) = black */
+static void disp_color(uint8_t d, uint8_t px[4]) {
+    if (!d) { px[0] = px[1] = px[2] = 0; px[3] = 0xFF; return; }
+    float t = (float)d / (float)XS_DISP;
+    if (t > 1.0f) t = 1.0f;
+    float r, g, b;
+    if (t < 0.33f)      { float u = t / 0.33f;          r = 0;      g = u;          b = 1; }
+    else if (t < 0.66f) { float u = (t - 0.33f) / 0.33f; r = u;      g = 1;          b = 1 - u; }
+    else                { float u = (t - 0.66f) / 0.34f; r = 1;      g = 1 - u;      b = 0; }
+    px[0] = (uint8_t)(r * 255); px[1] = (uint8_t)(g * 255);
+    px[2] = (uint8_t)(b * 255); px[3] = 0xFF;
+}
+
+/* Research-app phone view: left pane = left camera + tracked features,
+ * right pane = the disparity map colorized and upscaled 2x (240x320 ->
+ * 480x640). The glasses passthrough below is untouched by this. */
 static void compose(int counter, uint64_t exposure_ts) {
-    int clean = atomic_load(&S.show_clean);
-    int mirror = atomic_load(&S.mirror);
     int swap = atomic_load(&S.swap_eyes);
-    int sw = clean ? XR_OW : XR_W;
-    int sh = clean ? XR_OH : XR_H_IMG;
     pthread_mutex_lock(&S.lock);
-    S.cw = 2 * sw;
-    S.ch = sh;
+    S.cw = 2 * XR_OW;
+    S.ch = XR_OH;
     S.counter = counter;
-    for (int cam = 0; cam < 2; cam++) {
-        /* cam1 is the physical LEFT camera (verified on-device): left pane */
-        int pane = (cam == 1) ? 0 : 1;
-        if (swap) pane = 1 - pane;
-        const uint8_t *src = clean ? S.clean[cam] : S.raweq[cam];
-        for (int y = 0; y < sh; y++) {
-            uint8_t *dst = S.rgba + (y * S.cw + pane * sw) * 4;
-            const uint8_t *s = src + y * sw;
-            for (int x = 0; x < sw; x++) {
-                uint8_t v = s[mirror ? sw - 1 - x : x];
-                dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 0xFF;
+
+    /* left pane: equalized left camera (cam1) */
+    for (int y = 0; y < XR_OH; y++) {
+        uint8_t *dst = S.rgba + (size_t)y * S.cw * 4;
+        const uint8_t *s = S.clean[1] + y * XR_OW;
+        for (int x = 0; x < XR_OW; x++) {
+            uint8_t v = s[x];
+            dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 0xFF;
+            dst += 4;
+        }
+    }
+    /* tracked features as green dots */
+    if (atomic_load(&S.show_pts)) {
+        for (int i = 0; i < S.pts_n; i++) {
+            int px = (int)S.pts_pane[i][0], py = (int)S.pts_pane[i][1];
+            for (int dy = -1; dy <= 1; dy++) {
+                int y = py + dy;
+                if (y < 0 || y >= XR_OH) continue;
+                for (int dx = -1; dx <= 1; dx++) {
+                    int x = px + dx;
+                    if (x < 0 || x >= XR_OW) continue;
+                    uint8_t *d = S.rgba + ((size_t)y * S.cw + x) * 4;
+                    d[0] = 0; d[1] = 0xFF; d[2] = 0x50; d[3] = 0xFF;
+                }
+            }
+        }
+    }
+    /* right pane: colorized depth */
+    if (atomic_load(&S.depth_on)) {
+        for (int y = 0; y < XR_OH; y++) {
+            uint8_t *dst = S.rgba + ((size_t)y * S.cw + XR_OW) * 4;
+            const uint8_t *dr = S.disp + (y >> 1) * XS_W;
+            for (int x = 0; x < XR_OW; x++) {
+                disp_color(dr[x >> 1], dst);
+                dst += 4;
+            }
+        }
+    } else {
+        for (int y = 0; y < XR_OH; y++) {
+            uint8_t *dst = S.rgba + ((size_t)y * S.cw + XR_OW) * 4;
+            for (int x = 0; x < XR_OW; x++) {
+                dst[0] = dst[1] = dst[2] = 24; dst[3] = 0xFF;
                 dst += 4;
             }
         }
@@ -168,8 +234,10 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
     int cam = xr_cam(S.frame);
     static uint8_t dscr[XR_OW * XR_OH];               /* uvc thread only */
     xr_descramble(S.frame, cam, dscr);
-    xr_clean(&S.cleaners[cam], dscr, S.clean[cam]);
-    xr_equalize(S.frame, S.raweq[cam], XR_W * XR_H_IMG);
+    /* clean without equalization for the trackers (per-frame global HE
+     * flickers), then an equalized copy for humans */
+    xr_clean(&S.cleaners[cam], dscr, S.clean_raw[cam], 0);
+    xr_equalize(S.clean_raw[cam], S.clean[cam], XR_OW * XR_OH);
     S.have[cam] = 1;
 
     S.fps_count++;
@@ -192,6 +260,13 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
             t_exp = t_imu -
                     ((t_imu - (uint64_t)xr_exposure_ts(S.frame)) & 0xFFFFFFFFull);
         compose(xr_counter(S.frame), t_exp);
+
+        /* hand the pair to the SLAM worker (it snapshots the buffers) */
+        pthread_mutex_lock(&S.slam_lock);
+        S.pair_seq++;
+        S.pair_ts = t_exp;
+        pthread_cond_signal(&S.slam_cond);
+        pthread_mutex_unlock(&S.slam_lock);
     }
 }
 
@@ -211,38 +286,56 @@ static void wxyz_to_rot(const float q[4], float R[9]) {
  * imperceptible. */
 #define TW_DEADBAND_RAD (0.1f * (float)M_PI / 180.0f)
 
-/* dR = R(q_exposure)^T * R(q_now): how a fixed world direction moved in the
- * IMU frame between the camera exposure and now. Drift cancels over this
- * short window, so the AHRS absolute error is irrelevant. Returns 0, or -1
- * when no usable pose history exists. */
-static int pose_delta(uint64_t ts_exposure, float dR[9]) {
-    float qe[4], qn[4];
+/* quaternion nearest (<= ts, clamped) from the 1 kHz history; ts == 0 means
+ * the newest sample. Returns 0, or -1 when no usable history exists. */
+static int qhist_get(uint64_t ts, float q[4]) {
     pthread_mutex_lock(&S.imu_lock);
     uint32_t n = S.qhist_n;
     if (n < 2) {
         pthread_mutex_unlock(&S.imu_lock);
         return -1;
     }
-    uint32_t depth = n < 256 ? n : 256;
-    uint32_t best = n - 1;                     /* default: newest (clamps) */
-    for (uint32_t k = 0; k < depth; k++) {
-        uint32_t i = n - 1 - k;
-        if (S.qhist[i % 256].ts <= ts_exposure) { best = i; break; }
-        best = i;                              /* clamp to oldest available */
+    uint32_t best = n - 1;
+    if (ts != 0) {
+        uint32_t depth = n < 256 ? n : 256;
+        for (uint32_t k = 0; k < depth; k++) {
+            uint32_t i = n - 1 - k;
+            if (S.qhist[i % 256].ts <= ts) { best = i; break; }
+            best = i;                          /* clamp to oldest available */
+        }
     }
-    memcpy(qe, S.qhist[best % 256].q, sizeof qe);
-    memcpy(qn, S.qhist[(n - 1) % 256].q, sizeof qn);
+    memcpy(q, S.qhist[best % 256].q, 4 * sizeof(float));
     pthread_mutex_unlock(&S.imu_lock);
+    return 0;
+}
 
-    /* delta quaternion qd = conj(qe) * qn (Hamilton, wxyz):
-     * R(qd) = R(qe)^T * R(qn) */
-    float qd[4] = {
-        qe[0] * qn[0] + qe[1] * qn[1] + qe[2] * qn[2] + qe[3] * qn[3],
-        qe[0] * qn[1] - qe[1] * qn[0] - qe[2] * qn[3] + qe[3] * qn[2],
-        qe[0] * qn[2] + qe[1] * qn[3] - qe[2] * qn[0] - qe[3] * qn[1],
-        qe[0] * qn[3] - qe[1] * qn[2] + qe[2] * qn[1] - qe[3] * qn[0],
-    };
+/* delta quaternion qd = conj(qa) * qb (Hamilton wxyz), w kept positive:
+ * R(qd) = R(qa)^T * R(qb). */
+static void quat_delta(const float qa[4], const float qb[4], float qd[4]) {
+    qd[0] = qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3];
+    qd[1] = qa[0] * qb[1] - qa[1] * qb[0] - qa[2] * qb[3] + qa[3] * qb[2];
+    qd[2] = qa[0] * qb[2] + qa[1] * qb[3] - qa[2] * qb[0] - qa[3] * qb[1];
+    qd[3] = qa[0] * qb[3] - qa[1] * qb[2] + qa[2] * qb[1] - qa[3] * qb[0];
     if (qd[0] < 0) { qd[0] = -qd[0]; qd[1] = -qd[1]; qd[2] = -qd[2]; qd[3] = -qd[3]; }
+}
+
+/* raw rotation of the IMU frame between two history times (no deadband) —
+ * used for the tracker's search-window prediction. ts_b == 0 -> now. */
+static int pose_delta_between(uint64_t ts_a, uint64_t ts_b, float dR[9]) {
+    float qa[4], qb[4], qd[4];
+    if (qhist_get(ts_a, qa) || qhist_get(ts_b, qb)) return -1;
+    quat_delta(qa, qb, qd);
+    wxyz_to_rot(qd, dR);
+    return 0;
+}
+
+/* dR = R(q_exposure)^T * R(q_now) with the timewarp deadband: how a fixed
+ * world direction moved in the IMU frame since the camera exposure. Drift
+ * cancels over this short window, so the AHRS absolute error is irrelevant. */
+static int pose_delta(uint64_t ts_exposure, float dR[9]) {
+    float qe[4], qn[4], qd[4];
+    if (qhist_get(ts_exposure, qe) || qhist_get(0, qn)) return -1;
+    quat_delta(qe, qn, qd);
 
     float vn = sqrtf(qd[1] * qd[1] + qd[2] * qd[2] + qd[3] * qd[3]);
     float angle = 2.0f * atan2f(vn, qd[0]);
@@ -257,6 +350,142 @@ static int pose_delta(uint64_t ts_exposure, float dR[9]) {
     qd[1] *= s; qd[2] *= s; qd[3] *= s;
     wxyz_to_rot(qd, dR);
     return 0;
+}
+
+/* ---- SLAM worker: rectify + track + depth at sensor rate --------------------- */
+
+static void *slam_worker(void *arg) {
+    (void)arg;
+    uint32_t done_seq = 0;
+    for (;;) {
+        pthread_mutex_lock(&S.slam_lock);
+        while (atomic_load(&S.slam_running) && S.pair_seq == done_seq)
+            pthread_cond_wait(&S.slam_cond, &S.slam_lock);
+        if (!atomic_load(&S.slam_running)) {
+            pthread_mutex_unlock(&S.slam_lock);
+            return NULL;
+        }
+        done_seq = S.pair_seq;           /* always the newest pair, no queue */
+        uint64_t ts = S.pair_ts;
+        pthread_mutex_unlock(&S.slam_lock);
+
+        if (!S.stereo_ready) {
+            if (!atomic_load(&S.align_have)) continue;
+            float bx = S.eye_calib[1].p_cam[0] - S.eye_calib[0].p_cam[0];
+            float by = S.eye_calib[1].p_cam[1] - S.eye_calib[0].p_cam[1];
+            float bz = S.eye_calib[1].p_cam[2] - S.eye_calib[0].p_cam[2];
+            if (bx * bx + by * by + bz * bz < 1e-4f) continue;   /* no p_cam */
+            xr_stereo_init(&S.stereo, &S.eye_calib[0], &S.eye_calib[1],
+                           S.eye_calib[0].p_cam, S.eye_calib[1].p_cam,
+                           atomic_load(&S.align_variant));
+            xr_track_reset(&S.track);
+            S.stereo_ready = 1;
+            LOGI("stereo rectification ready: baseline %.1f cm, f_rect %.0f px",
+                 (double)S.stereo.baseline_m * 100.0, (double)S.stereo.f_rect);
+        }
+
+        /* snapshot the tracker inputs; written by the UVC thread, and a rare
+         * mid-write copy only smears one frame during fast motion */
+        memcpy(S.slam_in[0], S.clean_raw[1], sizeof S.slam_in[0]); /* left  = cam1 */
+        memcpy(S.slam_in[1], S.clean_raw[0], sizeof S.slam_in[1]); /* right = cam0 */
+
+        int64_t t0 = now_ms();
+        static uint8_t disp_local[XS_W * XS_H];        /* slam thread only */
+        if (atomic_load(&S.depth_on)) {
+            xr_stereo_depth(&S.stereo, S.slam_in[0], S.slam_in[1], disp_local);
+        } else {
+            /* still rectify the left image for the tracker */
+            for (int i = 0; i < XS_W * XS_H; i++) {
+                int32_t m = S.stereo.map[0][i];
+                S.stereo.rect[0][i] = m >= 0 ? S.slam_in[0][m] : 0;
+            }
+            memset(disp_local, 0, sizeof disp_local);
+        }
+        float depth_ms = (float)(now_ms() - t0);
+
+        /* gyro-predicted whole-image shift since the previous pair: rotate
+         * the rect-frame optical axis by the raw pose delta (rectified frame
+         * is a pinhole, so rotation flow is uniform to first order) */
+        float pdx = 0.0f, pdy = 0.0f;
+        float dR[9];
+        if (S.slam_prev_ts && ts &&
+            pose_delta_between(S.slam_prev_ts, ts, dR) == 0) {
+            const float *Rr = S.stereo.R_rect_imu;
+            float rz[3] = { Rr[2], Rr[5], Rr[8] };     /* rect z in IMU frame */
+            float rn[3] = {                            /* ray now = dR^T rz */
+                dR[0] * rz[0] + dR[3] * rz[1] + dR[6] * rz[2],
+                dR[1] * rz[0] + dR[4] * rz[1] + dR[7] * rz[2],
+                dR[2] * rz[0] + dR[5] * rz[1] + dR[8] * rz[2],
+            };
+            float rr[3] = {                            /* back into rect frame */
+                Rr[0] * rn[0] + Rr[3] * rn[1] + Rr[6] * rn[2],
+                Rr[1] * rn[0] + Rr[4] * rn[1] + Rr[7] * rn[2],
+                Rr[2] * rn[0] + Rr[5] * rn[1] + Rr[8] * rn[2],
+            };
+            if (rr[2] > 0.1f) {
+                pdx = S.stereo.f_rect * rr[0] / rr[2];
+                pdy = S.stereo.f_rect * rr[1] / rr[2];
+            }
+        }
+        S.slam_prev_ts = ts;
+
+        int n = xr_track_step(&S.track, S.stereo.rect[0], pdx, pdy);
+
+        /* publish: phone-pane dots (rect px -> camera px via the rect map)
+         * and glasses-overlay rays (rect px -> IMU-frame ray) */
+        float rays[XT_MAX * 3];
+        int nr = 0;
+        const float cx = (XS_W - 1) * 0.5f, cy = (XS_H - 1) * 0.5f;
+        pthread_mutex_lock(&S.lock);
+        memcpy(S.disp, disp_local, sizeof S.disp);
+        S.pts_n = 0;
+        for (int i = 0; i < XT_MAX; i++) {
+            if (!S.track.pt[i].alive) continue;
+            int rx = (int)S.track.pt[i].x, ry = (int)S.track.pt[i].y;
+            if (rx < 0 || rx >= XS_W || ry < 0 || ry >= XS_H) continue;
+            int32_t m = S.stereo.map[0][ry * XS_W + rx];
+            if (m >= 0) {
+                S.pts_pane[S.pts_n][0] = (float)(m % XR_OW);
+                S.pts_pane[S.pts_n][1] = (float)(m / XR_OW);
+                S.pts_n++;
+            }
+            const float *Rr = S.stereo.R_rect_imu;
+            float v[3] = { (S.track.pt[i].x - cx) / S.stereo.f_rect,
+                           (S.track.pt[i].y - cy) / S.stereo.f_rect, 1.0f };
+            rays[nr * 3 + 0] = Rr[0] * v[0] + Rr[1] * v[1] + Rr[2] * v[2];
+            rays[nr * 3 + 1] = Rr[3] * v[0] + Rr[4] * v[1] + Rr[5] * v[2];
+            rays[nr * 3 + 2] = Rr[6] * v[0] + Rr[7] * v[1] + Rr[8] * v[2];
+            nr++;
+        }
+        S.track_count = n;
+        S.depth_ms = depth_ms;
+        pthread_mutex_unlock(&S.lock);
+
+        xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0);
+    }
+}
+
+static void slam_start(void) {
+    if (atomic_load(&S.slam_running)) return;
+    S.pair_seq = 0;
+    S.slam_prev_ts = 0;
+    S.stereo_ready = 0;              /* rebuild with whatever calib arrives */
+    S.pts_n = 0;
+    S.track_count = 0;
+    S.depth_ms = 0;
+    memset(S.disp, 0, sizeof S.disp);
+    xr_track_reset(&S.track);
+    atomic_store(&S.slam_running, 1);
+    pthread_create(&S.slam_thread, NULL, slam_worker, NULL);
+}
+
+static void slam_stop(void) {
+    if (!atomic_load(&S.slam_running)) return;
+    pthread_mutex_lock(&S.slam_lock);
+    atomic_store(&S.slam_running, 0);
+    pthread_cond_broadcast(&S.slam_cond);
+    pthread_mutex_unlock(&S.slam_lock);
+    pthread_join(S.slam_thread, NULL);
 }
 
 /* ---- IMU: enable + drain thread --------------------------------------------- */
@@ -588,6 +817,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
     LOGI("streaming started");
     imu_start();   /* best effort — camera works without it */
     xr_gles_set_pose_fn(pose_delta);   /* timewarp pose source */
+    slam_start();
     return 0;
 }
 
@@ -604,6 +834,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStop(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;
     if (!S.streaming) return;
     S.streaming = 0;
+    slam_stop();   /* before the IMU: it reads the pose history */
     if (S.mcu_claimed) {
         mcu_set_display_mode(XR_DISPLAY_MIRROR);   /* leave the glasses as found */
         libusb_release_interface(S.usb, XR_MCU_INTERFACE);
@@ -671,24 +902,74 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabImuBatch(JNIEnv *env, jclass 
 }
 
 JNIEXPORT void JNICALL
-Java_org_air2ultra_stereocam_XrealNative_nativeSetClean(JNIEnv *env, jclass cls,
-                                                        jboolean clean) {
-    (void)env; (void)cls;
-    atomic_store(&S.show_clean, clean ? 1 : 0);
-}
-
-JNIEXPORT void JNICALL
-Java_org_air2ultra_stereocam_XrealNative_nativeSetMirror(JNIEnv *env, jclass cls,
-                                                         jboolean mirror) {
-    (void)env; (void)cls;
-    atomic_store(&S.mirror, mirror ? 1 : 0);
-}
-
-JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetSwap(JNIEnv *env, jclass cls,
                                                        jboolean swap) {
     (void)env; (void)cls;
     atomic_store(&S.swap_eyes, swap ? 1 : 0);
+}
+
+/* Reset the SLAM front end: drop all tracked features and the prediction
+ * history. (The map/trajectory reset too once Basalt is behind this.) */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&S.lock);
+    xr_track_reset(&S.track);      /* worker touches it only between locks */
+    S.pts_n = 0;
+    S.track_count = 0;
+    pthread_mutex_unlock(&S.lock);
+    S.slam_prev_ts = 0;
+    xr_gles_set_points(NULL, 0);
+    LOGI("SLAM reset");
+}
+
+/* Show/hide the tracked features (phone pane dots + glasses overlay). */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetShowPoints(JNIEnv *env, jclass cls,
+                                                             jboolean on) {
+    (void)env; (void)cls;
+    atomic_store(&S.show_pts, on ? 1 : 0);
+    xr_gles_set_show_points(on ? 1 : 0);
+    if (!on) xr_gles_set_points(NULL, 0);
+}
+
+/* Enable/disable stereo depth computation (the tracker keeps running). */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetDepth(JNIEnv *env, jclass cls,
+                                                        jboolean on) {
+    (void)env; (void)cls;
+    atomic_store(&S.depth_on, on ? 1 : 0);
+}
+
+/* Copy the newest pose/SLAM state into `buf` (direct ByteBuffer, >= 40 bytes,
+ * native order): f32 quat_wxyz[4] | f32 pos_m[3] | i32 tracked | f32 depth_ms
+ * | u32 flags (bit0 depth on, bit1 rectification ready, bit2 orientation
+ * valid). Position is zero until the Basalt backend lands — the AHRS supplies
+ * orientation only. Returns JNI_FALSE when no orientation exists yet. */
+JNIEXPORT jboolean JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeGrabPose(JNIEnv *env, jclass cls,
+                                                        jobject buf) {
+    (void)cls;
+    uint8_t *dst = (*env)->GetDirectBufferAddress(env, buf);
+    if (!dst || (*env)->GetDirectBufferCapacity(env, buf) < 40) return JNI_FALSE;
+    float q[4] = { 1, 0, 0, 0 }, p[3] = { 0, 0, 0 };
+    pthread_mutex_lock(&S.imu_lock);
+    int has_q = S.imu_has_q;
+    if (has_q) memcpy(q, S.imu_q, sizeof q);
+    pthread_mutex_unlock(&S.imu_lock);
+    pthread_mutex_lock(&S.lock);
+    int32_t tracked = S.track_count;
+    float depth_ms = S.depth_ms;
+    pthread_mutex_unlock(&S.lock);
+    uint32_t flags = (atomic_load(&S.depth_on) ? 1u : 0u) |
+                     (S.stereo_ready ? 2u : 0u) |
+                     (has_q ? 4u : 0u);
+    memcpy(dst, q, 16);
+    memcpy(dst + 16, p, 12);
+    memcpy(dst + 28, &tracked, 4);
+    memcpy(dst + 32, &depth_ms, 4);
+    memcpy(dst + 36, &flags, 4);
+    return has_q ? JNI_TRUE : JNI_FALSE;
 }
 
 /* The factory calibration JSON fetched at start, or null. */
@@ -703,17 +984,21 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGetConfig(JNIEnv *env, jclass cls
     return out;
 }
 
-/* 66 floats: per eye (left, then right): K[9], q_display[4], q_cam[4],
- * fc[2], cc[2], kc[12]. Enables the world-aligned passthrough. */
+/* 72 floats: per eye (left, then right): K[9], q_display[4], q_cam[4],
+ * fc[2], cc[2], kc[12], p_cam[3]. Enables the world-aligned passthrough and
+ * the stereo rectification (p_cam gives the baseline). A 66-float array
+ * (without positions) still enables the passthrough alone. */
 JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass cls,
                                                             jfloatArray arr) {
     (void)cls;
-    if ((*env)->GetArrayLength(env, arr) < 66) return;
-    float f[66];
-    (*env)->GetFloatArrayRegion(env, arr, 0, 66, f);
+    jsize len = (*env)->GetArrayLength(env, arr);
+    if (len < 66) return;
+    int stride = len >= 72 ? 36 : 33;
+    float f[72];
+    (*env)->GetFloatArrayRegion(env, arr, 0, stride * 2, f);
     for (int e = 0; e < 2; e++) {
-        const float *p = f + e * 33;
+        const float *p = f + e * stride;
         xr_eye_calib *c = &S.eye_calib[e];
         memcpy(c->K, p, 9 * sizeof(float));
         memcpy(c->q_disp, p + 9, 4 * sizeof(float));
@@ -721,10 +1006,12 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass 
         memcpy(c->fc, p + 17, 2 * sizeof(float));
         memcpy(c->cc, p + 19, 2 * sizeof(float));
         memcpy(c->kc, p + 21, 12 * sizeof(float));
+        if (stride == 36) memcpy(c->p_cam, p + 33, 3 * sizeof(float));
+        else memset(c->p_cam, 0, sizeof c->p_cam);
     }
     xr_gles_set_alignment(S.eye_calib, atomic_load(&S.align_variant));
     atomic_store(&S.align_have, 1);
-    LOGI("alignment calibration set");
+    LOGI("alignment calibration set (%d floats)", (int)len);
 }
 
 /* Toggle the glasses between per-eye stereo with the calibrated aligned warp

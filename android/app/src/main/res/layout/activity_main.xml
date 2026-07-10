@@ -6,7 +6,7 @@
     android:keepScreenOn="true"
     android:orientation="vertical">
 
-    <!-- top half: the stereo camera pair -->
+    <!-- top half: vSLAM tracking (left) | stereo depth (right) -->
     <ImageView
         android:id="@+id/preview"
         android:layout_width="match_parent"
@@ -15,20 +15,13 @@
         android:contentDescription="@string/app_name"
         android:scaleType="fitCenter" />
 
-    <!-- bottom half: rolling IMU graphs -->
-    <org.air2ultra.stereocam.ImuGraphView
-        android:id="@+id/gyro_graph"
+    <!-- bottom half: 3D pose / map of the headset -->
+    <org.air2ultra.stereocam.PoseMapView
+        android:id="@+id/pose_map"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="2dp"
-        android:layout_weight="1" />
-
-    <org.air2ultra.stereocam.ImuGraphView
-        android:id="@+id/accel_graph"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="2dp"
-        android:layout_weight="1" />
+        android:layout_weight="2" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -51,19 +44,24 @@
             android:textSize="12sp" />
 
         <Button
-            android:id="@+id/toggle"
+            android:id="@+id/slam_reset"
             style="@style/ThinButton"
-            android:text="@string/show_raw" />
+            android:text="@string/slam_reset" />
+
+        <Button
+            android:id="@+id/toggle_points"
+            style="@style/ThinButton"
+            android:text="@string/pts_on" />
+
+        <Button
+            android:id="@+id/toggle_depth"
+            style="@style/ThinButton"
+            android:text="@string/dep_on" />
 
         <Button
             android:id="@+id/view_mode"
             style="@style/ThinButton"
             android:text="@string/mode_sbs" />
-
-        <Button
-            android:id="@+id/timewarp"
-            style="@style/ThinButton"
-            android:text="@string/tw_on" />
 
         <Button
             android:id="@+id/snapshot"

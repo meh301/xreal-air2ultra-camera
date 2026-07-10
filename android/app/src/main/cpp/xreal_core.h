@@ -62,6 +62,10 @@ typedef struct {
 } xr_cleaner;
 
 void xr_cleaner_reset(xr_cleaner *c);
-void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out); /* 480x640 */
+/* do_equalize: per-frame global histogram equalization is right for human
+ * viewing but flickers brightness frame to frame, which hurts feature
+ * matching — pass 0 when the output feeds a tracker. */
+void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
+              int do_equalize); /* 480x640 */
 
 #endif

@@ -46,24 +46,24 @@ Or open `android/` in Android Studio and run — but run `fetch_deps` first.
    device unless the app holds those runtime permissions (nothing is captured
    through Android's own camera/audio APIs). Then accept the USB permission
    dialog if one appears.
-3. The portrait test screen fills up:
-   - **top half** — the live stereo pair (left | right), descrambled and
-     denoised. *Raw/Clean* toggles the view, *Snapshot* saves a PNG under
-     `Android/data/org.air2ultra.stereocam/files/Pictures/`.
-   - **bottom half** — two rolling oscilloscope graphs of the full 1 kHz IMU
-     stream (angular rate and acceleration, ~4 s window, autoscaled; samples
-     cross JNI in batches so nothing is dropped). The IMU is read from HID
-     interface 2 over the same libusb handle as the camera; if claiming that
-     interface fails the camera still works. A quaternion is still fused
-     natively and available via `XrealNative.nativeGrabImu` — it's just not
-     displayed.
+3. The portrait research screen fills up (this branch is the vSLAM research
+   app; the stable test app lives on `main`):
+   - **top half** — *tracking* pane (left camera with the tracked features
+     as green dots) | *depth* pane (stereo disparity, colorized blue=far →
+     red=near, computed at the sensors' 30 Hz on the SLAM worker thread).
+   - **bottom half** — the 3D pose/map view: ground grid, world axes, the
+     headset drawn as a frustum at its current pose plus a breadcrumb
+     trail. Orientation comes from the on-device AHRS; position stays at
+     the origin until the Basalt VIO backend lands (docs/VSLAM.md).
+   - **buttons** — *Rst* resets the SLAM front end (drops all features and
+     the trail), *Pts* shows/hides the tracked features (phone pane and
+     glasses overlay), *Dep* toggles the depth computation, *SBS/3D*
+     switches the glasses between plain side-by-side and calibrated
+     per-eye stereo, *Snap* saves a PNG of the panes to Pictures/XREAL.
 4. When the phone drives the glasses' display (DisplayPort alt-mode), the
-   clean stereo pair is also rendered onto it fullscreen as **SBS
-   passthrough** (left camera → left eye; put the glasses in 3D/SBS mode).
-   *Swap L/R* flips the eyes if the mapping looks inverted. Passthrough
-   frames are pushed into the glasses' Surface directly from the native
-   capture thread (no UI polling or bitmap copies on that path); setting the
-   glasses to a higher refresh-rate mode shaves a few more ms of vsync wait.
+   world-aligned passthrough renders onto it natively (front-buffer GLES +
+   IMU timewarp, always on), with the tracked features overlaid as points
+   that ride the same timewarp as the image.
 
 The app requires the current glasses firmware (MCU `12.1.00.498+`); older
 firmware uses a different telemetry layout — update at

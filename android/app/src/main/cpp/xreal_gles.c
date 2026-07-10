@@ -57,6 +57,9 @@ static struct {
     uint64_t frame_ts;                              /* exposure, IMU clock ns */
     int (*pose_fn)(uint64_t, float[9]);             /* timewarp pose delta */
     int timewarp;
+    float pt_rays[XR_GLES_MAX_POINTS * 3];          /* overlay, IMU-frame */
+    int pt_count;
+    int show_points;
 
     /* GL state (render thread only) */
     EGLDisplay dpy;
@@ -66,6 +69,9 @@ static struct {
     int single_buffer;
     GLuint prog, tex_eye[2], tex_pair;
     GLint loc_pos, loc_uv, loc_tex;
+    GLuint prog_pt;
+    GLint loc_pt_pos;
+    GLuint vbo_pt;
     GLuint vbo_eye[2], vbo_quad, ibo;
     int mesh_ready, pair_tex_w, pair_tex_h;
     float mesh_pos[2][VERTS * 2];                   /* static NDC positions */
@@ -77,7 +83,8 @@ static struct {
     double render_ms_acc, wait_ms_acc;
     int64_t stat_t0;
 } G = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
-        .calib_variant = XR_ALIGN_VARIANT_DEFAULT, .timewarp = 1 };
+        .calib_variant = XR_ALIGN_VARIANT_DEFAULT, .timewarp = 1,
+        .show_points = 1 };
 
 static int64_t now_ms64(void) {
     struct timespec ts;
@@ -93,6 +100,12 @@ static const char *VS =
 static const char *FS =
     "precision mediump float; varying vec2 vUV; uniform sampler2D uTex;\n"
     "void main(){ gl_FragColor = texture2D(uTex, vUV); }\n";
+static const char *VS_PT =
+    "attribute vec2 aPos;\n"
+    "void main(){ gl_Position = vec4(aPos, 0.0, 1.0); gl_PointSize = 7.0; }\n";
+static const char *FS_PT =
+    "precision mediump float;\n"
+    "void main(){ gl_FragColor = vec4(0.0, 1.0, 0.4, 1.0); }\n";
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -140,6 +153,15 @@ static int gl_objects_init(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    GLuint vsp = compile(GL_VERTEX_SHADER, VS_PT);
+    GLuint fsp = compile(GL_FRAGMENT_SHADER, FS_PT);
+    G.prog_pt = glCreateProgram();
+    glAttachShader(G.prog_pt, vsp);
+    glAttachShader(G.prog_pt, fsp);
+    glLinkProgram(G.prog_pt);
+    G.loc_pt_pos = glGetAttribLocation(G.prog_pt, "aPos");
+    glGenBuffers(1, &G.vbo_pt);
 
     glGenBuffers(2, G.vbo_eye);
     glGenBuffers(1, &G.vbo_quad);
@@ -313,6 +335,7 @@ static void render_frame(int mode, int fresh, const float *dR) {
 
     if (mode == MODE_EYES) {
         for (int e = 0; e < 2; e++) {
+            glUseProgram(G.prog);
             glBindTexture(GL_TEXTURE_2D, G.tex_eye[e]);
             if (fresh)
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, XR_OW, XR_OH,
@@ -327,6 +350,41 @@ static void render_frame(int mode, int fresh, const float *dR) {
             glEnableVertexAttribArray((GLuint)G.loc_pos);
             glEnableVertexAttribArray((GLuint)G.loc_uv);
             glDrawElements(GL_TRIANGLES, IDX, GL_UNSIGNED_SHORT, (void *)0);
+
+            /* tracked-point overlay, timewarped like the image */
+            if (G.show_points && G.pt_count > 0) {
+                float ndc[XR_GLES_MAX_POINTS * 2];
+                int n = 0;
+                for (int i = 0; i < G.pt_count; i++) {
+                    const float *r = &G.pt_rays[i * 3];
+                    float wr[3];
+                    if (dR) {
+                        wr[0] = dR[0] * r[0] + dR[1] * r[1] + dR[2] * r[2];
+                        wr[1] = dR[3] * r[0] + dR[4] * r[1] + dR[5] * r[2];
+                        wr[2] = dR[6] * r[0] + dR[7] * r[1] + dR[8] * r[2];
+                    } else {
+                        wr[0] = r[0]; wr[1] = r[1]; wr[2] = r[2];
+                    }
+                    float u, v;
+                    if (xr_align_ray_to_display(&G.eyes_calib[e],
+                                                G.calib_variant, wr, &u, &v))
+                        continue;
+                    if (u < 0 || u > 1920 || v < 0 || v > 1080) continue;
+                    ndc[n * 2] = u / 960.0f - 1.0f;
+                    ndc[n * 2 + 1] = 1.0f - v / 540.0f;
+                    n++;
+                }
+                if (n > 0) {
+                    glUseProgram(G.prog_pt);
+                    glBindBuffer(GL_ARRAY_BUFFER, G.vbo_pt);
+                    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * n * 2, ndc,
+                                 GL_STREAM_DRAW);
+                    glVertexAttribPointer((GLuint)G.loc_pt_pos, 2, GL_FLOAT,
+                                          GL_FALSE, 0, (void *)0);
+                    glEnableVertexAttribArray((GLuint)G.loc_pt_pos);
+                    glDrawArrays(GL_POINTS, 0, n);
+                }
+            }
         }
     } else {
         glBindTexture(GL_TEXTURE_2D, G.tex_pair);
@@ -510,6 +568,23 @@ void xr_gles_set_timewarp(int on) {
     pthread_mutex_lock(&G.lock);
     G.timewarp = on ? 1 : 0;
     pthread_cond_signal(&G.cond);
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_points(const float *rays_imu, int n) {
+    if (n > XR_GLES_MAX_POINTS) n = XR_GLES_MAX_POINTS;
+    pthread_mutex_lock(&G.lock);
+    /* the render thread reads these outside the lock (like the eye images);
+     * rays are written before the count, so a mid-present update at worst
+     * draws one frame of slightly stale dots */
+    if (n > 0) memcpy(G.pt_rays, rays_imu, sizeof(float) * (size_t)n * 3);
+    G.pt_count = n;
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_show_points(int on) {
+    pthread_mutex_lock(&G.lock);
+    G.show_points = on ? 1 : 0;
     pthread_mutex_unlock(&G.lock);
 }
 

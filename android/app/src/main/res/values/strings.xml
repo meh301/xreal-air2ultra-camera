@@ -1,24 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">XREAL Stereo Cam</string>
+    <string name="app_name">XREAL vSLAM</string>
     <string name="status_plug_in">Plug the XREAL Air 2 Ultra into the USB-C port…</string>
     <string name="status_need_permissions">Grant camera &amp; microphone access — Android requires them to open a USB device that contains a camera and mics.</string>
-    <string name="status_permissions_denied">Camera/microphone permission denied — Android will not grant USB access to the glasses without them (Settings → Apps → XREAL Stereo Cam → Permissions).</string>
+    <string name="status_permissions_denied">Camera/microphone permission denied — Android will not grant USB access to the glasses without them (Settings → Apps → XREAL vSLAM → Permissions).</string>
     <string name="status_waiting_permission">Waiting for USB permission…</string>
     <string name="status_permission_denied">USB permission denied — replug or restart the app.</string>
     <string name="status_open_failed">Could not open the USB device.</string>
     <string name="status_native_error">Stream failed to start (libuvc error %1$d).</string>
     <string name="status_starting">Streaming — waiting for the first stereo pair…</string>
-    <string name="status_streaming">XREAL Air 2 Ultra  L | R  ctr=%1$d  %2$.0f fps  [%3$s]</string>
+    <!-- tracked features, camera fps, depth compute time -->
+    <string name="status_streaming">trk=%1$d  %2$.0f fps  depth=%3$.0f ms</string>
     <string name="status_unplugged">Glasses unplugged.</string>
-    <string name="show_raw">Raw</string>
-    <string name="show_clean">Clean</string>
-    <!-- the mode button shows the mode you switch TO, like the Raw/Clean one -->
+    <string name="slam_reset">Rst</string>
+    <!-- the points/depth buttons show the CURRENT state -->
+    <string name="pts_on">Pts✓</string>
+    <string name="pts_off">Pts✕</string>
+    <string name="dep_on">Dep✓</string>
+    <string name="dep_off">Dep✕</string>
+    <!-- the mode button shows the mode you switch TO -->
     <string name="mode_sbs">SBS</string>
     <string name="mode_stereo">3D</string>
-    <!-- the timewarp button shows the CURRENT state -->
-    <string name="tw_on">TW✓</string>
-    <string name="tw_off">TW✕</string>
     <string name="snapshot">Snap</string>
     <string name="status_reconnecting">Stream stalled — reconnecting…</string>
     <string name="snapshot_saved">Snapshot saved: %1$s</string>
