@@ -59,6 +59,7 @@ static struct {
     int timewarp;
     float pt_rays[XR_GLES_MAX_POINTS * 3];          /* overlay, IMU-frame */
     int pt_count;
+    uint64_t pt_ts;                                 /* their exposure time */
     int show_points;
     int show_camera;
 
@@ -325,7 +326,8 @@ static int egl_bind_window(ANativeWindow *win) {
     return 0;
 }
 
-static void render_frame(int mode, int fresh, const float *dR) {
+static void render_frame(int mode, int fresh, const float *dR,
+                         const float *dR_pts) {
     EGLint w = 0, h = 0;
     eglQuerySurface(G.dpy, G.surf, EGL_WIDTH, &w);
     eglQuerySurface(G.dpy, G.surf, EGL_HEIGHT, &h);
@@ -362,17 +364,19 @@ static void render_frame(int mode, int fresh, const float *dR) {
             glDrawElements(GL_TRIANGLES, IDX, GL_UNSIGNED_SHORT, (void *)0);
             }
 
-            /* tracked-point overlay, timewarped like the image */
+            /* tracked-point overlay, timewarped with its OWN pose delta:
+             * the points usually come from an older frame than the image */
             if (G.show_points && G.pt_count > 0) {
+                const float *pw = dR_pts ? dR_pts : dR;
                 float ndc[XR_GLES_MAX_POINTS * 2];
                 int n = 0;
                 for (int i = 0; i < G.pt_count; i++) {
                     const float *r = &G.pt_rays[i * 3];
                     float wr[3];
-                    if (dR) {
-                        wr[0] = dR[0] * r[0] + dR[1] * r[1] + dR[2] * r[2];
-                        wr[1] = dR[3] * r[0] + dR[4] * r[1] + dR[5] * r[2];
-                        wr[2] = dR[6] * r[0] + dR[7] * r[1] + dR[8] * r[2];
+                    if (pw) {
+                        wr[0] = pw[0] * r[0] + pw[1] * r[1] + pw[2] * r[2];
+                        wr[1] = pw[3] * r[0] + pw[4] * r[1] + pw[5] * r[2];
+                        wr[2] = pw[6] * r[0] + pw[7] * r[1] + pw[8] * r[2];
                     } else {
                         wr[0] = r[0]; wr[1] = r[1]; wr[2] = r[2];
                     }
@@ -465,6 +469,7 @@ static void *render_thread(void *arg) {
         uint32_t seq = G.frame_seq;
         int64_t submitted = G.submit_ms;
         uint64_t frame_ts = G.frame_ts;
+        uint64_t pt_ts = G.pt_ts;
         int tw = G.timewarp;
         int (*pose_fn)(uint64_t, float[9]) = G.pose_fn;
         pthread_mutex_unlock(&G.lock);
@@ -490,14 +495,17 @@ static void *render_thread(void *arg) {
         }
         if (!fresh && !can_atw) continue;      /* woken for win/calib only */
 
-        float dR[9];
-        const float *pdR = NULL;
+        float dR[9], dRp[9];
+        const float *pdR = NULL, *pdRp = NULL;
         if (mode == MODE_EYES && tw && pose_fn && frame_ts &&
             pose_fn(frame_ts, dR) == 0)
             pdR = dR;
+        if (mode == MODE_EYES && tw && pose_fn && pt_ts &&
+            pose_fn(pt_ts, dRp) == 0)
+            pdRp = dRp;
 
         int64_t t0 = now_ms64();
-        render_frame(mode, fresh, pdR);
+        render_frame(mode, fresh, pdR, pdRp);
         int64_t t1 = now_ms64();
         done_seq = seq;
         if (fresh) {
@@ -582,14 +590,15 @@ void xr_gles_set_timewarp(int on) {
     pthread_mutex_unlock(&G.lock);
 }
 
-void xr_gles_set_points(const float *rays_imu, int n) {
+void xr_gles_set_points(const float *rays_imu, int n, uint64_t exposure_ts_ns) {
     if (n > XR_GLES_MAX_POINTS) n = XR_GLES_MAX_POINTS;
     pthread_mutex_lock(&G.lock);
-    /* the render thread reads these outside the lock (like the eye images);
-     * rays are written before the count, so a mid-present update at worst
-     * draws one frame of slightly stale dots */
+    /* the render thread reads the rays outside the lock (like the eye
+     * images); rays are written before the count, so a mid-present update
+     * at worst draws one frame of slightly stale dots */
     if (n > 0) memcpy(G.pt_rays, rays_imu, sizeof(float) * (size_t)n * 3);
     G.pt_count = n;
+    G.pt_ts = exposure_ts_ns;
     pthread_mutex_unlock(&G.lock);
 }
 

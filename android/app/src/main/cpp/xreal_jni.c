@@ -394,7 +394,6 @@ static void *slam_worker(void *arg) {
         memcpy(S.slam_in[1], S.clean_raw[0], sizeof S.slam_in[1]); /* right = cam0 */
 
         xr_stereo_rectify(&ST, 0, S.slam_in[0]);
-        xr_stereo_rectify(&ST, 1, S.slam_in[1]);
 
         /* gyro-predicted whole-image shift since the previous pair: rotate
          * the rect-frame optical axis by the raw pose delta (rectified frame
@@ -453,18 +452,26 @@ static void *slam_worker(void *arg) {
         }
         S.track_count = n;
         pthread_mutex_unlock(&S.lock);
-        xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0);
+        xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0, ts);
 
-        /* stereo depth (SGM) on the already-rectified pair */
+        /* stereo depth (SGM). If a pass overruns the 33 ms pair interval,
+         * drop to every 2nd pair rather than starving the tracker — the
+         * depth pane just updates at 15 Hz. */
         static uint8_t disp_local[XS_W * XS_H];        /* slam thread only */
+        static uint32_t depth_tick;
+        static int depth_stride = 1;
         if (atomic_load(&S.depth_on)) {
-            int64_t t0 = now_ms();
-            xr_stereo_depth(&ST, disp_local);
-            float depth_ms = (float)(now_ms() - t0);
-            pthread_mutex_lock(&S.lock);
-            memcpy(S.disp, disp_local, sizeof S.disp);
-            S.depth_ms = depth_ms;
-            pthread_mutex_unlock(&S.lock);
+            if (depth_tick++ % depth_stride == 0) {
+                xr_stereo_rectify(&ST, 1, S.slam_in[1]);
+                int64_t t0 = now_ms();
+                xr_stereo_depth(&ST, disp_local);
+                float depth_ms = (float)(now_ms() - t0);
+                depth_stride = depth_ms > 26.0f ? 2 : 1;
+                pthread_mutex_lock(&S.lock);
+                memcpy(S.disp, disp_local, sizeof S.disp);
+                S.depth_ms = depth_ms;
+                pthread_mutex_unlock(&S.lock);
+            }
         } else {
             pthread_mutex_lock(&S.lock);
             memset(S.disp, 0, sizeof S.disp);
@@ -928,7 +935,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls
     S.track_count = 0;
     pthread_mutex_unlock(&S.lock);
     S.slam_prev_ts = 0;
-    xr_gles_set_points(NULL, 0);
+    xr_gles_set_points(NULL, 0, 0);
     LOGI("SLAM reset");
 }
 
@@ -939,7 +946,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetShowPoints(JNIEnv *env, jclass
     (void)env; (void)cls;
     atomic_store(&S.show_pts, on ? 1 : 0);
     xr_gles_set_show_points(on ? 1 : 0);
-    if (!on) xr_gles_set_points(NULL, 0);
+    if (!on) xr_gles_set_points(NULL, 0, 0);
 }
 
 /* Enable/disable stereo depth computation (the tracker keeps running). */

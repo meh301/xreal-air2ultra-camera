@@ -155,7 +155,7 @@ exists and runs, with a lightweight stand-in front end where Basalt will sit:
 | Piece | File(s) | Status |
 |---|---|---|
 | Stereo rectification (factory calib → 240×320 portrait pinhole pair, x = 13.7 cm baseline, f=200, bilinear) | `android/.../cpp/xr_stereo.c` | ✓ built from `imu_p_cam`/`imu_q_cam` + fisheye624 at runtime |
-| Stereo depth 30 Hz — 9×7 census + **4-path SGM** (P1=10, P2=120) + uniqueness + LR consistency + subpixel (¼ px) + speckle region filter + median | `xr_stereo.c` | ✓ on the SLAM worker thread; the first census-only version was speckle soup — SGM's smoothness term is what makes census usable |
+| Stereo depth — 9×7 census + **4-path SGM** (P1=10, adaptive P2 120/48 at edges) + uniqueness + LR consistency + subpixel (¼ px) + speckle region filter + occlusion hole-fill + median | `xr_stereo.c` | ✓ NEON-vectorized (u16×8 SGM inner loop, vectorized WTA); scalar SGM measured 62 ms on-device, NEON pass expected ~3-4× faster; auto-drops to every-2nd-pair if a pass exceeds 26 ms so tracking never starves |
 | Sparse feature tracker (grid-seeded Shi-Tomasi corners, 7×7 SAD, gyro-predicted search, forward-backward check, subpixel) | `xr_track.c` | ✓ stand-in for Basalt's optical-flow front end |
 | Non-equalized tap for trackers (plan item 2 caveat) | `xreal_core.c` `xr_clean(..., do_equalize)` | ✓ display gets equalized, SLAM gets raw |
 | SLAM worker thread (rectify + track + depth per stereo pair, newest-wins) | `xreal_jni.c` `slam_worker` | ✓ |
@@ -186,6 +186,23 @@ exists and runs, with a lightweight stand-in front end where Basalt will sit:
    thread), fill `nativeGrabPose` q/p from VIT pose output, hand VIT
    landmarks to `xr_gles_set_points` instead of tracker rays. The depth
    path stays as-is.
+
+### GPU depth (queued behind Basalt)
+
+The CPU SGM is NEON-vectorized and auto-decimates, but Basalt will want
+those CPU cycles — moving depth to the GPU is the plan once the backend
+lands (or sooner if NEON still can't hold 30 Hz on the target phone):
+
+- **GLES 3.1 compute SGM**: census + cost volume are embarrassingly
+  parallel; the 4 directional scans parallelize across the perpendicular
+  axis (240–320 invocations each, 48-wide disparity vectors in shared
+  memory). Needs its own EGL context + thread so it never contends with
+  the latency-critical front-buffer present. At 240×320×48 this is well
+  inside mobile-GPU real-time budgets (embedded-GPU SGM literature:
+  VGA×128 disp at 42 fps on a Tegra X1).
+- **Alternative**: a small stereo network via TFLite GPU delegate
+  (MADNet-class) — denser output on low texture, but a heavyweight
+  dependency; evaluate only if SGM quality stays unsatisfying.
 
 Sources: [Basalt for Monado (Collabora)](https://www.collabora.com/news-and-blog/blog/2022/04/05/visual-inertial-tracking-support-for-monado-openxr/),
 [Monado](https://monado.freedesktop.org/),

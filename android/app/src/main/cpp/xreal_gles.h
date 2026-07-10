@@ -50,11 +50,13 @@ void xr_gles_set_pose_fn(int (*fn)(uint64_t ts_exposure_ns, float dR[9]));
 /* Enable/disable the timewarp at runtime (default on). */
 void xr_gles_set_timewarp(int on);
 
-/* Stage tracked points / landmarks as IMU-frame rays (n x 3 floats) to be
- * drawn over the passthrough; they ride the same timewarp as the image.
+/* Stage tracked points / landmarks as IMU-frame rays (n x 3 floats) with
+ * the exposure timestamp of the frame they were measured in (IMU clock;
+ * 0 = unknown). The overlay is timewarped by ITS OWN pose delta, so points
+ * from an older frame than the displayed image still land world-locked.
  * n = 0 clears. */
 enum { XR_GLES_MAX_POINTS = 256 };
-void xr_gles_set_points(const float *rays_imu, int n);
+void xr_gles_set_points(const float *rays_imu, int n, uint64_t exposure_ts_ns);
 
 /* Show/hide the point overlay (default on). */
 void xr_gles_set_show_points(int on);

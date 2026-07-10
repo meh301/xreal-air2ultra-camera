@@ -13,20 +13,30 @@
 
 #include "xreal_core.h"
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define XS_NEON 1
+#endif
+
 /* rectified pinhole: portrait 240x320, x along the baseline */
 #define F_RECT 200.0f
 #define CX ((XS_W - 1) * 0.5f)
 #define CY ((XS_H - 1) * 0.5f)
 
 /* SGM penalties for the 9x7 census cost (range 0..62): P1 tolerates the
- * 1-disparity steps of slanted surfaces, P2 charges real discontinuities */
+ * 1-disparity steps of slanted surfaces, P2 charges real discontinuities.
+ * P2 drops at intensity edges (adaptive P2): a strong image gradient is
+ * evidence of a genuine depth boundary, so jumps get cheaper there. */
 #define P1 10
 #define P2 120
+#define P2_EDGE 48             /* P2 across an intensity edge */
+#define EDGE_DIFF 16           /* |dI| that counts as an edge */
 #define C_PAD 62               /* cost where the window leaves the image */
 #define UNIQ_NUM 17            /* reject if 2nd best < best * 17/16 */
 #define UNIQ_DEN 16
 #define SPECKLE_MIN 60         /* smallest surviving region, px */
 #define SPECKLE_TOL 1          /* integer-disparity connectivity */
+#define FILL_MAX 60            /* longest invalid run the hole fill closes */
 
 static void normalize3(float v[3]) {
     float n = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
@@ -126,11 +136,66 @@ static void census9x7(const uint8_t *img, uint64_t *out) {
     }
 }
 
-/* one SGM step: Lc(d) = C(d) + min(Lp(d), Lp(d+-1)+P1, minLp+P2) - minLp */
+/* one SGM step: Lc(d) = C(d) + min(Lp(d), Lp(d+-1)+P1, minLp+p2) - minLp,
+ * accumulated into the 4-path sum as it goes. Returns min(Lc). */
+#ifdef XS_NEON
 static inline uint16_t sgm_update(const uint8_t *C, const uint16_t *Lp,
-                                  uint16_t minLp, uint16_t *Lc) {
+                                  uint16_t minLp, uint16_t p2,
+                                  uint16_t *Lc, uint16_t *Sacc) {
+    const uint16x8_t vP1 = vdupq_n_u16(P1);
+    const uint16x8_t vminLp = vdupq_n_u16(minLp);
+    const uint16x8_t vcap = vdupq_n_u16((uint16_t)(minLp + p2));
+    const uint16x8_t big = vdupq_n_u16(0xFFFF);
+    uint16x8_t run = big;
+    uint16x8_t blk[XS_DISP / 8];
+    for (int b = 0; b < XS_DISP / 8; b++) blk[b] = vld1q_u16(Lp + 8 * b);
+    for (int b = 0; b < XS_DISP / 8; b++) {
+        uint16x8_t l = blk[b];
+        uint16x8_t lm1 = vextq_u16(b ? blk[b - 1] : big, l, 7);
+        uint16x8_t lp1 = vextq_u16(l, b < XS_DISP / 8 - 1 ? blk[b + 1] : big, 1);
+        /* saturating +P1 keeps the 0xFFFF pads from wrapping to tiny values */
+        uint16x8_t m = vminq_u16(l, vminq_u16(vqaddq_u16(lm1, vP1),
+                                              vqaddq_u16(lp1, vP1)));
+        m = vminq_u16(m, vcap);
+        uint16x8_t c16 = vmovl_u8(vld1_u8(C + 8 * b));
+        uint16x8_t v = vsubq_u16(vaddq_u16(c16, m), vminLp);
+        vst1q_u16(Lc + 8 * b, v);
+        vst1q_u16(Sacc + 8 * b, vaddq_u16(vld1q_u16(Sacc + 8 * b), v));
+        run = vminq_u16(run, v);
+    }
+#ifdef __aarch64__
+    return vminvq_u16(run);
+#else
+    uint16x4_t r = vmin_u16(vget_low_u16(run), vget_high_u16(run));
+    r = vpmin_u16(r, r);
+    r = vpmin_u16(r, r);
+    return vget_lane_u16(r, 0);
+#endif
+}
+
+static inline uint16_t sgm_seed(const uint8_t *C, uint16_t *Lc, uint16_t *Sacc) {
+    uint16x8_t run = vdupq_n_u16(0xFFFF);
+    for (int b = 0; b < XS_DISP / 8; b++) {
+        uint16x8_t v = vmovl_u8(vld1_u8(C + 8 * b));
+        vst1q_u16(Lc + 8 * b, v);
+        vst1q_u16(Sacc + 8 * b, vaddq_u16(vld1q_u16(Sacc + 8 * b), v));
+        run = vminq_u16(run, v);
+    }
+#ifdef __aarch64__
+    return vminvq_u16(run);
+#else
+    uint16x4_t r = vmin_u16(vget_low_u16(run), vget_high_u16(run));
+    r = vpmin_u16(r, r);
+    r = vpmin_u16(r, r);
+    return vget_lane_u16(r, 0);
+#endif
+}
+#else
+static inline uint16_t sgm_update(const uint8_t *C, const uint16_t *Lp,
+                                  uint16_t minLp, uint16_t p2,
+                                  uint16_t *Lc, uint16_t *Sacc) {
     uint16_t minc = 0xFFFF;
-    uint16_t cap = (uint16_t)(minLp + P2);
+    uint16_t cap = (uint16_t)(minLp + p2);
     for (int d = 0; d < XS_DISP; d++) {
         uint16_t best = Lp[d];
         if (d > 0 && (uint16_t)(Lp[d - 1] + P1) < best) best = (uint16_t)(Lp[d - 1] + P1);
@@ -138,18 +203,29 @@ static inline uint16_t sgm_update(const uint8_t *C, const uint16_t *Lp,
         if (cap < best) best = cap;
         uint16_t v = (uint16_t)(C[d] + best - minLp);
         Lc[d] = v;
+        Sacc[d] = (uint16_t)(Sacc[d] + v);
         if (v < minc) minc = v;
     }
     return minc;
 }
 
-static inline uint16_t sgm_seed(const uint8_t *C, uint16_t *Lc) {
+static inline uint16_t sgm_seed(const uint8_t *C, uint16_t *Lc, uint16_t *Sacc) {
     uint16_t minc = 0xFFFF;
     for (int d = 0; d < XS_DISP; d++) {
         Lc[d] = C[d];
+        Sacc[d] = (uint16_t)(Sacc[d] + C[d]);
         if (C[d] < minc) minc = C[d];
     }
     return minc;
+}
+#endif
+
+/* adaptive P2 from the intensity step between a pixel and its path
+ * predecessor */
+static inline uint16_t p2_of(uint8_t a, uint8_t b) {
+    int d = (int)a - (int)b;
+    if (d < 0) d = -d;
+    return d > EDGE_DIFF ? P2_EDGE : P2;
 }
 
 void xr_stereo_depth(xr_stereo *s, uint8_t *out_disp) {
@@ -178,34 +254,40 @@ void xr_stereo_depth(xr_stereo *s, uint8_t *out_disp) {
         int x0 = pass ? XS_W - 1 : 0, dx = pass ? -1 : 1;
         for (int y = 0; y < XS_H; y++) {
             const uint8_t *Crow = s->cost + (size_t)y * XS_W * XS_DISP;
+            const uint8_t *irow = s->rect[0] + (size_t)y * XS_W;
             uint16_t *Srow = s->sum + (size_t)y * XS_W * XS_DISP;
             uint16_t *Lp = L[0], *Lc = L[1];
-            uint16_t m = sgm_seed(Crow + (size_t)x0 * XS_DISP, Lp);
-            for (int d = 0; d < XS_DISP; d++) Srow[(size_t)x0 * XS_DISP + d] += Lp[d];
+            uint16_t m = sgm_seed(Crow + (size_t)x0 * XS_DISP, Lp,
+                                  Srow + (size_t)x0 * XS_DISP);
             for (int x = x0 + dx; x >= 0 && x < XS_W; x += dx) {
-                m = sgm_update(Crow + (size_t)x * XS_DISP, Lp, m, Lc);
-                uint16_t *Sd = Srow + (size_t)x * XS_DISP;
-                for (int d = 0; d < XS_DISP; d++) Sd[d] += Lc[d];
+                m = sgm_update(Crow + (size_t)x * XS_DISP, Lp, m,
+                               p2_of(irow[x], irow[x - dx]),
+                               Lc, Srow + (size_t)x * XS_DISP);
                 uint16_t *t = Lp; Lp = Lc; Lc = t;
             }
         }
     }
     for (int pass = 0; pass < 2; pass++) {                 /* top<->bottom */
         int y0 = pass ? XS_H - 1 : 0, dy = pass ? -1 : 1;
+        uint16_t *prev = s->lrow[pass];                    /* previous row's L */
         for (int y = y0; y >= 0 && y < XS_H; y += dy) {
             const uint8_t *Crow = s->cost + (size_t)y * XS_W * XS_DISP;
+            const uint8_t *irow = s->rect[0] + (size_t)y * XS_W;
             uint16_t *Srow = s->sum + (size_t)y * XS_W * XS_DISP;
-            uint16_t *prev = s->lrow[pass ? 1 : 0];        /* previous row's L */
             for (int x = 0; x < XS_W; x++) {
-                uint16_t *Lc = prev + (size_t)x * XS_DISP; /* updated in place */
-                uint16_t tmp[XS_DISP];
+                uint16_t *Lr = prev + (size_t)x * XS_DISP;
                 uint16_t m;
-                if (y == y0) m = sgm_seed(Crow + (size_t)x * XS_DISP, tmp);
-                else m = sgm_update(Crow + (size_t)x * XS_DISP, Lc, s->lmin[x], tmp);
-                memcpy(Lc, tmp, sizeof tmp);
+                if (y == y0) {
+                    m = sgm_seed(Crow + (size_t)x * XS_DISP, Lr,
+                                 Srow + (size_t)x * XS_DISP);
+                } else {
+                    uint16_t tmp[XS_DISP];
+                    m = sgm_update(Crow + (size_t)x * XS_DISP, Lr, s->lmin[x],
+                                   p2_of(irow[x], irow[x - dy * XS_W]),
+                                   tmp, Srow + (size_t)x * XS_DISP);
+                    memcpy(Lr, tmp, sizeof tmp);
+                }
                 s->lmin[x] = m;
-                uint16_t *Sd = Srow + (size_t)x * XS_DISP;
-                for (int d = 0; d < XS_DISP; d++) Sd[d] += Lc[d];
             }
         }
     }
@@ -220,14 +302,49 @@ void xr_stereo_depth(xr_stereo *s, uint8_t *out_disp) {
         for (int x = 0; x < XS_W; x++) {
             const uint16_t *Sd = Srow + (size_t)x * XS_DISP;
             int best = 0;
+            int unique;
+#ifdef XS_NEON
+            uint16x8_t vm = vld1q_u16(Sd);
+            for (int b = 1; b < XS_DISP / 8; b++)
+                vm = vminq_u16(vm, vld1q_u16(Sd + 8 * b));
+#ifdef __aarch64__
+            uint16_t bv = vminvq_u16(vm);
+#else
+            uint16x4_t r = vmin_u16(vget_low_u16(vm), vget_high_u16(vm));
+            r = vpmin_u16(r, r);
+            r = vpmin_u16(r, r);
+            uint16_t bv = vget_lane_u16(r, 0);
+#endif
+            while (Sd[best] != bv) best++;
+            uint32_t bc = bv;
+            /* count entries under the ambiguity threshold, then discount
+             * the winner and its two neighbours */
+            uint16_t thr = (uint16_t)((bc * UNIQ_NUM) / UNIQ_DEN);
+            uint16x8_t vthr = vdupq_n_u16(thr);
+            uint16x8_t acc = vdupq_n_u16(0);
+            for (int b = 0; b < XS_DISP / 8; b++)
+                acc = vsubq_u16(acc, vcltq_u16(vld1q_u16(Sd + 8 * b), vthr));
+#ifdef __aarch64__
+            int cnt = vaddvq_u16(acc);
+#else
+            uint32x4_t a32 = vpaddlq_u16(acc);
+            uint64x2_t a64 = vpaddlq_u32(a32);
+            int cnt = (int)(vgetq_lane_u64(a64, 0) + vgetq_lane_u64(a64, 1));
+#endif
+            cnt -= Sd[best] < thr;
+            if (best > 0) cnt -= Sd[best - 1] < thr;
+            if (best < XS_DISP - 1) cnt -= Sd[best + 1] < thr;
+            unique = cnt == 0;
+#else
             for (int d = 1; d < XS_DISP; d++)
                 if (Sd[d] < Sd[best]) best = d;
             uint32_t bc = Sd[best];
-            int unique = 1;
+            unique = 1;
             for (int d = 0; d < XS_DISP; d++) {
                 if (d >= best - 1 && d <= best + 1) continue;
                 if ((uint32_t)Sd[d] * UNIQ_DEN < bc * UNIQ_NUM) { unique = 0; break; }
             }
+#endif
             if (!unique || best == 0 || x - best < 4) {
                 Dq[x] = 0; Di[x] = 0;
                 continue;
@@ -307,6 +424,26 @@ void xr_stereo_depth(xr_stereo *s, uint8_t *out_disp) {
                 s->disp_q[i] = 0;
                 /* keep disp_int for connectivity of already-visited px */
             }
+    }
+
+    /* hole filling: close short invalid scanline runs with the smaller
+     * (more distant) edge disparity — occluded and textureless pixels
+     * belong to the background. Long runs stay unknown. */
+    for (int y = 0; y < XS_H; y++) {
+        uint8_t *Dq = s->disp_q + (size_t)y * XS_W;
+        int x = 0;
+        while (x < XS_W) {
+            if (Dq[x]) { x++; continue; }
+            int x1 = x;
+            while (x1 < XS_W && !Dq[x1]) x1++;
+            if (x > 0 && x1 < XS_W && x1 - x <= FILL_MAX) {
+                uint8_t l = Dq[x - 1], r = Dq[x1];
+                uint8_t f = l < r ? l : r;
+                for (int k = x; k < x1; k++)
+                    if (s->map[0][(size_t)y * XS_W + k] >= 0) Dq[k] = f;
+            }
+            x = x1;
+        }
     }
 
     /* 3x3 median (zeros participate: also erodes lone survivors) */
