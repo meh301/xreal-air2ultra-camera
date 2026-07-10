@@ -59,6 +59,11 @@
             android:text="@string/dep_on" />
 
         <Button
+            android:id="@+id/toggle_cam"
+            style="@style/ThinButton"
+            android:text="@string/cam_on" />
+
+        <Button
             android:id="@+id/view_mode"
             style="@style/ThinButton"
             android:text="@string/mode_sbs" />

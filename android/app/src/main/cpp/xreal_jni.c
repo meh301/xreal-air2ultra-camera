@@ -55,7 +55,6 @@ static struct {
     pthread_cond_t slam_cond;
     uint32_t pair_seq;
     uint64_t pair_ts, slam_prev_ts;
-    xr_stereo stereo;
     xr_track track;
     int stereo_ready;
     atomic_int depth_on;
@@ -121,17 +120,22 @@ static struct {
         .align_variant = XR_ALIGN_VARIANT_DEFAULT,
         .stereo_mode = 1, .depth_on = 1, .show_pts = 1 };
 
+/* ~14 MB of rectification maps + SGM scratch. Kept outside S: S has nonzero
+ * initializers, so its members live in .data and would bloat the .so by
+ * this much per ABI; a plain zero static stays in .bss. */
+static xr_stereo ST;
+
 static int64_t now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* disparity -> color ramp: far/small = deep blue, near/large = red;
- * 0 (invalid) = black */
+/* disparity (quarter-pixel) -> color ramp: far/small = deep blue,
+ * near/large = red; 0 (invalid) = black */
 static void disp_color(uint8_t d, uint8_t px[4]) {
     if (!d) { px[0] = px[1] = px[2] = 0; px[3] = 0xFF; return; }
-    float t = (float)d / (float)XS_DISP;
+    float t = (float)d / (float)XS_MAX_OUT;
     if (t > 1.0f) t = 1.0f;
     float r, g, b;
     if (t < 0.33f)      { float u = t / 0.33f;          r = 0;      g = u;          b = 1; }
@@ -375,13 +379,13 @@ static void *slam_worker(void *arg) {
             float by = S.eye_calib[1].p_cam[1] - S.eye_calib[0].p_cam[1];
             float bz = S.eye_calib[1].p_cam[2] - S.eye_calib[0].p_cam[2];
             if (bx * bx + by * by + bz * bz < 1e-4f) continue;   /* no p_cam */
-            xr_stereo_init(&S.stereo, &S.eye_calib[0], &S.eye_calib[1],
+            xr_stereo_init(&ST, &S.eye_calib[0], &S.eye_calib[1],
                            S.eye_calib[0].p_cam, S.eye_calib[1].p_cam,
                            atomic_load(&S.align_variant));
             xr_track_reset(&S.track);
             S.stereo_ready = 1;
             LOGI("stereo rectification ready: baseline %.1f cm, f_rect %.0f px",
-                 (double)S.stereo.baseline_m * 100.0, (double)S.stereo.f_rect);
+                 (double)ST.baseline_m * 100.0, (double)ST.f_rect);
         }
 
         /* snapshot the tracker inputs; written by the UVC thread, and a rare
@@ -389,19 +393,8 @@ static void *slam_worker(void *arg) {
         memcpy(S.slam_in[0], S.clean_raw[1], sizeof S.slam_in[0]); /* left  = cam1 */
         memcpy(S.slam_in[1], S.clean_raw[0], sizeof S.slam_in[1]); /* right = cam0 */
 
-        int64_t t0 = now_ms();
-        static uint8_t disp_local[XS_W * XS_H];        /* slam thread only */
-        if (atomic_load(&S.depth_on)) {
-            xr_stereo_depth(&S.stereo, S.slam_in[0], S.slam_in[1], disp_local);
-        } else {
-            /* still rectify the left image for the tracker */
-            for (int i = 0; i < XS_W * XS_H; i++) {
-                int32_t m = S.stereo.map[0][i];
-                S.stereo.rect[0][i] = m >= 0 ? S.slam_in[0][m] : 0;
-            }
-            memset(disp_local, 0, sizeof disp_local);
-        }
-        float depth_ms = (float)(now_ms() - t0);
+        xr_stereo_rectify(&ST, 0, S.slam_in[0]);
+        xr_stereo_rectify(&ST, 1, S.slam_in[1]);
 
         /* gyro-predicted whole-image shift since the previous pair: rotate
          * the rect-frame optical axis by the raw pose delta (rectified frame
@@ -410,7 +403,7 @@ static void *slam_worker(void *arg) {
         float dR[9];
         if (S.slam_prev_ts && ts &&
             pose_delta_between(S.slam_prev_ts, ts, dR) == 0) {
-            const float *Rr = S.stereo.R_rect_imu;
+            const float *Rr = ST.R_rect_imu;
             float rz[3] = { Rr[2], Rr[5], Rr[8] };     /* rect z in IMU frame */
             float rn[3] = {                            /* ray now = dR^T rz */
                 dR[0] * rz[0] + dR[3] * rz[1] + dR[6] * rz[2],
@@ -423,45 +416,61 @@ static void *slam_worker(void *arg) {
                 Rr[2] * rn[0] + Rr[5] * rn[1] + Rr[8] * rn[2],
             };
             if (rr[2] > 0.1f) {
-                pdx = S.stereo.f_rect * rr[0] / rr[2];
-                pdy = S.stereo.f_rect * rr[1] / rr[2];
+                pdx = ST.f_rect * rr[0] / rr[2];
+                pdy = ST.f_rect * rr[1] / rr[2];
             }
         }
         S.slam_prev_ts = ts;
 
-        int n = xr_track_step(&S.track, S.stereo.rect[0], pdx, pdy);
+        int n = xr_track_step(&S.track, ST.rect[0], pdx, pdy);
 
-        /* publish: phone-pane dots (rect px -> camera px via the rect map)
-         * and glasses-overlay rays (rect px -> IMU-frame ray) */
+        /* publish tracking first (before the heavier depth pass, so the
+         * point overlay never waits on it): phone-pane dots (rect px ->
+         * camera px via the rect map) and glasses rays (rect -> IMU frame) */
         float rays[XT_MAX * 3];
         int nr = 0;
         const float cx = (XS_W - 1) * 0.5f, cy = (XS_H - 1) * 0.5f;
         pthread_mutex_lock(&S.lock);
-        memcpy(S.disp, disp_local, sizeof S.disp);
         S.pts_n = 0;
         for (int i = 0; i < XT_MAX; i++) {
-            if (!S.track.pt[i].alive) continue;
+            /* fresh seeds (age < 2) flicker in and out; only show survivors */
+            if (!S.track.pt[i].alive || S.track.pt[i].age < 2) continue;
             int rx = (int)S.track.pt[i].x, ry = (int)S.track.pt[i].y;
             if (rx < 0 || rx >= XS_W || ry < 0 || ry >= XS_H) continue;
-            int32_t m = S.stereo.map[0][ry * XS_W + rx];
+            int32_t m = ST.map[0][ry * XS_W + rx];
             if (m >= 0) {
                 S.pts_pane[S.pts_n][0] = (float)(m % XR_OW);
                 S.pts_pane[S.pts_n][1] = (float)(m / XR_OW);
                 S.pts_n++;
             }
-            const float *Rr = S.stereo.R_rect_imu;
-            float v[3] = { (S.track.pt[i].x - cx) / S.stereo.f_rect,
-                           (S.track.pt[i].y - cy) / S.stereo.f_rect, 1.0f };
+            const float *Rr = ST.R_rect_imu;
+            float v[3] = { (S.track.pt[i].x - cx) / ST.f_rect,
+                           (S.track.pt[i].y - cy) / ST.f_rect, 1.0f };
             rays[nr * 3 + 0] = Rr[0] * v[0] + Rr[1] * v[1] + Rr[2] * v[2];
             rays[nr * 3 + 1] = Rr[3] * v[0] + Rr[4] * v[1] + Rr[5] * v[2];
             rays[nr * 3 + 2] = Rr[6] * v[0] + Rr[7] * v[1] + Rr[8] * v[2];
             nr++;
         }
         S.track_count = n;
-        S.depth_ms = depth_ms;
         pthread_mutex_unlock(&S.lock);
-
         xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0);
+
+        /* stereo depth (SGM) on the already-rectified pair */
+        static uint8_t disp_local[XS_W * XS_H];        /* slam thread only */
+        if (atomic_load(&S.depth_on)) {
+            int64_t t0 = now_ms();
+            xr_stereo_depth(&ST, disp_local);
+            float depth_ms = (float)(now_ms() - t0);
+            pthread_mutex_lock(&S.lock);
+            memcpy(S.disp, disp_local, sizeof S.disp);
+            S.depth_ms = depth_ms;
+            pthread_mutex_unlock(&S.lock);
+        } else {
+            pthread_mutex_lock(&S.lock);
+            memset(S.disp, 0, sizeof S.disp);
+            S.depth_ms = 0;
+            pthread_mutex_unlock(&S.lock);
+        }
     }
 }
 
@@ -939,6 +948,15 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetDepth(JNIEnv *env, jclass cls,
                                                         jboolean on) {
     (void)env; (void)cls;
     atomic_store(&S.depth_on, on ? 1 : 0);
+}
+
+/* Show/hide the passthrough camera image on the glasses (stereo mode).
+ * Off = pure AR: only the tracked features over the real world. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetShowCam(JNIEnv *env, jclass cls,
+                                                          jboolean on) {
+    (void)env; (void)cls;
+    xr_gles_set_show_camera(on ? 1 : 0);
 }
 
 /* Copy the newest pose/SLAM state into `buf` (direct ByteBuffer, >= 40 bytes,

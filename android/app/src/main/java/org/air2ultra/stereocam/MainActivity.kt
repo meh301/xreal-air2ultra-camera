@@ -104,6 +104,7 @@ class MainActivity : Activity() {
     private var stereoMode = true       // stereo+aligned vs plain SBS mirror
     private var showPoints = true
     private var depthOn = true
+    private var showCam = true          // glasses: passthrough image vs AR-only
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
@@ -248,6 +249,15 @@ class MainActivity : Activity() {
             XrealNative.nativeSetDepth(depthOn)
             depButton.text =
                 getString(if (depthOn) R.string.dep_on else R.string.dep_off)
+        }
+        val camButton = findViewById<Button>(R.id.toggle_cam)
+        camButton.setOnClickListener {
+            // hide the passthrough image on the glasses: pure AR, only the
+            // tracked features over the real world
+            showCam = !showCam
+            XrealNative.nativeSetShowCam(showCam)
+            camButton.text =
+                getString(if (showCam) R.string.cam_on else R.string.cam_off)
         }
         val modeButton = findViewById<Button>(R.id.view_mode)
         modeButton.setOnClickListener {

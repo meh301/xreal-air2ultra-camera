@@ -154,12 +154,13 @@ exists and runs, with a lightweight stand-in front end where Basalt will sit:
 
 | Piece | File(s) | Status |
 |---|---|---|
-| Stereo rectification (factory calib → 240×320 portrait pinhole pair, x = 13.7 cm baseline, f=200) | `android/.../cpp/xr_stereo.c` | ✓ built from `imu_p_cam`/`imu_q_cam` + fisheye624 at runtime |
-| Stereo depth 30 Hz (census 5×5, 48 disp, uniqueness gate, 3×3 median) | `xr_stereo.c` | ✓ on the SLAM worker thread, ~10 ms/pair |
-| Sparse feature tracker (grid-seeded, 7×7 SAD, gyro-predicted search) | `xr_track.c` | ✓ stand-in for Basalt's optical-flow front end |
+| Stereo rectification (factory calib → 240×320 portrait pinhole pair, x = 13.7 cm baseline, f=200, bilinear) | `android/.../cpp/xr_stereo.c` | ✓ built from `imu_p_cam`/`imu_q_cam` + fisheye624 at runtime |
+| Stereo depth 30 Hz — 9×7 census + **4-path SGM** (P1=10, P2=120) + uniqueness + LR consistency + subpixel (¼ px) + speckle region filter + median | `xr_stereo.c` | ✓ on the SLAM worker thread; the first census-only version was speckle soup — SGM's smoothness term is what makes census usable |
+| Sparse feature tracker (grid-seeded Shi-Tomasi corners, 7×7 SAD, gyro-predicted search, forward-backward check, subpixel) | `xr_track.c` | ✓ stand-in for Basalt's optical-flow front end |
 | Non-equalized tap for trackers (plan item 2 caveat) | `xreal_core.c` `xr_clean(..., do_equalize)` | ✓ display gets equalized, SLAM gets raw |
 | SLAM worker thread (rectify + track + depth per stereo pair, newest-wins) | `xreal_jni.c` `slam_worker` | ✓ |
 | Landmark overlay on the passthrough (GL_POINTS pass riding the same timewarp dR as the image) | `xreal_gles.c`, `xr_align_ray_to_display()` | ✓ |
+| AR-only glasses mode (hide the camera image, keep the point overlay over the real world) | `xr_gles_set_show_camera`, Cam button | ✓ |
 | Phone UI: tracking pane \| depth pane, 3D pose/map view, buttons Rst/Pts/Dep/SBS/Snap | `MainActivity.kt`, `PoseMapView.kt` | ✓ orientation from AHRS; position zeros until Basalt |
 | Pose export | `nativeGrabPose` (q, p, tracked, depth ms, flags) | ✓ same ABI Basalt will fill |
 | Basalt backend | — | **next** (plan below) |

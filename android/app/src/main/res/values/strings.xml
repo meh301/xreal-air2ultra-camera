@@ -18,6 +18,8 @@
     <string name="pts_off">Pts✕</string>
     <string name="dep_on">Dep✓</string>
     <string name="dep_off">Dep✕</string>
+    <string name="cam_on">Cam✓</string>
+    <string name="cam_off">Cam✕</string>
     <!-- the mode button shows the mode you switch TO -->
     <string name="mode_sbs">SBS</string>
     <string name="mode_stereo">3D</string>

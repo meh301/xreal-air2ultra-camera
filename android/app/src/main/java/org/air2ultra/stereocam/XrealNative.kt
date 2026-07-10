@@ -32,6 +32,13 @@ object XrealNative {
     external fun nativeSetDepth(on: Boolean)
 
     /**
+     * Show/hide the passthrough camera image on the glasses (stereo mode).
+     * Off = pure AR: only the tracked features, floating over the real
+     * world seen through the lenses.
+     */
+    external fun nativeSetShowCam(on: Boolean)
+
+    /**
      * Copy the newest pose/SLAM state into [buf] (direct ByteBuffer >= 40
      * bytes, native order): f32 quat_wxyz[4], f32 pos_m[3], i32 tracked
      * features, f32 depth_ms, u32 flags (bit0 depth on, bit1 rectification

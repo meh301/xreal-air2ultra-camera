@@ -59,4 +59,9 @@ void xr_gles_set_points(const float *rays_imu, int n);
 /* Show/hide the point overlay (default on). */
 void xr_gles_set_show_points(int on);
 
+/* Show/hide the passthrough camera image in the aligned stereo mode
+ * (default on). Off = black background with only the point overlay — the
+ * tracked features float in the real world as native AR markers. */
+void xr_gles_set_show_camera(int on);
+
 #endif

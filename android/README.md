@@ -57,9 +57,11 @@ Or open `android/` in Android Studio and run — but run `fetch_deps` first.
      the origin until the Basalt VIO backend lands (docs/VSLAM.md).
    - **buttons** — *Rst* resets the SLAM front end (drops all features and
      the trail), *Pts* shows/hides the tracked features (phone pane and
-     glasses overlay), *Dep* toggles the depth computation, *SBS/3D*
-     switches the glasses between plain side-by-side and calibrated
-     per-eye stereo, *Snap* saves a PNG of the panes to Pictures/XREAL.
+     glasses overlay), *Dep* toggles the depth computation, *Cam* hides the
+     passthrough image on the glasses leaving only the tracked points as
+     native AR markers over the real world, *SBS/3D* switches the glasses
+     between plain side-by-side and calibrated per-eye stereo, *Snap*
+     saves a PNG of the panes to Pictures/XREAL.
 4. When the phone drives the glasses' display (DisplayPort alt-mode), the
    world-aligned passthrough renders onto it natively (front-buffer GLES +
    IMU timewarp, always on), with the tracked features overlaid as points

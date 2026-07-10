@@ -60,6 +60,7 @@ static struct {
     float pt_rays[XR_GLES_MAX_POINTS * 3];          /* overlay, IMU-frame */
     int pt_count;
     int show_points;
+    int show_camera;
 
     /* GL state (render thread only) */
     EGLDisplay dpy;
@@ -84,7 +85,7 @@ static struct {
     int64_t stat_t0;
 } G = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
         .calib_variant = XR_ALIGN_VARIANT_DEFAULT, .timewarp = 1,
-        .show_points = 1 };
+        .show_points = 1, .show_camera = 1 };
 
 static int64_t now_ms64(void) {
     struct timespec ts;
@@ -334,14 +335,23 @@ static void render_frame(int mode, int fresh, const float *dR) {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, G.ibo);
 
     if (mode == MODE_EYES) {
+        int show_cam = G.show_camera;
+        if (!show_cam) {
+            /* AR mode: only the point overlay over black */
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
         for (int e = 0; e < 2; e++) {
-            glUseProgram(G.prog);
-            glBindTexture(GL_TEXTURE_2D, G.tex_eye[e]);
-            if (fresh)
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, XR_OW, XR_OH,
-                                GL_LUMINANCE, GL_UNSIGNED_BYTE, G.eye_img[e]);
-            update_eye_vbo(e, dR);      /* leaves the eye VBO bound */
+            if (show_cam) {
+                glUseProgram(G.prog);
+                glBindTexture(GL_TEXTURE_2D, G.tex_eye[e]);
+                if (fresh)
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, XR_OW, XR_OH,
+                                    GL_LUMINANCE, GL_UNSIGNED_BYTE, G.eye_img[e]);
+                update_eye_vbo(e, dR);  /* leaves the eye VBO bound */
+            }
             glViewport(e * w / 2, 0, w / 2, h);
+            if (show_cam) {
             glVertexAttribPointer((GLuint)G.loc_pos, 2, GL_FLOAT, GL_FALSE,
                                   4 * sizeof(GLfloat), (void *)0);
             glVertexAttribPointer((GLuint)G.loc_uv, 2, GL_FLOAT, GL_FALSE,
@@ -350,6 +360,7 @@ static void render_frame(int mode, int fresh, const float *dR) {
             glEnableVertexAttribArray((GLuint)G.loc_pos);
             glEnableVertexAttribArray((GLuint)G.loc_uv);
             glDrawElements(GL_TRIANGLES, IDX, GL_UNSIGNED_SHORT, (void *)0);
+            }
 
             /* tracked-point overlay, timewarped like the image */
             if (G.show_points && G.pt_count > 0) {
@@ -585,6 +596,13 @@ void xr_gles_set_points(const float *rays_imu, int n) {
 void xr_gles_set_show_points(int on) {
     pthread_mutex_lock(&G.lock);
     G.show_points = on ? 1 : 0;
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_show_camera(int on) {
+    pthread_mutex_lock(&G.lock);
+    G.show_camera = on ? 1 : 0;
+    pthread_cond_signal(&G.cond);      /* re-present with the new look */
     pthread_mutex_unlock(&G.lock);
 }
 
