@@ -81,13 +81,18 @@ class PoseMapView @JvmOverloads constructor(
     private var yawS = 0f; private var yawC = 1f
     private var elS = 0f; private var elC = 1f
 
-    /** world (x fwd-ish, y left-ish, z up) -> screen px, orthographic */
+    /** World (z up) -> screen px, orthographic. The camera sits ABOVE and
+     * behind, pitched down by viewElev — same viewing hemisphere as the
+     * python scope. (The first version had the y-term sign flipped, which
+     * is still a proper camera but one looking up from BELOW the ground
+     * plane: with no depth cues the triad then reads left-handed — "right
+     * points left".) Screen y grows downward, hence the leading minus. */
     private fun project(wx: Float, wy: Float, wz: Float, out: FloatArray) {
         val x1 = wx * yawC - wy * yawS
         val y1 = wx * yawS + wy * yawC
         val s = height / 9f * viewZoom             // ~9 m of world at zoom 1
         out[0] = width / 2f + panX + x1 * s
-        out[1] = height * 0.55f + panY + (y1 * elS - wz * elC) * s
+        out[1] = height * 0.55f + panY - (y1 * elS + wz * elC) * s
     }
 
     // touch state
