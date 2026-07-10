@@ -36,10 +36,15 @@ static struct {
 
     vit_tracker_t *tracker;
     atomic_int running;
+    atomic_int imu_pushed;  /* samples since start: frames wait for history */
     float kb4[2][8];        /* per cam: fx fy cx cy k1..k4 (for unproject) */
     float R_ic[2][9];       /* camera -> IMU rotation, row-major */
     uint64_t last_pair_ts;
 } B;
+
+/* the VIO initializes its world from the first accel samples: give it some
+ * IMU history before the first frame arrives */
+#define IMU_WARMUP_SAMPLES 300
 
 int xr_slam_load(void) {
     if (B.dl) return 1;
@@ -173,7 +178,8 @@ static void cam_calibration(const xr_eye_calib *c, int variant, uint32_t index,
 }
 
 int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
-                  int variant) {
+                  int variant, const float gyro_bias[3],
+                  const float accel_bias[3], const float noises[4]) {
     if (!xr_slam_load()) return -1;
     if (B.tracker) return 0;
 
@@ -195,22 +201,32 @@ int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
     LOGI("Basalt: kb4 left fx=%.1f k=[%.4f %.4f %.4f %.4f]",
          B.kb4[0][0], B.kb4[0][4], B.kb4[0][5], B.kb4[0][6], B.kb4[0][7]);
 
-    /* IMU: identity intrinsics + consumer-grade noise densities (Basalt
-     * estimates the biases online; the factory blob's exact densities can
-     * be wired through later if drift says it matters) */
+    /* IMU. The raw stream is UNCORRECTED (the AHRS does its own bias
+     * capture for the same reason), so the factory biases must go in as
+     * offsets — a 0.9 deg/s gyro bias fed as zero makes the estimator
+     * fight the cameras and diverge. offset ADDs to raw: offset = -bias. */
     vit_imu_calibration_t ic;
     memset(&ic, 0, sizeof ic);
     ic.imu_index = 0;
     ic.frequency = 1000.0;
+    /* {gyro_noise, gyro_bias_rw, accel_noise, accel_bias_rw} */
+    float nz[4] = { 0.00035f, 0.0001f, 0.00667f, 0.001f };  /* defaults */
+    if (noises) memcpy(nz, noises, sizeof nz);
     for (int i = 0; i < 3; i++) {
         ic.accel.transform[i * 3 + i] = 1.0;
         ic.gyro.transform[i * 3 + i] = 1.0;
-        ic.accel.noise_std[i] = 0.016;      /* m/s^2 / sqrt(Hz) */
-        ic.accel.bias_std[i] = 0.001;
-        ic.gyro.noise_std[i] = 0.000282;    /* rad/s / sqrt(Hz) */
-        ic.gyro.bias_std[i] = 0.0001;
+        if (gyro_bias) ic.gyro.offset[i] = -(double)gyro_bias[i];
+        if (accel_bias) ic.accel.offset[i] = -(double)accel_bias[i];
+        ic.gyro.noise_std[i] = nz[0];       /* rad/s  / sqrt(Hz) */
+        ic.gyro.bias_std[i] = nz[1];
+        ic.accel.noise_std[i] = nz[2];      /* m/s^2 / sqrt(Hz) */
+        ic.accel.bias_std[i] = nz[3];
     }
     B.add_imu_calib(B.tracker, &ic);
+    LOGI("Basalt: gyro bias [%.4f %.4f %.4f] rad/s, noises [%g %g %g %g]",
+         gyro_bias ? gyro_bias[0] : 0.0f, gyro_bias ? gyro_bias[1] : 0.0f,
+         gyro_bias ? gyro_bias[2] : 0.0f,
+         (double)nz[0], (double)nz[1], (double)nz[2], (double)nz[3]);
 
     if (B.start(B.tracker) != VIT_SUCCESS) {
         LOGE("Basalt: tracker start failed");
@@ -218,8 +234,10 @@ int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
         B.tracker = NULL;
         return -1;
     }
+    atomic_store(&B.imu_pushed, 0);
+    B.last_pair_ts = 0;
     atomic_store(&B.running, 1);
-    LOGI("Basalt VIO started (2 cams, 1 kHz IMU)");
+    LOGI("Basalt VIO started (2 cams, 1 kHz IMU) — hold still for init");
     return 0;
 }
 
@@ -250,11 +268,17 @@ void xr_slam_push_imu(uint64_t ts_ns, const float gyro_dps[3],
         .wx = gyro_dps[0] * D2R, .wy = gyro_dps[1] * D2R, .wz = gyro_dps[2] * D2R,
     };
     B.push_imu(B.tracker, &s);
+    if (atomic_fetch_add(&B.imu_pushed, 1) == IMU_WARMUP_SAMPLES)
+        LOGI("Basalt: accel at init (%.2f, %.2f, %.2f) m/s^2 — expect "
+             "(0, -9.8, 0) when worn level", s.ax, s.ay, s.az);
 }
 
 void xr_slam_push_pair(const uint8_t *left, const uint8_t *right,
                        uint64_t ts_ns) {
     if (!atomic_load(&B.running) || ts_ns == 0) return;
+    /* the VIO derives its gravity/world at the first frame from the IMU
+     * pushed so far — don't hand it frames before there is history */
+    if (atomic_load(&B.imu_pushed) < IMU_WARMUP_SAMPLES) return;
     if (ts_ns <= B.last_pair_ts) return;       /* must increase monotonically */
     B.last_pair_ts = ts_ns;
     vit_img_sample_t s = {

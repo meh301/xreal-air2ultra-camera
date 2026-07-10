@@ -5,8 +5,10 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.util.AttributeSet
+import android.view.MotionEvent
 import android.view.View
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -58,19 +60,88 @@ class PoseMapView @JvmOverloads constructor(
         invalidate()
     }
 
-    // fixed isometric view: yaw about the up axis, then a downward tilt
-    private val yawS = sin(Math.toRadians(-35.0)).toFloat()
-    private val yawC = cos(Math.toRadians(-35.0)).toFloat()
-    private val elS = sin(Math.toRadians(25.0)).toFloat()
-    private val elC = cos(Math.toRadians(25.0)).toFloat()
+    // interactive camera: orbit with one finger, pan/zoom with two
+    private var viewYaw = -35.0                    // deg, about world up
+    private var viewElev = 25.0                    // deg, downward tilt
+    private var viewZoom = 1f
+    private var panX = 0f
+    private var panY = 0f
+    private var yawS = 0f; private var yawC = 1f
+    private var elS = 0f; private var elC = 1f
 
     /** world (x fwd-ish, y left-ish, z up) -> screen px, orthographic */
     private fun project(wx: Float, wy: Float, wz: Float, out: FloatArray) {
         val x1 = wx * yawC - wy * yawS
         val y1 = wx * yawS + wy * yawC
-        val s = height / 9f                        // ~9 m of world vertically
-        out[0] = width / 2f + x1 * s
-        out[1] = height * 0.55f + (y1 * elS - wz * elC) * s
+        val s = height / 9f * viewZoom             // ~9 m of world at zoom 1
+        out[0] = width / 2f + panX + x1 * s
+        out[1] = height * 0.55f + panY + (y1 * elS - wz * elC) * s
+    }
+
+    // touch state
+    private var lastX = 0f
+    private var lastY = 0f
+    private var lastSpan = 0f
+    private var lastMidX = 0f
+    private var lastMidY = 0f
+    private var twoFinger = false
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                lastX = event.x; lastY = event.y
+                twoFinger = false
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> if (event.pointerCount == 2) {
+                twoFinger = true
+                lastSpan = hypot(event.getX(1) - event.getX(0),
+                                 event.getY(1) - event.getY(0))
+                lastMidX = (event.getX(0) + event.getX(1)) * 0.5f
+                lastMidY = (event.getY(0) + event.getY(1)) * 0.5f
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (event.pointerCount >= 2) {
+                    // two fingers: pinch to zoom, drag the midpoint to pan
+                    val span = hypot(event.getX(1) - event.getX(0),
+                                     event.getY(1) - event.getY(0))
+                    val midX = (event.getX(0) + event.getX(1)) * 0.5f
+                    val midY = (event.getY(0) + event.getY(1)) * 0.5f
+                    if (lastSpan > 10f) {
+                        viewZoom = (viewZoom * (span / lastSpan))
+                            .coerceIn(0.15f, 12f)
+                    }
+                    panX += midX - lastMidX
+                    panY += midY - lastMidY
+                    lastSpan = span; lastMidX = midX; lastMidY = midY
+                    invalidate()
+                } else if (!twoFinger) {
+                    // one finger: orbit
+                    viewYaw += (event.x - lastX) * 0.45
+                    viewElev = (viewElev + (event.y - lastY) * 0.3)
+                        .coerceIn(-5.0, 89.0)
+                    lastX = event.x; lastY = event.y
+                    invalidate()
+                }
+            }
+            MotionEvent.ACTION_POINTER_UP -> if (event.pointerCount == 2) {
+                // keep the remaining finger from orbiting with a jump
+                val keep = 1 - event.actionIndex
+                lastX = event.getX(keep); lastY = event.getY(keep)
+            }
+            MotionEvent.ACTION_UP -> {
+                if (!twoFinger && event.eventTime - event.downTime < 200 &&
+                    hypot(event.x - lastX, event.y - lastY) < 8f) {
+                    performClick()
+                }
+                twoFinger = false
+            }
+        }
+        return true
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        return true
     }
 
     /** rotate a body vector into the world frame by q (Hamilton wxyz) */
@@ -106,6 +177,10 @@ class PoseMapView @JvmOverloads constructor(
     private val tmpW = FloatArray(3)
 
     override fun onDraw(canvas: Canvas) {
+        yawS = sin(Math.toRadians(viewYaw)).toFloat()
+        yawC = cos(Math.toRadians(viewYaw)).toFloat()
+        elS = sin(Math.toRadians(viewElev)).toFloat()
+        elC = cos(Math.toRadians(viewElev)).toFloat()
         canvas.drawColor(Color.rgb(8, 10, 8))
 
         // ground grid, 1 m cells on the world horizontal plane

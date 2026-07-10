@@ -80,6 +80,10 @@ static struct {
     uint8_t *config;
     uint32_t config_len;
     xr_eye_calib eye_calib[2];        /* [0]=left eye, [1]=right eye */
+    float imu_gyro_bias[3];           /* factory IMU calibration (rad/s, */
+    float imu_accel_bias[3];          /* m/s^2, noise densities) */
+    float imu_noises[4];
+    int imu_calib_have;
     atomic_int align_have;            /* calibration params received */
     atomic_int align_variant;
 
@@ -1053,10 +1057,11 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGetConfig(JNIEnv *env, jclass cls
     return out;
 }
 
-/* 72 floats: per eye (left, then right): K[9], q_display[4], q_cam[4],
- * fc[2], cc[2], kc[12], p_cam[3]. Enables the world-aligned passthrough and
- * the stereo rectification (p_cam gives the baseline). A 66-float array
- * (without positions) still enables the passthrough alone. */
+/* 82 floats: per eye (left, then right): K[9], q_display[4], q_cam[4],
+ * fc[2], cc[2], kc[12], p_cam[3] (= 72), then gyro_bias[3], accel_bias[3],
+ * imu_noises[4]. Enables the world-aligned passthrough, the stereo
+ * rectification (p_cam gives the baseline) and the Basalt VIO. Shorter
+ * arrays (66/72 floats) still enable the earlier subsets. */
 JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass cls,
                                                             jfloatArray arr) {
@@ -1064,8 +1069,14 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass 
     jsize len = (*env)->GetArrayLength(env, arr);
     if (len < 66) return;
     int stride = len >= 72 ? 36 : 33;
-    float f[72];
-    (*env)->GetFloatArrayRegion(env, arr, 0, stride * 2, f);
+    float f[82];
+    (*env)->GetFloatArrayRegion(env, arr, 0, len >= 82 ? 82 : stride * 2, f);
+    if (len >= 82) {
+        memcpy(S.imu_gyro_bias, f + 72, 3 * sizeof(float));
+        memcpy(S.imu_accel_bias, f + 75, 3 * sizeof(float));
+        memcpy(S.imu_noises, f + 78, 4 * sizeof(float));
+        S.imu_calib_have = 1;
+    }
     for (int e = 0; e < 2; e++) {
         const float *p = f + e * stride;
         xr_eye_calib *c = &S.eye_calib[e];
@@ -1088,7 +1099,10 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass 
     float bz = S.eye_calib[1].p_cam[2] - S.eye_calib[0].p_cam[2];
     if (bx * bx + by * by + bz * bz > 1e-4f)
         xr_slam_start(&S.eye_calib[0], &S.eye_calib[1],
-                      atomic_load(&S.align_variant));
+                      atomic_load(&S.align_variant),
+                      S.imu_calib_have ? S.imu_gyro_bias : NULL,
+                      S.imu_calib_have ? S.imu_accel_bias : NULL,
+                      S.imu_calib_have ? S.imu_noises : NULL);
 }
 
 /* Toggle the glasses between per-eye stereo with the calibrated aligned warp

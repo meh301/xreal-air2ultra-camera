@@ -372,7 +372,7 @@ class MainActivity : Activity() {
             val cfg = org.json.JSONObject(String(raw))
             val disp = cfg.getJSONObject("display")
             val cams = cfg.getJSONObject("SLAM_camera")
-            val params = FloatArray(72)
+            val params = FloatArray(82)
             var o = 0
             for (eye in arrayOf("left", "right")) {
                 // left eye pairs with device_1 (= cam1, the left camera)
@@ -388,9 +388,24 @@ class MainActivity : Activity() {
                 }
             }
             if (o != 72) throw IllegalStateException("unexpected calibration shape ($o)")
-            XrealNative.nativeSetAlignment(params)
+            // factory IMU calibration: the raw stream is uncorrected, Basalt
+            // needs the biases (rad/s, m/s^2) and the noise densities. If
+            // this block is missing the vision-side calibration still loads.
+            try {
+                val imu = cfg.getJSONObject("IMU").getJSONObject("device_1")
+                for (arr in arrayOf(imu.getJSONArray("gyro_bias"),
+                                    imu.getJSONArray("accel_bias"),
+                                    imu.getJSONArray("imu_noises"))) {
+                    for (i in 0 until arr.length()) params[o++] = arr.getDouble(i).toFloat()
+                }
+                if (o != 82) throw IllegalStateException("shape $o")
+            } catch (e: Exception) {
+                android.util.Log.e("xrealcam", "IMU calibration block missing/odd: $e")
+                o = 72
+            }
+            XrealNative.nativeSetAlignment(params.copyOf(o))
             alignReady = true
-            android.util.Log.i("xrealcam", "world-aligned passthrough + rectification enabled")
+            android.util.Log.i("xrealcam", "alignment + rectification + IMU calibration enabled")
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "calibration parse failed: $e")
         }

@@ -35,9 +35,14 @@ typedef struct {
 int xr_slam_load(void);
 
 /* Create + start the tracker from the factory calibration (left = the eye
- * calib holding cam1, right = cam0). Returns 0 on success. */
+ * calib holding cam1, right = cam0). gyro_bias [rad/s] / accel_bias [m/s^2]
+ * are the factory bias vectors (the raw stream is uncorrected!) and noises
+ * = {gyro_noise, gyro_bias_rw, accel_noise, accel_bias_rw} from the blob's
+ * imu_noises; pass NULL to fall back to generic defaults.
+ * Returns 0 on success. */
 int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
-                  int variant);
+                  int variant, const float gyro_bias[3],
+                  const float accel_bias[3], const float noises[4]);
 
 void xr_slam_stop(void);
 void xr_slam_reset(void);
