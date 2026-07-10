@@ -245,6 +245,45 @@ ever demands it) voxel-hashed association à la small_gicp instead of
 trees. small_gicp (MIT) is also the natural library for the session→cloud
 registration step on the fog side.
 
+### Performance & localization research menu (beyond koide3, surveyed 2026-07)
+
+**Localization quality**
+- **XFeat (CVPR 2024)** — learned detector/descriptor with real-time
+  *sparse inference on CPU at VGA*, ~5× faster than comparable learned
+  features, far more robust than ORB-class descriptors on noisy/
+  low-contrast images (exactly our sensors). Adoption path: (1) session
+  keyframes only (~1–2 Hz → negligible cost, big reloc-quality win over
+  the built-in mini-ORB) via ONNX Runtime Mobile; (2) per-frame on the
+  Xperia's Hexagon NPU later. ONNX exports exist incl. LightGlue pairing.
+- **Photometric compensation** — the fisheye vignette violates the
+  brightness-constancy assumption of both Basalt's patch tracker and any
+  KLT at the image periphery (TUM's online photometric calibration line
+  of work). We can go beyond the shipped temporal-stable contrast
+  stretch: fit the vignette profile once (flat-scene or from the optics)
+  and divide it out of the tracker feed → more usable features toward
+  the edges, better geometry conditioning. Low effort, targets our
+  single worst image defect.
+- **OKVIS2 / OKVIS2-X** (BSD) — full VI-SLAM with *built-in* real-time
+  loop closure (pose-graph edges created by marginalizing common
+  observations, revived into landmarks on closure) + DBoW2
+  relocalization; 2-X adds GNSS (→ GP-02) and dense-depth support. This
+  is the integrated alternative if the session-layer route (Basalt +
+  pose-graph-lite) underdelivers: one port replaces three custom layers.
+  Cost: heavier than Basalt, new Android port effort.
+- **iBoW-LCD / OBIndex2** — incremental bag of binary words: no offline
+  vocabulary, dynamic-island temporal grouping. Overkill for the bounded
+  session map (brute force wins there) but the right shape for FOG-side
+  global place recognition over unbounded maps.
+
+**Compute**
+- NEON-batched Hamming with early-out for descriptor matching (only
+  when session scale demands it).
+- SIMD FAST (OpenCV-style) if keyframe rate ever grows.
+- XFeat→NPU (QNN/HTP) on SM8850: moves the whole descriptor stage off
+  the CPU.
+- GPU compute SGM for depth (below) remains the biggest single CPU
+  reclamation available.
+
 ### GPU depth (queued behind Basalt)
 
 The CPU SGM is NEON-vectorized and auto-decimates, but Basalt will want
