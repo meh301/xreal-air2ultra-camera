@@ -128,6 +128,11 @@ static struct {
     /* pose history for the timewarp: (ts, quaternion) at 1 kHz, 0.25 s deep */
     struct { uint64_t ts; float q[4]; } qhist[256];
     uint32_t qhist_n;
+
+    /* raw-stream (pre-remap) gyro bias capture: one log line to check the
+     * channel signs against the factory calibration numbers */
+    double raw_gbias[3];
+    int raw_gbias_n;
 } S = { .lock = PTHREAD_MUTEX_INITIALIZER,
         .imu_lock = PTHREAD_MUTEX_INITIALIZER,
         .slam_lock = PTHREAD_MUTEX_INITIALIZER,
@@ -736,6 +741,19 @@ static void *imu_worker(void *arg) {
         if (xr_imu_parse(buf, (size_t)got, &s) != 0) continue;
         stalls = 0;
 
+        /* forensics: average the RAW (pre-remap) gyro over the first second
+         * at rest and compare against the factory bias (0.85, -0.12, 0.53
+         * deg/s in the calibration frame). Current two-channel map predicts
+         * chip (-0.85, +0.53, -0.12); a flipped roll channel would predict
+         * chip (-0.85, -0.53, -0.12) — the middle sign is the arbiter. */
+        if (S.raw_gbias_n < 1000) {
+            for (int i = 0; i < 3; i++) S.raw_gbias[i] += s.gyro_dps[i];
+            if (++S.raw_gbias_n == 1000)
+                LOGI("raw gyro bias (chip frame, deg/s): (%+.3f, %+.3f, %+.3f)",
+                     S.raw_gbias[0] / 1000.0, S.raw_gbias[1] / 1000.0,
+                     S.raw_gbias[2] / 1000.0);
+        }
+
         /* Raw stream -> factory calibration frame (x right, y DOWN,
          * z FORWARD — the frame of imu_q_cam/imu_p_cam/biases).
          *
@@ -799,6 +817,8 @@ static void imu_start(void) {
     S.usb = uvc_get_libusb_handle(S.devh);
     S.imu_ep_in = S.imu_ep_out = 0;
     imu_started = 0;
+    S.raw_gbias[0] = S.raw_gbias[1] = S.raw_gbias[2] = 0.0;
+    S.raw_gbias_n = 0;
     libusb_set_auto_detach_kernel_driver(S.usb, 1);
     int rc = libusb_claim_interface(S.usb, XR_IMU_INTERFACE);
     if (rc != 0) {
