@@ -36,6 +36,22 @@ built without libjpeg since the stream is uncompressed.
 
 Or open `android/` in Android Studio and run — but run `fetch_deps` first.
 
+### Basalt VIO backend (research branch)
+
+The vSLAM backend is [Basalt (Monado fork)](https://gitlab.freedesktop.org/mateosss/basalt),
+compiled to `libbasalt.so` for arm64-v8a and loaded at runtime through the
+VIT interface. Build it once with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File android\build_basalt.ps1
+```
+
+which downloads its own toolchain (NDK r27c, CMake, Ninja → `~/Android/toolchains`,
+~4 GB), builds oneTBB/fmt/basalt against the OpenCV Android SDK, and drops
+the stripped libraries into `app/src/main/jniLibs/arm64-v8a/`. Rebuild the
+APK afterwards. Without this step the app still builds and runs — the pose
+view then says "Basalt not loaded" and a built-in tracker draws the points.
+
 ## Use
 
 1. Install the APK (`adb install app/build/outputs/apk/debug/app-debug.apk`).

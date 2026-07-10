@@ -167,7 +167,10 @@ class PoseMapView @JvmOverloads constructor(
         val dep = if (flags and 1 != 0) "%.0fms".format(depthMs) else "off"
         canvas.drawText("trk=%d  depth=%s  %s".format(tracked, dep, rect),
             12f, 30f, textPaint)
-        canvas.drawText("pose: AHRS orientation — position pending Basalt",
-            12f, 58f, dimTextPaint)
+        val backend = if (flags and 8 != 0)
+            "pose: Basalt VIO (6-DoF)  p=[%.2f %.2f %.2f]m".format(p[0], p[1], p[2])
+        else
+            "pose: AHRS orientation — Basalt not loaded"
+        canvas.drawText(backend, 12f, 58f, dimTextPaint)
     }
 }

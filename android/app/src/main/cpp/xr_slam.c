@@ -1,0 +1,335 @@
+/* xr_slam.c — see xr_slam.h. */
+#include "xr_slam.h"
+
+#include <dlfcn.h>
+#include <math.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <string.h>
+
+#include <android/log.h>
+
+#include "vit_interface.h"
+#include "xreal_core.h"
+
+#define TAG "xrealcam"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+static struct {
+    void *dl;
+    PFN_vit_api_get_version get_version;
+    PFN_vit_tracker_create create;
+    PFN_vit_tracker_destroy destroy;
+    PFN_vit_tracker_enable_extension enable_ext;
+    PFN_vit_tracker_start start;
+    PFN_vit_tracker_stop stop;
+    PFN_vit_tracker_reset reset;
+    PFN_vit_tracker_push_imu_sample push_imu;
+    PFN_vit_tracker_push_img_sample push_img;
+    PFN_vit_tracker_add_imu_calibration add_imu_calib;
+    PFN_vit_tracker_add_camera_calibration add_cam_calib;
+    PFN_vit_tracker_pop_pose pop_pose;
+    PFN_vit_pose_destroy pose_destroy;
+    PFN_vit_pose_get_data pose_data;
+    PFN_vit_pose_get_features pose_features;
+
+    vit_tracker_t *tracker;
+    atomic_int running;
+    float kb4[2][8];        /* per cam: fx fy cx cy k1..k4 (for unproject) */
+    float R_ic[2][9];       /* camera -> IMU rotation, row-major */
+    uint64_t last_pair_ts;
+} B;
+
+int xr_slam_load(void) {
+    if (B.dl) return 1;
+    B.dl = dlopen("libbasalt.so", RTLD_NOW | RTLD_LOCAL);
+    if (!B.dl) {
+        LOGI("Basalt backend not present (%s) — using built-in tracker", dlerror());
+        return 0;
+    }
+#define SYM(field, name) \
+    do { \
+        *(void **)&B.field = dlsym(B.dl, name); \
+        if (!B.field) { \
+            LOGE("Basalt: missing symbol %s", name); \
+            dlclose(B.dl); \
+            B.dl = NULL; \
+            return 0; \
+        } \
+    } while (0)
+    SYM(get_version, "vit_api_get_version");
+    SYM(create, "vit_tracker_create");
+    SYM(destroy, "vit_tracker_destroy");
+    SYM(enable_ext, "vit_tracker_enable_extension");
+    SYM(start, "vit_tracker_start");
+    SYM(stop, "vit_tracker_stop");
+    SYM(reset, "vit_tracker_reset");
+    SYM(push_imu, "vit_tracker_push_imu_sample");
+    SYM(push_img, "vit_tracker_push_img_sample");
+    SYM(add_imu_calib, "vit_tracker_add_imu_calibration");
+    SYM(add_cam_calib, "vit_tracker_add_camera_calibration");
+    SYM(pop_pose, "vit_tracker_pop_pose");
+    SYM(pose_destroy, "vit_pose_destroy");
+    SYM(pose_data, "vit_pose_get_data");
+    SYM(pose_features, "vit_pose_get_features");
+#undef SYM
+    uint32_t maj = 0, min = 0, pat = 0;
+    B.get_version(&maj, &min, &pat);
+    LOGI("Basalt VIT backend loaded, interface %u.%u.%u", maj, min, pat);
+    return 1;
+}
+
+/* fit the kb4 radial polynomial r/f = theta + k1 th^3 + k2 th^5 + k3 th^7
+ * + k4 th^9 to the fisheye624 theta-polynomial by linear least squares over
+ * the usable field of view (tangential/thin-prism terms are ~0 and dropped) */
+static void fit_kb4(const xr_eye_calib *c, float out[8]) {
+    double AtA[16] = { 0 }, Atb[4] = { 0 };
+    const int N = 64;
+    const double theta_max = 1.30;             /* ~74 deg half-angle */
+    for (int i = 1; i <= N; i++) {
+        double th = theta_max * i / N;
+        double t2 = th * th;
+        /* fisheye624 radial: th * (1 + kc0 t2 + ... + kc5 t2^6) */
+        double poly = 1.0 + t2 * (c->kc[0] + t2 * (c->kc[1] + t2 * (c->kc[2] +
+                      t2 * (c->kc[3] + t2 * (c->kc[4] + t2 * c->kc[5])))));
+        double r = th * poly;
+        double basis[4] = { th * t2, th * t2 * t2, th * t2 * t2 * t2,
+                            th * t2 * t2 * t2 * t2 };
+        double resid = r - th;
+        for (int a = 0; a < 4; a++) {
+            Atb[a] += basis[a] * resid;
+            for (int b = 0; b < 4; b++) AtA[a * 4 + b] += basis[a] * basis[b];
+        }
+    }
+    /* solve the 4x4 normal equations (Gauss elimination, well-conditioned) */
+    double k[4] = { 0 };
+    for (int col = 0; col < 4; col++) {
+        int piv = col;
+        for (int r = col + 1; r < 4; r++)
+            if (fabs(AtA[r * 4 + col]) > fabs(AtA[piv * 4 + col])) piv = r;
+        for (int cc2 = 0; cc2 < 4; cc2++) {
+            double t = AtA[col * 4 + cc2];
+            AtA[col * 4 + cc2] = AtA[piv * 4 + cc2];
+            AtA[piv * 4 + cc2] = t;
+        }
+        double tb = Atb[col]; Atb[col] = Atb[piv]; Atb[piv] = tb;
+        for (int r = col + 1; r < 4; r++) {
+            double f = AtA[r * 4 + col] / AtA[col * 4 + col];
+            for (int cc2 = col; cc2 < 4; cc2++) AtA[r * 4 + cc2] -= f * AtA[col * 4 + cc2];
+            Atb[r] -= f * Atb[col];
+        }
+    }
+    for (int r = 3; r >= 0; r--) {
+        double s = Atb[r];
+        for (int cc2 = r + 1; cc2 < 4; cc2++) s -= AtA[r * 4 + cc2] * k[cc2];
+        k[r] = s / AtA[r * 4 + r];
+    }
+    out[0] = c->fc[0]; out[1] = c->fc[1];
+    out[2] = c->cc[0]; out[3] = c->cc[1];
+    for (int i = 0; i < 4; i++) out[4 + i] = (float)k[i];
+}
+
+/* Hamilton rotation matrix from xyzw with optional conjugation — must match
+ * quat_to_rot in xreal_align.c (R maps camera -> IMU for variant 2). */
+static void quat_to_rot_xyzw(const float q[4], int conj, float R[9]) {
+    float x = q[0], y = q[1], z = q[2], w = q[3];
+    float n = sqrtf(x * x + y * y + z * z + w * w);
+    x /= n; y /= n; z /= n; w /= n;
+    if (conj) { x = -x; y = -y; z = -z; }
+    R[0] = 1 - 2 * (y * y + z * z); R[1] = 2 * (x * y - w * z); R[2] = 2 * (x * z + w * y);
+    R[3] = 2 * (x * y + w * z); R[4] = 1 - 2 * (x * x + z * z); R[5] = 2 * (y * z - w * x);
+    R[6] = 2 * (x * z - w * y); R[7] = 2 * (y * z + w * x); R[8] = 1 - 2 * (x * x + y * y);
+}
+
+static void cam_calibration(const xr_eye_calib *c, int variant, uint32_t index,
+                            vit_camera_calibration_t *out) {
+    memset(out, 0, sizeof *out);
+    out->camera_index = index;
+    out->width = XR_OW;
+    out->height = XR_OH;
+    out->frequency = 30.0;
+    fit_kb4(c, B.kb4[index]);
+    out->fx = B.kb4[index][0];
+    out->fy = B.kb4[index][1];
+    out->cx = B.kb4[index][2];
+    out->cy = B.kb4[index][3];
+    out->model = VIT_CAMERA_DISTORTION_KB4;
+    out->distortion_count = 4;
+    for (int i = 0; i < 4; i++) out->distortion[i] = B.kb4[index][4 + i];
+
+    /* T_imu_cam: R maps camera -> IMU (xr_align_project uses its transpose
+     * to go IMU -> camera), translation is the camera position in the IMU
+     * frame straight from imu_p_cam */
+    float R[9];
+    quat_to_rot_xyzw(c->q_cam, (variant >> 1) & 1, R);
+    memcpy(B.R_ic[index], R, sizeof R);
+    const double t[3] = { c->p_cam[0], c->p_cam[1], c->p_cam[2] };
+    for (int r = 0; r < 3; r++) {
+        for (int cc2 = 0; cc2 < 3; cc2++) out->transform[r * 4 + cc2] = R[r * 3 + cc2];
+        out->transform[r * 4 + 3] = t[r];
+    }
+    out->transform[15] = 1.0;
+}
+
+int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
+                  int variant) {
+    if (!xr_slam_load()) return -1;
+    if (B.tracker) return 0;
+
+    vit_config_t cfg = { .file = NULL, .cam_count = 2, .imu_count = 1,
+                         .show_ui = false };
+    if (B.create(&cfg, &B.tracker) != VIT_SUCCESS || !B.tracker) {
+        LOGE("Basalt: tracker create failed");
+        B.tracker = NULL;
+        return -1;
+    }
+    B.enable_ext(B.tracker, VIT_TRACKER_EXTENSION_POSE_FEATURES, true);
+
+    /* cameras: VIT index 0 = left */
+    vit_camera_calibration_t cc;
+    cam_calibration(left, variant, 0, &cc);
+    B.add_cam_calib(B.tracker, &cc);
+    cam_calibration(right, variant, 1, &cc);
+    B.add_cam_calib(B.tracker, &cc);
+    LOGI("Basalt: kb4 left fx=%.1f k=[%.4f %.4f %.4f %.4f]",
+         B.kb4[0][0], B.kb4[0][4], B.kb4[0][5], B.kb4[0][6], B.kb4[0][7]);
+
+    /* IMU: identity intrinsics + consumer-grade noise densities (Basalt
+     * estimates the biases online; the factory blob's exact densities can
+     * be wired through later if drift says it matters) */
+    vit_imu_calibration_t ic;
+    memset(&ic, 0, sizeof ic);
+    ic.imu_index = 0;
+    ic.frequency = 1000.0;
+    for (int i = 0; i < 3; i++) {
+        ic.accel.transform[i * 3 + i] = 1.0;
+        ic.gyro.transform[i * 3 + i] = 1.0;
+        ic.accel.noise_std[i] = 0.016;      /* m/s^2 / sqrt(Hz) */
+        ic.accel.bias_std[i] = 0.001;
+        ic.gyro.noise_std[i] = 0.000282;    /* rad/s / sqrt(Hz) */
+        ic.gyro.bias_std[i] = 0.0001;
+    }
+    B.add_imu_calib(B.tracker, &ic);
+
+    if (B.start(B.tracker) != VIT_SUCCESS) {
+        LOGE("Basalt: tracker start failed");
+        B.destroy(B.tracker);
+        B.tracker = NULL;
+        return -1;
+    }
+    atomic_store(&B.running, 1);
+    LOGI("Basalt VIO started (2 cams, 1 kHz IMU)");
+    return 0;
+}
+
+void xr_slam_stop(void) {
+    if (!B.tracker) return;
+    atomic_store(&B.running, 0);
+    B.stop(B.tracker);
+    B.destroy(B.tracker);
+    B.tracker = NULL;
+}
+
+void xr_slam_reset(void) {
+    if (B.tracker && atomic_load(&B.running)) B.reset(B.tracker);
+}
+
+int xr_slam_running(void) {
+    return atomic_load(&B.running);
+}
+
+void xr_slam_push_imu(uint64_t ts_ns, const float gyro_dps[3],
+                      const float accel_g[3]) {
+    if (!atomic_load(&B.running)) return;
+    const float D2R = (float)M_PI / 180.0f;
+    const float G = 9.80665f;
+    vit_imu_sample_t s = {
+        .timestamp = (int64_t)ts_ns,
+        .ax = accel_g[0] * G, .ay = accel_g[1] * G, .az = accel_g[2] * G,
+        .wx = gyro_dps[0] * D2R, .wy = gyro_dps[1] * D2R, .wz = gyro_dps[2] * D2R,
+    };
+    B.push_imu(B.tracker, &s);
+}
+
+void xr_slam_push_pair(const uint8_t *left, const uint8_t *right,
+                       uint64_t ts_ns) {
+    if (!atomic_load(&B.running) || ts_ns == 0) return;
+    if (ts_ns <= B.last_pair_ts) return;       /* must increase monotonically */
+    B.last_pair_ts = ts_ns;
+    vit_img_sample_t s = {
+        .cam_index = 0,
+        .timestamp = (int64_t)ts_ns,
+        .data = (uint8_t *)left,
+        .width = XR_OW, .height = XR_OH,
+        .stride = XR_OW, .size = XR_OW * XR_OH,
+        .format = VIT_IMAGE_FORMAT_L8,
+        .mask_count = 0, .masks = NULL,
+    };
+    B.push_img(B.tracker, &s);                 /* copies synchronously */
+    s.cam_index = 1;
+    s.data = (uint8_t *)right;
+    B.push_img(B.tracker, &s);
+}
+
+/* kb4 unprojection: solve r(theta) = theta + k1 th^3 + ... = r_obs by
+ * Newton iteration, then lift to a unit-ish ray */
+static void kb4_unproject(const float k[8], float u, float v, float ray[3]) {
+    float mx = (u - k[2]) / k[0];
+    float my = (v - k[3]) / k[1];
+    float r = sqrtf(mx * mx + my * my);
+    float th = r;                              /* good initial guess */
+    for (int i = 0; i < 5; i++) {
+        float t2 = th * th;
+        float f = th * (1 + t2 * (k[4] + t2 * (k[5] + t2 * (k[6] + t2 * k[7])))) - r;
+        float df = 1 + t2 * (3 * k[4] + t2 * (5 * k[5] + t2 * (7 * k[6] + t2 * 9 * k[7])));
+        th -= f / df;
+    }
+    float s = r > 1e-9f ? sinf(th) / r : 0.0f;
+    ray[0] = mx * s;
+    ray[1] = my * s;
+    ray[2] = cosf(th);
+}
+
+int xr_slam_poll(xr_slam_state *out) {
+    if (!atomic_load(&B.running)) return 0;
+    vit_pose_t *newest = NULL;
+    for (;;) {
+        vit_pose_t *p = NULL;
+        if (B.pop_pose(B.tracker, &p) != VIT_SUCCESS || !p) break;
+        if (newest) B.pose_destroy(newest);
+        newest = p;
+    }
+    if (!newest) return 0;
+
+    vit_pose_data_t d;
+    if (B.pose_data(newest, &d) != VIT_SUCCESS) {
+        B.pose_destroy(newest);
+        return 0;
+    }
+    out->ts = (uint64_t)d.timestamp;
+    out->q[0] = d.ow; out->q[1] = d.ox; out->q[2] = d.oy; out->q[3] = d.oz;
+    out->p[0] = d.px; out->p[1] = d.py; out->p[2] = d.pz;
+    out->v[0] = d.vx; out->v[1] = d.vy; out->v[2] = d.vz;
+
+    out->n_features = 0;
+    vit_pose_features_t feats;
+    if (B.pose_features(newest, 0, &feats) == VIT_SUCCESS) {
+        int n = (int)feats.count;
+        if (n > XR_SLAM_MAX_FEATURES) n = XR_SLAM_MAX_FEATURES;
+        for (int i = 0; i < n; i++) {
+            float u = feats.features[i].u, v = feats.features[i].v;
+            out->feat_uv[i][0] = u;
+            out->feat_uv[i][1] = v;
+            float rc[3];
+            kb4_unproject(B.kb4[0], u, v, rc);
+            const float *R = B.R_ic[0];
+            out->feat_ray[i][0] = R[0] * rc[0] + R[1] * rc[1] + R[2] * rc[2];
+            out->feat_ray[i][1] = R[3] * rc[0] + R[4] * rc[1] + R[5] * rc[2];
+            out->feat_ray[i][2] = R[6] * rc[0] + R[7] * rc[1] + R[8] * rc[2];
+        }
+        out->n_features = n;
+    }
+    B.pose_destroy(newest);
+    return 1;
+}

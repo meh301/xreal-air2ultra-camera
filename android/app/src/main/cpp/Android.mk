@@ -41,13 +41,16 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 LOCAL_PATH := $(XREAL_LOCAL_PATH)
 LOCAL_MODULE := xrealcam
-LOCAL_SRC_FILES := xr_stereo.c xr_track.c xreal_align.c xreal_core.c \
-    xreal_gles.c xreal_imu.c xreal_jni.c
+LOCAL_SRC_FILES := xr_slam.c xr_stereo.c xr_track.c xreal_align.c \
+    xreal_core.c xreal_gles.c xreal_imu.c xreal_jni.c
 LOCAL_STATIC_LIBRARIES := uvc
 LOCAL_SHARED_LIBRARIES := libusb1.0
+# vit_interface.h comes from the basalt clone (fetch_deps / build_basalt);
+# libbasalt.so itself is dlopen'd at runtime, never linked
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/third_party/basalt/thirdparty/vit
 LOCAL_CFLAGS := -O3 -std=c11 -Wall
 LOCAL_ARM_NEON := true      # armeabi-v7a; arm64 has NEON unconditionally
-LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv2
+LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv2 -ldl
 include $(BUILD_SHARED_LIBRARY)
 
 # ---- libusb1.0.so (upstream-maintained module definition; include last, it

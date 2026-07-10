@@ -45,6 +45,8 @@ android/app/.cxx/
 android/app/src/main/cpp/third_party/
 android/app/src/main/obj/
 android/app/src/main/libs/
+# prebuilt Basalt + deps (regenerate with android/build_basalt.ps1)
+android/app/src/main/jniLibs/
 *.iml
 
 # Misc

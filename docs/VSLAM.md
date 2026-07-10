@@ -162,9 +162,32 @@ exists and runs, with a lightweight stand-in front end where Basalt will sit:
 | Landmark overlay on the passthrough (GL_POINTS pass riding the same timewarp dR as the image) | `xreal_gles.c`, `xr_align_ray_to_display()` | ✓ |
 | AR-only glasses mode (hide the camera image, keep the point overlay over the real world) | `xr_gles_set_show_camera`, Cam button | ✓ |
 | Phone UI: tracking pane \| depth pane, 3D pose/map view, buttons Rst/Pts/Dep/SBS/Snap | `MainActivity.kt`, `PoseMapView.kt` | ✓ orientation from AHRS; position zeros until Basalt |
-| Pose export | `nativeGrabPose` (q, p, tracked, depth ms, flags) | ✓ same ABI Basalt will fill |
-| Basalt backend | — | **next** (plan below) |
+| Pose export | `nativeGrabPose` (q, p, tracked, depth ms, flags; bit3 = Basalt live) | ✓ |
+| **Basalt backend** — the Monado fork built for Android (arm64), loaded at runtime via the VIT C interface | `xr_slam.c`, `android/build_basalt.ps1`, jniLibs: `libbasalt.so` + `libtbb.so` + `libc++_shared.so` | ✓ **live**: 6-DoF pose + velocity, per-camera features (u,v,depth) drive the overlay; fisheye624→kb4 refit on the fly; without the lib the app falls back to the built-in tracker |
 | GNSS (GP-02), fiducials, WebSocket client | — | deferred per plan |
+
+### Basalt wiring notes
+
+- `android/build_basalt.ps1` reproduces the whole native build: NDK r27c +
+  CMake/Ninja (downloaded to `~/Android/toolchains`), oneTBB 2021.13
+  (tbbmalloc off — its version scripts don't link on Android), fmt 9.1,
+  OpenCV 4.10 Android SDK (static), then basalt with
+  `BASALT_BUILD_SHARED_LIBRARY_ONLY=ON`, float-only instantiation,
+  `CXX_MARCH=armv8.2-a+fp16+dotprod` (Snapdragon 888 floor). Output ~2.8 MB
+  stripped. Local patch applied by the script: `find_package(TBB CONFIG)`
+  (basalt's bundled FindTBB predates oneTBB) and cereal's Boost-dependent
+  perf tests skipped via `-DSKIP_PERFORMANCE_COMPARISON=ON`.
+- Runtime flow: `nativeSetAlignment` → `xr_slam_start` (dlopen, KB4 refit of
+  the radial θ-polynomial by linear least squares — exact, tangential terms
+  ~0 — plus `T_imu_cam` from `imu_q_cam`/`imu_p_cam`, IMU noise defaults) →
+  UVC thread pushes L8 pairs (left, right; exposure ns), IMU thread pushes
+  1 kHz rad/s + m/s² → SLAM worker polls poses+features at 30 Hz.
+- IMU noise densities are EuRoC-class defaults for now; biases are
+  estimated online. If drift says it matters, wire the factory blob's
+  `imu` section through `vit_imu_calibration`.
+- The AHRS stays as the timewarp's 1 kHz pose source; Basalt is the map/
+  pose truth. Fusing Basalt orientation into the warp is a later
+  refinement (needs care at 30 Hz vs 1 kHz).
 
 ### Basalt build plan (next session)
 
