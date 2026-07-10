@@ -47,6 +47,9 @@ object XrealNative {
      */
     external fun nativeSetSlamConfig(path: String)
 
+    /** Path of the staged XFeat ONNX model (session-map descriptors). */
+    external fun nativeSetXfeatModel(path: String)
+
     /**
      * Copy the newest pose/SLAM state into [buf] (direct ByteBuffer >= 40
      * bytes, native order): f32 quat_wxyz[4], f32 pos_m[3], i32 tracked

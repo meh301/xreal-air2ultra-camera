@@ -2,14 +2,16 @@
  *
  * GLIM-style module split (odometry / local map / global map): Basalt is
  * the drifting odometry and is never touched; this layer keeps a bounded
- * session map — motion-gated keyframes with ORB-style descriptors and the
- * landmark geometry — pruned by a history timeout so memory stays flat.
- * It detects loop/relocalization candidates by descriptor matching; the
- * geometric verification and the resulting T_session<-odom correction are
- * the next stage. The fog side consumes the same keyframes long-term
- * (docs/VSLAM.md); session-to-cloud matching happens against that store.
+ * session map — motion-gated keyframes with descriptors and the landmark
+ * geometry — pruned by a history timeout so memory stays flat. Loop /
+ * relocalization candidates come from descriptor matching; the geometric
+ * verification and the T_session<-odom correction are the next stage.
  *
- * Single-threaded: everything is called from the SLAM worker.
+ * Descriptors: XFeat (ONNX Runtime, when the model is staged — CVPR'24
+ * learned features, far more robust than ORB on these grainy sensors) or
+ * the built-in mini-ORB fallback. All heavy work (inference, matching)
+ * runs on a dedicated low-priority map thread; the SLAM worker only
+ * offers keyframes through a non-blocking mailbox.
  */
 #ifndef XR_MAP_H
 #define XR_MAP_H
@@ -21,19 +23,21 @@ enum {
     XR_MAP_KP_PER_KF = 200,    /* keypoints/descriptors per keyframe */
 };
 
+/* Stage the XFeat ONNX model (app files dir); call before streaming.
+ * Without it the mini-ORB fallback is used. */
+void xr_map_set_model(const char *onnx_path);
+
 void xr_map_reset(void);
 
-/* Prune keyframes older than timeout_ns (the session "history timeout"). */
-void xr_map_tick(uint64_t now_ts_ns, uint64_t timeout_ns);
-
-/* Offer a keyframe: stored when moved >= 0.3 m or turned >= 15 deg since
- * the last stored one. img = descrambled left camera (480x640, cleaned).
- * Landmarks (odom-frame xyz + left-cam uv + stable ids) ride along for
- * the future PnP verification. Returns 1 when a keyframe was stored. */
-int xr_map_maybe_keyframe(const float q[4], const float p[3], uint64_t ts_ns,
-                          const uint8_t *img,
-                          const int32_t *lm_id, const float (*lm_xyz)[3],
-                          const float (*lm_uv)[2], int n_lm);
+/* Offer a keyframe from the SLAM worker (non-blocking; drops when the
+ * map thread is busy). Stored when moved >= 0.3 m or turned >= 15 deg
+ * since the last stored keyframe. img = the processed left frame
+ * (480x640, same feed Basalt sees). Landmarks (odom-frame xyz + left-cam
+ * uv + stable ids) ride along for the future PnP verification. */
+void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
+                  const uint8_t *img,
+                  const int32_t *lm_id, const float (*lm_xyz)[3],
+                  const float (*lm_uv)[2], int n_lm);
 
 int xr_map_num_keyframes(void);      /* thread-safe (atomic) */
 

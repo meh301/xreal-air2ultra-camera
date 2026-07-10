@@ -442,6 +442,16 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "Basalt config staging failed: $e")
         }
+        try {
+            val model = java.io.File(filesDir, "xfeat.onnx")
+            assets.open("xfeat.onnx").use { src ->
+                model.outputStream().use { dst -> src.copyTo(dst) }
+            }
+            XrealNative.nativeSetXfeatModel(model.absolutePath)
+            android.util.Log.i("xrealcam", "XFeat model staged: ${model.absolutePath}")
+        } catch (e: Exception) {
+            android.util.Log.e("xrealcam", "XFeat staging failed (mini-ORB fallback): $e")
+        }
     }
 
     /** Parse the on-device factory calibration and enable the world-aligned

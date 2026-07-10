@@ -310,14 +310,74 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
      * flickers), then an equalized copy for humans */
     xr_clean(&S.cleaners[cam], dscr, S.clean_raw[cam], 0);
     xr_equalize(S.clean_raw[cam], S.clean[cam], XR_OW * XR_OH);
-    /* Basalt feed: FLICKER-FREE contrast boost. The raw cleaned frames are
-     * low-contrast and grainy, so the FAST detector starves; a linear
-     * stretch between slowly-EMA'd 2%/98% percentiles lifts contrast
-     * without the frame-to-frame brightness jumps of per-frame HE. */
+    /* Basalt feed conditioning, two flicker-free stages:
+     *
+     * 1. VIGNETTE COMPENSATION — the fisheye's radial falloff violates the
+     *    brightness-constancy assumption of Basalt's patch tracker at the
+     *    periphery (TUM photometric-calibration lineage). The profile is
+     *    estimated online: EMA'd mean intensity per radial bin around the
+     *    calibrated principal point; with head motion the scene averages
+     *    out and the stable radial ratio IS the vignette. Gain capped 3.5x.
+     * 2. CONTRAST STRETCH between slowly-EMA'd 2%/98% percentiles — lifts
+     *    the grainy low-contrast frames for the FAST detector without
+     *    per-frame equalization's brightness flicker. */
     {
+        static uint8_t rbin[2][XR_OW * XR_OH];   /* radial bin per pixel */
+        static int rbin_ready[2];
+        static float bin_mean[2][64];
+        static int bin_warm[2];
+        static uint16_t gainq[2][64];            /* gain * 256 */
+        static int gain_ready[2];
+        const uint8_t *in = S.clean_raw[cam];
+
+        if (!rbin_ready[cam] && atomic_load(&S.align_have)) {
+            /* eye_calib[0] holds the LEFT camera (= cam1) */
+            const float *cc = S.eye_calib[cam == 1 ? 0 : 1].cc;
+            for (int y = 0; y < XR_OH; y++)
+                for (int x = 0; x < XR_OW; x++) {
+                    float r = hypotf((float)x - cc[0], (float)y - cc[1]);
+                    int b = (int)(r * (63.0f / 400.0f));
+                    rbin[cam][y * XR_OW + x] = (uint8_t)(b > 63 ? 63 : b);
+                }
+            for (int b = 0; b < 64; b++) gainq[cam][b] = 256;
+            rbin_ready[cam] = 1;
+        }
+        if (rbin_ready[cam]) {
+            float sum[64] = { 0 };
+            int cnt[64] = { 0 };
+            for (int i = 0; i < XR_OW * XR_OH; i += 4) {
+                sum[rbin[cam][i]] += in[i];
+                cnt[rbin[cam][i]]++;
+            }
+            float a = bin_warm[cam] < 60 ? 0.15f : 0.02f;
+            for (int b = 0; b < 64; b++) {
+                if (cnt[b] < 32) continue;
+                float m = sum[b] / (float)cnt[b];
+                bin_mean[cam][b] = bin_mean[cam][b] == 0.0f
+                                       ? m
+                                       : bin_mean[cam][b] + a * (m - bin_mean[cam][b]);
+            }
+            if (++bin_warm[cam] >= 60) {
+                float ref = 0;
+                int nref = 0;
+                for (int b = 2; b <= 6; b++)
+                    if (bin_mean[cam][b] > 1) { ref += bin_mean[cam][b]; nref++; }
+                if (nref) {
+                    ref /= (float)nref;
+                    for (int b = 0; b < 64; b++) {
+                        float g = bin_mean[cam][b] > 4.0f
+                                      ? ref / bin_mean[cam][b] : 1.0f;
+                        if (g < 1.0f) g = 1.0f;
+                        if (g > 3.5f) g = 3.5f;
+                        gainq[cam][b] = (uint16_t)(g * 256.0f);
+                    }
+                    gain_ready[cam] = 1;
+                }
+            }
+        }
+
         static float lo_f[2], hi_f[2];
         static int have_stretch[2];
-        const uint8_t *in = S.clean_raw[cam];
         int32_t hist[256] = { 0 };
         for (int i = 0; i < XR_OW * XR_OH; i += 2) hist[in[i]]++;
         int32_t tail = (XR_OW * XR_OH / 2) / 50;      /* 2% each side */
@@ -340,7 +400,16 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
             lut[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
         }
         uint8_t *out = SLAM_FEED[cam];
-        for (int i = 0; i < XR_OW * XR_OH; i++) out[i] = lut[in[i]];
+        if (gain_ready[cam]) {
+            const uint8_t *rb = rbin[cam];
+            const uint16_t *gq = gainq[cam];
+            for (int i = 0; i < XR_OW * XR_OH; i++) {
+                uint32_t v = ((uint32_t)in[i] * gq[rb[i]]) >> 8;
+                out[i] = lut[v > 255 ? 255 : v];
+            }
+        } else {
+            for (int i = 0; i < XR_OW * XR_OH; i++) out[i] = lut[in[i]];
+        }
     }
     S.have[cam] = 1;
 
@@ -565,12 +634,11 @@ static void *slam_worker(void *arg) {
                 xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0,
                                    st.ts);
 
-                /* session-map layer: motion-gated keyframes with a history
-                 * timeout (10 min); logs loop/reloc candidates */
-                xr_map_tick(st.ts, 600ull * 1000000000ull);
-                xr_map_maybe_keyframe(st.q, st.p, st.ts, S.slam_in[0],
-                                      st.lm_id, st.lm_xyz, st.lm_uv,
-                                      st.n_landmarks);
+                /* session-map layer: motion-gated keyframes on the same
+                 * conditioned feed Basalt sees; heavy work (XFeat/ORB +
+                 * matching) runs on the dedicated map thread */
+                xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
+                             st.lm_id, st.lm_xyz, st.lm_uv, st.n_landmarks);
             }
         } else if (!xr_slam_load()) {
             /* fallback front end (ONLY when libbasalt.so is absent, e.g.
@@ -1257,6 +1325,16 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetSlamConfig(JNIEnv *env, jclass
     (void)cls;
     const char *p = path ? (*env)->GetStringUTFChars(env, path, NULL) : NULL;
     xr_slam_set_config(p);
+    if (p) (*env)->ReleaseStringUTFChars(env, path, p);
+}
+
+/* Path of the staged XFeat ONNX model for session-map descriptors. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetXfeatModel(JNIEnv *env, jclass cls,
+                                                             jstring path) {
+    (void)cls;
+    const char *p = path ? (*env)->GetStringUTFChars(env, path, NULL) : NULL;
+    xr_map_set_model(p);
     if (p) (*env)->ReleaseStringUTFChars(env, path, p);
 }
 

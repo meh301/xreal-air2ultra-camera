@@ -41,5 +41,10 @@ android {
     }
 }
 
-// no dependencies block: the app deliberately uses only framework APIs +
-// the Kotlin stdlib (added by the Kotlin plugin)
+dependencies {
+    // ONNX Runtime: packages libonnxruntime.so, which native code dlopens
+    // to run the XFeat session-map descriptors (see cpp/xr_xfeat.c). The
+    // Java API is unused. Otherwise the app sticks to framework APIs +
+    // the Kotlin stdlib (added by the Kotlin plugin).
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
+}
