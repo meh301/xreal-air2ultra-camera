@@ -41,6 +41,7 @@ static struct {
     atomic_int imu_pushed;  /* samples since start: frames wait for history */
     float kb4[2][8];        /* per cam: fx fy cx cy k1..k4 (for unproject) */
     float R_ic[2][9];       /* camera -> IMU rotation, row-major */
+    float p_ic[2][3];       /* camera position in the IMU frame */
     uint64_t last_pair_ts;
     char config_path[512];
 } B;
@@ -216,6 +217,7 @@ static void cam_calibration(const xr_eye_calib *c, int variant, uint32_t index,
     float R[9];
     quat_to_rot_xyzw(c->q_cam, (variant >> 1) & 1, R);
     memcpy(B.R_ic[index], R, sizeof R);
+    memcpy(B.p_ic[index], c->p_cam, sizeof B.p_ic[index]);
     const double t[3] = { c->p_cam[0], c->p_cam[1], c->p_cam[2] };
     for (int r = 0; r < 3; r++) {
         for (int cc2 = 0; cc2 < 3; cc2++) out->transform[r * 4 + cc2] = R[r * 3 + cc2];
@@ -384,23 +386,61 @@ int xr_slam_poll(xr_slam_state *out) {
     out->p[0] = d.px; out->p[1] = d.py; out->p[2] = d.pz;
     out->v[0] = d.vx; out->v[1] = d.vy; out->v[2] = d.vz;
 
+    /* body -> world rotation of this pose, for landmark reconstruction */
+    float Rw[9];
+    {
+        float x = out->q[1], y = out->q[2], z = out->q[3], w = out->q[0];
+        Rw[0] = 1 - 2 * (y * y + z * z); Rw[1] = 2 * (x * y - w * z); Rw[2] = 2 * (x * z + w * y);
+        Rw[3] = 2 * (x * y + w * z); Rw[4] = 1 - 2 * (x * x + z * z); Rw[5] = 2 * (y * z - w * x);
+        Rw[6] = 2 * (x * z - w * y); Rw[7] = 2 * (y * z + w * x); Rw[8] = 1 - 2 * (x * x + y * y);
+    }
+
     out->n_features = 0;
+    out->n_landmarks = 0;
     vit_pose_features_t feats;
     if (B.pose_features(newest, 0, &feats) == VIT_SUCCESS) {
         int n = (int)feats.count;
         if (n > XR_SLAM_MAX_FEATURES) n = XR_SLAM_MAX_FEATURES;
         for (int i = 0; i < n; i++) {
             float u = feats.features[i].u, v = feats.features[i].v;
+            float invd = feats.features[i].depth;      /* INVERSE distance */
             out->feat_uv[i][0] = u;
             out->feat_uv[i][1] = v;
             float rc[3];
-            kb4_unproject(B.kb4[0], u, v, rc);
+            kb4_unproject(B.kb4[0], u, v, rc);         /* unit ray, camera */
             const float *R = B.R_ic[0];
-            out->feat_ray[i][0] = R[0] * rc[0] + R[1] * rc[1] + R[2] * rc[2];
-            out->feat_ray[i][1] = R[3] * rc[0] + R[4] * rc[1] + R[5] * rc[2];
-            out->feat_ray[i][2] = R[6] * rc[0] + R[7] * rc[1] + R[8] * rc[2];
+            float ri[3] = {                            /* ray in IMU frame */
+                R[0] * rc[0] + R[1] * rc[1] + R[2] * rc[2],
+                R[3] * rc[0] + R[4] * rc[1] + R[5] * rc[2],
+                R[6] * rc[0] + R[7] * rc[1] + R[8] * rc[2],
+            };
+            memcpy(out->feat_ray[i], ri, sizeof ri);
+
+            /* landmark: camera point at distance 1/invd -> IMU -> world */
+            if (invd > 0.02f && invd < 20.0f) {        /* 5 cm .. 50 m */
+                float dist = 1.0f / invd;
+                float pi[3] = { ri[0] * dist + B.p_ic[0][0],
+                                ri[1] * dist + B.p_ic[0][1],
+                                ri[2] * dist + B.p_ic[0][2] };
+                int k = out->n_landmarks;
+                out->lm_id[k] = (int32_t)feats.features[i].id;
+                out->lm_xyz[k][0] = Rw[0] * pi[0] + Rw[1] * pi[1] + Rw[2] * pi[2] + out->p[0];
+                out->lm_xyz[k][1] = Rw[3] * pi[0] + Rw[4] * pi[1] + Rw[5] * pi[2] + out->p[1];
+                out->lm_xyz[k][2] = Rw[6] * pi[0] + Rw[7] * pi[1] + Rw[8] * pi[2] + out->p[2];
+                out->n_landmarks = k + 1;
+            }
         }
         out->n_features = n;
+    }
+    out->n_features_r = 0;
+    if (B.pose_features(newest, 1, &feats) == VIT_SUCCESS) {
+        int n = (int)feats.count;
+        if (n > XR_SLAM_MAX_FEATURES) n = XR_SLAM_MAX_FEATURES;
+        for (int i = 0; i < n; i++) {
+            out->feat_uv_r[i][0] = feats.features[i].u;
+            out->feat_uv_r[i][1] = feats.features[i].v;
+        }
+        out->n_features_r = n;
     }
     B.pose_destroy(newest);
     return 1;

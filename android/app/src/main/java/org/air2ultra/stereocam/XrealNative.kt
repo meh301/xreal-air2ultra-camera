@@ -57,6 +57,13 @@ object XrealNative {
     external fun nativeGrabPose(buf: ByteBuffer): Boolean
 
     /**
+     * Copy the accumulated landmark map (Basalt's estimator landmarks,
+     * world xyz) into [buf] (direct ByteBuffer, native order): u32 count,
+     * then count x 3 f32. Returns the count.
+     */
+    external fun nativeGrabMap(buf: ByteBuffer): Int
+
+    /**
      * true: glasses in per-eye stereo display mode with the calibrated
      * world-aligned warp; false: mirror display mode showing the plain
      * side-by-side framebuffer. Switches the display over the MCU channel.

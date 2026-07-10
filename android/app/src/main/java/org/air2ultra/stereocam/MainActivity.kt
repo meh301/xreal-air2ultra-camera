@@ -121,6 +121,9 @@ class MainActivity : Activity() {
         ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
     private val imuG = FloatArray(3)
     private val imuA = FloatArray(3)
+    private val mapBuffer: ByteBuffer =            // 4096 landmarks max
+        ByteBuffer.allocateDirect(4 + 4096 * 12).order(ByteOrder.nativeOrder())
+    private val mapPoints = FloatArray(4096 * 3)
     private val handler = Handler(Looper.getMainLooper())
 
     private val pollFrame = object : Runnable {
@@ -145,6 +148,14 @@ class MainActivity : Activity() {
                 for (i in 0..2) imuG[i] = imuBuffer.float
                 for (i in 0..2) imuA[i] = imuBuffer.float
                 poseMap.setImuDebug(imuA, imuG)
+            }
+
+            // accumulated landmark cloud for the 3D map view
+            val mapN = XrealNative.nativeGrabMap(mapBuffer)
+            if (mapN >= 0) {
+                mapBuffer.position(4)
+                for (i in 0 until mapN * 3) mapPoints[i] = mapBuffer.float
+                poseMap.setCloud(mapPoints, mapN)
             }
 
             // pose/SLAM state feeds both the 3D map and the status line

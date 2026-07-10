@@ -25,9 +25,16 @@ typedef struct {
     float q[4];             /* orientation, IMU in world, Hamilton wxyz */
     float p[3];             /* position [m], world */
     float v[3];             /* linear velocity [m/s] */
-    int n_features;         /* features tracked in cam0 (left) */
+    int n_features;         /* landmarks projected into cam0 (left) */
     float feat_uv[XR_SLAM_MAX_FEATURES][2];   /* left-camera pixels */
     float feat_ray[XR_SLAM_MAX_FEATURES][3];  /* IMU-frame rays */
+    int n_features_r;       /* landmarks projected into cam1 (right) */
+    float feat_uv_r[XR_SLAM_MAX_FEATURES][2]; /* right-camera pixels */
+    /* triangulated landmarks in WORLD coordinates (from the estimator's
+     * inverse depths) with their stable ids — the raw material of a map */
+    int n_landmarks;
+    int32_t lm_id[XR_SLAM_MAX_FEATURES];
+    float lm_xyz[XR_SLAM_MAX_FEATURES][3];
 } xr_slam_state;
 
 /* dlopen libbasalt.so and resolve the VIT symbols; idempotent.

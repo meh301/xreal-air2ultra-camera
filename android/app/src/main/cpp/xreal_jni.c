@@ -72,9 +72,14 @@ static struct {
     float pts_pane[XR_SLAM_MAX_FEATURES][2]; /* dots for the phone pane (cam px) */
     int pts_n;
     int pts_src;                            /* 1 = Basalt features, 0 = fallback */
+    float pts_pane_r[XR_SLAM_MAX_FEATURES][2]; /* dots for the right pane */
+    int pts_n_r;
     int track_count;
     float depth_ms;
     atomic_int pane_mode;                   /* 0 = left|depth, 1 = left|right */
+
+    int map_n;
+    uint32_t map_stamp;
     xr_slam_state vio;                      /* newest Basalt state */
     int vio_fresh;
 
@@ -145,6 +150,11 @@ static struct {
  * initializers, so its members live in .data and would bloat the .so by
  * this much per ABI; a plain zero static stays in .bss. */
 static xr_stereo ST;
+
+/* same .bss rule: the Basalt feed frames and the accumulated landmark map
+ * (open-addressed on landmark id, stamp 0 = empty slot; guarded by S.lock) */
+static uint8_t SLAM_FEED[2][XR_OW * XR_OH];   /* contrast-stretched frames */
+static struct { int32_t id; float x, y, z; uint32_t stamp; } MAP_PT[4096];
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -217,6 +227,22 @@ static void compose(int counter, uint64_t exposure_ts) {
                 dst += 4;
             }
         }
+        /* the same landmarks as observed by the right camera */
+        if (atomic_load(&S.show_pts) && S.pts_src) {
+            for (int i = 0; i < S.pts_n_r; i++) {
+                int px = (int)S.pts_pane_r[i][0], py = (int)S.pts_pane_r[i][1];
+                for (int dy = -1; dy <= 1; dy++) {
+                    int y = py + dy;
+                    if (y < 0 || y >= XR_OH) continue;
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int x = px + dx;
+                        if (x < 0 || x >= XR_OW) continue;
+                        uint8_t *d = S.rgba + ((size_t)y * S.cw + XR_OW + x) * 4;
+                        d[0] = 0; d[1] = 0xFF; d[2] = 0x50; d[3] = 0xFF;
+                    }
+                }
+            }
+        }
     } else if (atomic_load(&S.depth_on)) {
         for (int y = 0; y < XR_OH; y++) {
             uint8_t *dst = S.rgba + ((size_t)y * S.cw + XR_OW) * 4;
@@ -277,6 +303,38 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
      * flickers), then an equalized copy for humans */
     xr_clean(&S.cleaners[cam], dscr, S.clean_raw[cam], 0);
     xr_equalize(S.clean_raw[cam], S.clean[cam], XR_OW * XR_OH);
+    /* Basalt feed: FLICKER-FREE contrast boost. The raw cleaned frames are
+     * low-contrast and grainy, so the FAST detector starves; a linear
+     * stretch between slowly-EMA'd 2%/98% percentiles lifts contrast
+     * without the frame-to-frame brightness jumps of per-frame HE. */
+    {
+        static float lo_f[2], hi_f[2];
+        static int have_stretch[2];
+        const uint8_t *in = S.clean_raw[cam];
+        int32_t hist[256] = { 0 };
+        for (int i = 0; i < XR_OW * XR_OH; i += 2) hist[in[i]]++;
+        int32_t tail = (XR_OW * XR_OH / 2) / 50;      /* 2% each side */
+        int32_t acc = 0;
+        int lo = 0, hi = 255;
+        for (int i = 0; i < 256; i++) { acc += hist[i]; if (acc >= tail) { lo = i; break; } }
+        acc = 0;
+        for (int i = 255; i >= 0; i--) { acc += hist[i]; if (acc >= tail) { hi = i; break; } }
+        if (hi - lo < 8) hi = lo + 8;
+        if (!have_stretch[cam]) {
+            lo_f[cam] = (float)lo; hi_f[cam] = (float)hi; have_stretch[cam] = 1;
+        } else {
+            lo_f[cam] += 0.05f * ((float)lo - lo_f[cam]);
+            hi_f[cam] += 0.05f * ((float)hi - hi_f[cam]);
+        }
+        float scale = 240.0f / (hi_f[cam] - lo_f[cam]);
+        uint8_t lut[256];
+        for (int i = 0; i < 256; i++) {
+            float v = ((float)i - lo_f[cam]) * scale + 8.0f;
+            lut[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+        }
+        uint8_t *out = SLAM_FEED[cam];
+        for (int i = 0; i < XR_OW * XR_OH; i++) out[i] = lut[in[i]];
+    }
     S.have[cam] = 1;
 
     S.fps_count++;
@@ -302,7 +360,7 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
 
         /* feed Basalt directly from this thread (it copies synchronously;
          * VIT wants cam0=left first, then cam1, same timestamp) */
-        xr_slam_push_pair(S.clean_raw[1], S.clean_raw[0], t_exp);
+        xr_slam_push_pair(SLAM_FEED[1], SLAM_FEED[0], t_exp);
 
         /* hand the pair to the SLAM worker (it snapshots the buffers) */
         pthread_mutex_lock(&S.slam_lock);
@@ -441,7 +499,7 @@ static void *slam_worker(void *arg) {
 
         if (xr_slam_running()) {
             /* Basalt is the front end: publish its pose and features (the
-             * feature u,v are left-camera pixels — the pane is 1:1) */
+             * feature u,v are per-camera pixels — the panes are 1:1) */
             static xr_slam_state st;               /* worker thread only */
             if (xr_slam_poll(&st)) {
                 float rays[XR_SLAM_MAX_FEATURES * 3];
@@ -456,7 +514,35 @@ static void *slam_worker(void *arg) {
                     S.pts_pane[i][1] = st.feat_uv[i][1];
                     memcpy(&rays[i * 3], st.feat_ray[i], 3 * sizeof(float));
                 }
+                S.pts_n_r = st.n_features_r;
+                for (int i = 0; i < st.n_features_r; i++) {
+                    S.pts_pane_r[i][0] = st.feat_uv_r[i][0];
+                    S.pts_pane_r[i][1] = st.feat_uv_r[i][1];
+                }
                 S.track_count = nr;
+                /* fold this pose's landmarks into the accumulated map */
+                S.map_stamp++;
+                for (int i = 0; i < st.n_landmarks; i++) {
+                    uint32_t h = ((uint32_t)st.lm_id[i] * 2654435761u) & 4095u;
+                    int slot = -1, oldest = -1;
+                    uint32_t oldest_stamp = 0xFFFFFFFFu;
+                    for (int k = 0; k < 32; k++) {
+                        uint32_t j = (h + k) & 4095u;
+                        if (MAP_PT[j].stamp == 0) { slot = (int)j; break; }
+                        if (MAP_PT[j].id == st.lm_id[i]) { slot = (int)j; break; }
+                        if (MAP_PT[j].stamp < oldest_stamp) {
+                            oldest_stamp = MAP_PT[j].stamp;
+                            oldest = (int)j;
+                        }
+                    }
+                    if (slot < 0) slot = oldest;   /* neighborhood full: evict */
+                    if (MAP_PT[slot].stamp == 0) S.map_n++;
+                    MAP_PT[slot].id = st.lm_id[i];
+                    MAP_PT[slot].x = st.lm_xyz[i][0];
+                    MAP_PT[slot].y = st.lm_xyz[i][1];
+                    MAP_PT[slot].z = st.lm_xyz[i][2];
+                    MAP_PT[slot].stamp = S.map_stamp;
+                }
                 pthread_mutex_unlock(&S.lock);
                 xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0,
                                    st.ts);
@@ -1056,8 +1142,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetSwap(JNIEnv *env, jclass cls,
     atomic_store(&S.swap_eyes, swap ? 1 : 0);
 }
 
-/* Reset the SLAM system: Basalt state (pose back to origin) plus the
- * fallback tracker's features and prediction history. */
+/* Reset the SLAM system: Basalt state (pose back to origin), the
+ * accumulated landmark map, and the fallback tracker. */
 JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;
@@ -1065,12 +1151,39 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls
     pthread_mutex_lock(&S.lock);
     xr_track_reset(&S.track);      /* worker touches it only between locks */
     S.pts_n = 0;
+    S.pts_n_r = 0;
     S.track_count = 0;
     S.vio_fresh = 0;
+    memset(MAP_PT, 0, sizeof MAP_PT);
+    S.map_n = 0;
+    S.map_stamp = 0;
     pthread_mutex_unlock(&S.lock);
     S.slam_prev_ts = 0;
     xr_gles_set_points(NULL, 0, 0);
     LOGI("SLAM reset");
+}
+
+/* Copy the accumulated landmark map into `buf` (direct ByteBuffer, native
+ * order): u32 count, then count x 3 f32 world xyz. Returns the count. */
+JNIEXPORT jint JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeGrabMap(JNIEnv *env, jclass cls,
+                                                       jobject buf) {
+    (void)cls;
+    uint8_t *dst = (*env)->GetDirectBufferAddress(env, buf);
+    jlong cap = (*env)->GetDirectBufferCapacity(env, buf);
+    if (!dst || cap < 4) return 0;
+    int max = (int)((cap - 4) / 12);
+    int n = 0;
+    pthread_mutex_lock(&S.lock);
+    for (int i = 0; i < 4096 && n < max; i++) {
+        if (!MAP_PT[i].stamp) continue;
+        memcpy(dst + 4 + (size_t)n * 12, &MAP_PT[i].x, 12);
+        n++;
+    }
+    pthread_mutex_unlock(&S.lock);
+    uint32_t un = (uint32_t)n;
+    memcpy(dst, &un, 4);
+    return n;
 }
 
 /* Show/hide the tracked features (phone pane dots + glasses overlay). */

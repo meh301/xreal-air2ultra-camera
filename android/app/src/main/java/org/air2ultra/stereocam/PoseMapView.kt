@@ -34,6 +34,17 @@ class PoseMapView @JvmOverloads constructor(
 
     private val trail = ArrayList<FloatArray>()    // sampled positions
 
+    // accumulated landmark cloud (world xyz triplets)
+    private var cloud = FloatArray(0)
+    private var cloudN = 0
+
+    /** [pts] = xyz triplets, [n] = point count. Call from the UI thread. */
+    fun setCloud(pts: FloatArray, n: Int) {
+        if (cloud.size < n * 3) cloud = FloatArray(n * 3)
+        pts.copyInto(cloud, 0, 0, n * 3)
+        cloudN = n
+    }
+
     // live IMU readout (factory frame) for on-device frame diagnosis
     private val imuA = FloatArray(3)
     private val imuG = FloatArray(3)
@@ -180,6 +191,10 @@ class PoseMapView @JvmOverloads constructor(
     private val trailPaint = Paint().apply {
         color = Color.rgb(120, 120, 120); strokeWidth = 2f; isAntiAlias = true
     }
+    private val cloudPaint = Paint().apply {
+        color = Color.rgb(90, 200, 255); strokeWidth = 2f
+        strokeCap = Paint.Cap.ROUND
+    }
     private val textPaint = Paint().apply {
         color = Color.rgb(0, 255, 102); textSize = 24f
         typeface = android.graphics.Typeface.MONOSPACE; isAntiAlias = true
@@ -218,6 +233,15 @@ class PoseMapView @JvmOverloads constructor(
         project(0f, 0f, 0.5f, pb)
         axisPaint.color = Color.rgb(80, 120, 255)
         canvas.drawLine(pa[0], pa[1], pb[0], pb[1], axisPaint)
+
+        // landmark cloud (Basalt's estimator landmarks, accumulated)
+        cloudPaint.strokeWidth = (2f * viewZoom).coerceIn(1.5f, 5f)
+        for (i in 0 until cloudN) {
+            project(cloud[i * 3], cloud[i * 3 + 1], cloud[i * 3 + 2], pa)
+            if (pa[0] < -20 || pa[0] > width + 20 ||
+                pa[1] < -20 || pa[1] > height + 20) continue
+            canvas.drawPoint(pa[0], pa[1], cloudPaint)
+        }
 
         // trail
         for (i in 1 until trail.size) {
@@ -280,7 +304,7 @@ class PoseMapView @JvmOverloads constructor(
         // state text
         val rect = if (flags and 2 != 0) "rect✓" else "rect…"
         val dep = if (flags and 1 != 0) "%.0fms".format(depthMs) else "off"
-        canvas.drawText("trk=%d  depth=%s  %s".format(tracked, dep, rect),
+        canvas.drawText("trk=%d  map=%d  depth=%s  %s".format(tracked, cloudN, dep, rect),
             12f, 30f, textPaint)
         val backend = if (flags and 8 != 0)
             "pose: Basalt VIO (6-DoF)  p=[%.2f %.2f %.2f]m".format(p[0], p[1], p[2])
