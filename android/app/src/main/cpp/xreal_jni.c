@@ -12,7 +12,9 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -64,6 +66,7 @@ static struct {
     uint8_t disp[XS_W * XS_H];              /* published disparity */
     float pts_pane[XR_SLAM_MAX_FEATURES][2]; /* dots for the phone pane (cam px) */
     int pts_n;
+    int pts_src;                            /* 1 = Basalt features, 0 = fallback */
     int track_count;
     float depth_ms;
     xr_slam_state vio;                      /* newest Basalt state */
@@ -172,8 +175,12 @@ static void compose(int counter, uint64_t exposure_ts) {
             dst += 4;
         }
     }
-    /* tracked features as green dots */
+    /* tracked features: green = Basalt's own optical-flow keypoints,
+     * orange = the built-in fallback tracker (Basalt not loaded) */
     if (atomic_load(&S.show_pts)) {
+        uint8_t cr = S.pts_src ? 0x00 : 0xFF;
+        uint8_t cg = S.pts_src ? 0xFF : 0xAA;
+        uint8_t cb = S.pts_src ? 0x50 : 0x00;
         for (int i = 0; i < S.pts_n; i++) {
             int px = (int)S.pts_pane[i][0], py = (int)S.pts_pane[i][1];
             for (int dy = -1; dy <= 1; dy++) {
@@ -183,7 +190,7 @@ static void compose(int counter, uint64_t exposure_ts) {
                     int x = px + dx;
                     if (x < 0 || x >= XR_OW) continue;
                     uint8_t *d = S.rgba + ((size_t)y * S.cw + x) * 4;
-                    d[0] = 0; d[1] = 0xFF; d[2] = 0x50; d[3] = 0xFF;
+                    d[0] = cr; d[1] = cg; d[2] = cb; d[3] = 0xFF;
                 }
             }
         }
@@ -371,6 +378,9 @@ static int pose_delta(uint64_t ts_exposure, float dR[9]) {
 
 static void *slam_worker(void *arg) {
     (void)arg;
+    /* below the UVC/render threads: depth is the first thing to yield when
+     * cores get scarce (SD888-class), capture and present never stutter */
+    setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
     uint32_t done_seq = 0;
     for (;;) {
         pthread_mutex_lock(&S.slam_lock);
@@ -416,6 +426,7 @@ static void *slam_worker(void *arg) {
                 pthread_mutex_lock(&S.lock);
                 S.vio = st;
                 S.vio_fresh = 1;
+                S.pts_src = 1;
                 S.pts_n = nr;
                 for (int i = 0; i < nr; i++) {
                     S.pts_pane[i][0] = st.feat_uv[i][0];
@@ -459,6 +470,7 @@ static void *slam_worker(void *arg) {
             int nr = 0;
             const float cx = (XS_W - 1) * 0.5f, cy = (XS_H - 1) * 0.5f;
             pthread_mutex_lock(&S.lock);
+            S.pts_src = 0;
             S.pts_n = 0;
             for (int i = 0; i < XT_MAX; i++) {
                 /* fresh seeds (age < 2) flicker; only show survivors */
@@ -484,19 +496,19 @@ static void *slam_worker(void *arg) {
             xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0, ts);
         }
 
-        /* stereo depth (SGM). If a pass overruns the 33 ms pair interval,
-         * drop to every 2nd pair rather than starving the tracker — the
-         * depth pane just updates at 15 Hz. */
+        /* stereo depth (SGM) at every 2nd pair (15 Hz) by default — the
+         * Snapdragon 888 needs the headroom for Basalt + future AR work.
+         * Only runs per-pair when a pass fits in half a frame budget. */
         static uint8_t disp_local[XS_W * XS_H];        /* slam thread only */
         static uint32_t depth_tick;
-        static int depth_stride = 1;
+        static int depth_stride = 2;
         if (atomic_load(&S.depth_on)) {
             if (depth_tick++ % depth_stride == 0) {
                 xr_stereo_rectify(&ST, 1, S.slam_in[1]);
                 int64_t t0 = now_ms();
                 xr_stereo_depth(&ST, disp_local);
                 float depth_ms = (float)(now_ms() - t0);
-                depth_stride = depth_ms > 26.0f ? 2 : 1;
+                depth_stride = depth_ms > 13.0f ? 2 : 1;
                 pthread_mutex_lock(&S.lock);
                 memcpy(S.disp, disp_local, sizeof S.disp);
                 S.depth_ms = depth_ms;
@@ -718,6 +730,21 @@ static void *imu_worker(void *arg) {
         xr_imu_sample s;
         if (xr_imu_parse(buf, (size_t)got, &s) != 0) continue;
         stalls = 0;
+
+        /* Raw chip frame -> factory calibration frame. The IMU is mounted
+         * ENU-style (x right, y forward, z up: worn level, accel reads +1 g
+         * on z — hence the "pointing straight up" pose), while every factory
+         * quantity (imu_q_cam, imu_p_cam, biases) lives in the camera-style
+         * frame x right, y DOWN, z FORWARD. Everything downstream — AHRS,
+         * timewarp, Basalt — must see the factory frame, else rotation
+         * deltas land on the wrong axis (head yaw warped as image roll):
+         * x_f = x_r, y_f = -z_r, z_f = y_r. */
+        {
+            float t;
+            t = s.gyro_dps[1]; s.gyro_dps[1] = -s.gyro_dps[2]; s.gyro_dps[2] = t;
+            t = s.accel_g[1]; s.accel_g[1] = -s.accel_g[2]; s.accel_g[2] = t;
+        }
+
         int has_q = xr_ahrs_feed(&S.ahrs, &s);
         xr_slam_push_imu(s.ts_ns, s.gyro_dps, s.accel_g);
 
