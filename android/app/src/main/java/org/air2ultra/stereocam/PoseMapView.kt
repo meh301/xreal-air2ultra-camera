@@ -273,7 +273,7 @@ class PoseMapView @JvmOverloads constructor(
         val backend = if (flags and 8 != 0)
             "pose: Basalt VIO (6-DoF)  p=[%.2f %.2f %.2f]m".format(p[0], p[1], p[2])
         else
-            "pose: AHRS only (diagnostic — Basalt off)"
+            "pose: AHRS — Basalt not active"
         canvas.drawText(backend, 12f, 58f, dimTextPaint)
         if (haveImu) {
             canvas.drawText(

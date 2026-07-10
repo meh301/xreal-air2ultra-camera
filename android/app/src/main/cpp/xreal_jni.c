@@ -37,9 +37,8 @@
 #define MAX_W (2 * XR_W)     /* scrambled view: 1280x480 */
 #define MAX_H XR_OH          /* clean view:      960x640 */
 
-/* Diagnostic: 0 = IMU-only (Basalt never started, pose = AHRS) while the
- * sensor-frame conventions are being pinned down on-device. */
-#define XR_ENABLE_BASALT 0
+/* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS). */
+#define XR_ENABLE_BASALT 1
 
 static struct {
     uvc_context_t *ctx;
@@ -736,18 +735,28 @@ static void *imu_worker(void *arg) {
         stalls = 0;
 
         /* Raw stream -> factory calibration frame (x right, y DOWN,
-         * z FORWARD — the frame of imu_q_cam/imu_p_cam/biases). The chip
-         * streams ENU-style (x right, y forward, z up: worn level the
-         * accel reads +1 g on z), so for a standard right-handed sensor
-         * BOTH vectors remap identically:  v_f = ( vx, -vz,  vy ).
+         * z FORWARD — the frame of imu_q_cam/imu_p_cam/biases).
          *
-         * The exact horizontal permutation + gyro handedness are being
-         * pinned down with the on-screen IMU readout (diagnostic build,
-         * Basalt disabled) — see docs/PROTOCOL.md. */
+         * Accel: chip streams ENU-style (x right, y forward, z up — worn
+         * level it reads +1 g on z):        a_f = ( ax, -az,  ay )
+         *
+         * Gyro: the x and z channels are streamed SIGN-FLIPPED relative
+         * to the accel channels (established by the AHRS-only diagnostic:
+         * with the shared mapping, roll tracked correctly while pitch and
+         * yaw ran inverted — gravity pins the accel map, roll pins the
+         * gyro z channel, so this is the unique remaining solution):
+         *                                   w_f = (-gx,  gz,  gy )
+         *
+         * Invisible to a self-contained AHRS (its world is consistently
+         * warped); fusing against the factory calibration exposes it. */
         {
-            float t;
-            t = s.gyro_dps[1]; s.gyro_dps[1] = -s.gyro_dps[2]; s.gyro_dps[2] = t;
-            t = s.accel_g[1]; s.accel_g[1] = -s.accel_g[2]; s.accel_g[2] = t;
+            float gx = s.gyro_dps[0], gy = s.gyro_dps[1], gz = s.gyro_dps[2];
+            s.gyro_dps[0] = -gx;
+            s.gyro_dps[1] = gz;
+            s.gyro_dps[2] = gy;
+            float t = s.accel_g[1];
+            s.accel_g[1] = -s.accel_g[2];
+            s.accel_g[2] = t;
         }
 
         int has_q = xr_ahrs_feed(&S.ahrs, &s);
