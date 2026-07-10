@@ -37,6 +37,10 @@
 #define MAX_W (2 * XR_W)     /* scrambled view: 1280x480 */
 #define MAX_H XR_OH          /* clean view:      960x640 */
 
+/* Diagnostic: 0 = IMU-only (Basalt never started, pose = AHRS) while the
+ * sensor-frame conventions are being pinned down on-device. */
+#define XR_ENABLE_BASALT 0
+
 static struct {
     uvc_context_t *ctx;
     uvc_device_handle_t *devh;
@@ -732,29 +736,18 @@ static void *imu_worker(void *arg) {
         stalls = 0;
 
         /* Raw stream -> factory calibration frame (x right, y DOWN,
-         * z FORWARD — the frame of imu_q_cam/imu_p_cam/biases).
+         * z FORWARD — the frame of imu_q_cam/imu_p_cam/biases). The chip
+         * streams ENU-style (x right, y forward, z up: worn level the
+         * accel reads +1 g on z), so for a standard right-handed sensor
+         * BOTH vectors remap identically:  v_f = ( vx, -vz,  vy ).
          *
-         * Accelerometer: mounted ENU-style (x right, y forward, z up —
-         * worn level it reads +1 g on z, which is why the naive pose
-         * pointed straight at the sky):    a_f = ( ax, -az,  ay ).
-         *
-         * Gyroscope: streamed MIRRORED relative to the accel (opposite
-         * rotation handedness — same firmware quirk family as the mirrored
-         * camera stream). Verified on-device: with the shared mapping the
-         * start pose is right but every rotation runs backwards (up=down,
-         * left=right). A rate is not a plain vector, so it gets its own
-         * sign-flipped mapping:            w_f = (-gx,  gz, -gy ).
-         *
-         * Everything downstream — AHRS, timewarp, Basalt — sees only the
-         * factory frame. */
+         * The exact horizontal permutation + gyro handedness are being
+         * pinned down with the on-screen IMU readout (diagnostic build,
+         * Basalt disabled) — see docs/PROTOCOL.md. */
         {
-            float gx = s.gyro_dps[0], gy = s.gyro_dps[1], gz = s.gyro_dps[2];
-            s.gyro_dps[0] = -gx;
-            s.gyro_dps[1] = gz;
-            s.gyro_dps[2] = -gy;
-            float t = s.accel_g[1];
-            s.accel_g[1] = -s.accel_g[2];
-            s.accel_g[2] = t;
+            float t;
+            t = s.gyro_dps[1]; s.gyro_dps[1] = -s.gyro_dps[2]; s.gyro_dps[2] = t;
+            t = s.accel_g[1]; s.accel_g[1] = -s.accel_g[2]; s.accel_g[2] = t;
         }
 
         int has_q = xr_ahrs_feed(&S.ahrs, &s);
@@ -1133,6 +1126,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass 
     LOGI("alignment calibration set (%d floats)", (int)len);
 
     /* with camera positions available, bring up the Basalt backend */
+#if XR_ENABLE_BASALT
     float bx = S.eye_calib[1].p_cam[0] - S.eye_calib[0].p_cam[0];
     float by = S.eye_calib[1].p_cam[1] - S.eye_calib[0].p_cam[1];
     float bz = S.eye_calib[1].p_cam[2] - S.eye_calib[0].p_cam[2];
@@ -1142,6 +1136,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetAlignment(JNIEnv *env, jclass 
                       S.imu_calib_have ? S.imu_gyro_bias : NULL,
                       S.imu_calib_have ? S.imu_accel_bias : NULL,
                       S.imu_calib_have ? S.imu_noises : NULL);
+#endif
 }
 
 /* Toggle the glasses between per-eye stereo with the calibrated aligned warp

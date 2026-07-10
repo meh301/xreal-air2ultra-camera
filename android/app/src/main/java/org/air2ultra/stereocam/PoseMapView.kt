@@ -34,6 +34,18 @@ class PoseMapView @JvmOverloads constructor(
 
     private val trail = ArrayList<FloatArray>()    // sampled positions
 
+    // live IMU readout (factory frame) for on-device frame diagnosis
+    private val imuA = FloatArray(3)
+    private val imuG = FloatArray(3)
+    private var haveImu = false
+
+    /** Latest remapped IMU sample: accel in g, gyro in deg/s. */
+    fun setImuDebug(a: FloatArray, g: FloatArray) {
+        a.copyInto(imuA)
+        g.copyInto(imuG)
+        haveImu = true
+    }
+
     /** [quat] wxyz body->world, [pos] meters. Call from the UI thread. */
     fun update(quat: FloatArray, pos: FloatArray, trackedCount: Int,
                depthMillis: Float, stateFlags: Int) {
@@ -235,6 +247,22 @@ class PoseMapView @JvmOverloads constructor(
             rotate(tmp, tmpW)
             project(p[0] + tmpW[0], p[1] + tmpW[1], p[2] + tmpW[2], pb)
             canvas.drawCircle(pb[0], pb[1], 5f, frustumPaint)
+
+            // body axes (factory frame: x right = red, y down = green,
+            // z forward = blue), so motions are attributable per axis
+            project(p[0], p[1], p[2], pa)
+            val bodyAxes = arrayOf(
+                floatArrayOf(0.45f, 0f, 0f), floatArrayOf(0f, 0.45f, 0f),
+                floatArrayOf(0f, 0f, 0.45f))
+            val axisColors = intArrayOf(
+                Color.rgb(255, 80, 80), Color.rgb(80, 255, 80),
+                Color.rgb(100, 140, 255))
+            for (i in 0..2) {
+                rotate(bodyAxes[i], tmpW)
+                project(p[0] + tmpW[0], p[1] + tmpW[1], p[2] + tmpW[2], pb)
+                axisPaint.color = axisColors[i]
+                canvas.drawLine(pa[0], pa[1], pb[0], pb[1], axisPaint)
+            }
         }
 
         // state text
@@ -245,7 +273,15 @@ class PoseMapView @JvmOverloads constructor(
         val backend = if (flags and 8 != 0)
             "pose: Basalt VIO (6-DoF)  p=[%.2f %.2f %.2f]m".format(p[0], p[1], p[2])
         else
-            "pose: AHRS orientation — Basalt not loaded"
+            "pose: AHRS only (diagnostic — Basalt off)"
         canvas.drawText(backend, 12f, 58f, dimTextPaint)
+        if (haveImu) {
+            canvas.drawText(
+                "a=(%+.2f %+.2f %+.2f)g".format(imuA[0], imuA[1], imuA[2]),
+                12f, 86f, textPaint)
+            canvas.drawText(
+                "w=(%+6.1f %+6.1f %+6.1f)°/s".format(imuG[0], imuG[1], imuG[2]),
+                12f, 114f, textPaint)
+        }
     }
 }

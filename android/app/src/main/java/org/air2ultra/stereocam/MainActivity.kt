@@ -116,6 +116,10 @@ class MainActivity : Activity() {
         ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
     private val poseQ = FloatArray(4)
     private val poseP = FloatArray(3)
+    private val imuBuffer: ByteBuffer =
+        ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
+    private val imuG = FloatArray(3)
+    private val imuA = FloatArray(3)
     private val handler = Handler(Looper.getMainLooper())
 
     private val pollFrame = object : Runnable {
@@ -132,6 +136,14 @@ class MainActivity : Activity() {
                 stopStreaming()
                 connectToGlasses(null)
                 return   // connect flow restarts the poll loop
+            }
+
+            // live IMU readout for the frame diagnosis (factory frame)
+            if (XrealNative.nativeGrabImu(imuBuffer)) {
+                imuBuffer.position(8)              // skip u64 timestamp
+                for (i in 0..2) imuG[i] = imuBuffer.float
+                for (i in 0..2) imuA[i] = imuBuffer.float
+                poseMap.setImuDebug(imuA, imuG)
             }
 
             // pose/SLAM state feeds both the 3D map and the status line

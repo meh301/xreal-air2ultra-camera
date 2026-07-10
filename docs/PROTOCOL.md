@@ -186,23 +186,18 @@ Values are in the raw sensor frame (at rest: \|accel\| = 1.010 g, gyro bias
 ≈ (−1.0, −0.5, 0.0) deg/s on the tested unit). ar-drivers-rs maps to its
 world convention as `(-x, z, y)` and subtracts the config biases.
 
-**Sensor frame vs the factory calibration frame** (established on-device,
-research branch): every quantity in the calibration JSON (`imu_q_cam`,
-`imu_p_cam`, the biases) lives in a camera-style device frame — x right,
-y **down**, z **forward** (the display extrinsics pin it). The raw stream
-does NOT use that frame:
-
-- the **accelerometer** streams ENU-style — x right, y forward, z up
-  (worn level it reads +1 g on z): `a_dev = (ax, −az, ay)`;
-- the **gyroscope** is additionally **mirrored** (opposite rotation
-  handedness — the same firmware quirk family as the mirrored camera
-  stream): with the accel mapping applied to it, attitude starts correct
-  but every rotation runs backwards. It needs its own mapping:
-  `w_dev = (−gx, gz, −gy)`.
-
-Any consumer fusing this IMU against the factory calibration (VIO,
-timewarp) must apply both remaps; fusing gyro against accel alone (plain
-AHRS) "works" with a shared mapping but yields a mirrored world.
+**Sensor frame vs the factory calibration frame** (research branch, being
+pinned down on-device): every quantity in the calibration JSON
+(`imu_q_cam`, `imu_p_cam`, the biases) lives in a camera-style device
+frame — x right, y **down**, z **forward** (the display extrinsics pin
+it). The raw stream does NOT use that frame: the accelerometer reads
++1 g on **z** when worn level, i.e. the chip frame is ENU-style (z up).
+The candidate remap for both sensors is `v_dev = (vx, −vz, vy)`; the
+exact horizontal permutation and the gyro's rotation sign are still
+being verified against on-device readouts (the research app shows the
+remapped vectors live in the pose view). Consumers fusing this IMU
+against the factory calibration (VIO, timewarp) need the confirmed
+mapping; a self-contained gyro+accel AHRS is insensitive to it.
 
 **The device streams raw inertial data only — there is no onboard
 orientation/quaternion output.** The vendor stack fuses host-side, and so
