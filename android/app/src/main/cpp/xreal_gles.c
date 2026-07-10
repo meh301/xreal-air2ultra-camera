@@ -66,8 +66,9 @@ static struct {
     /* AR map: world points + the pose they are relative to */
     float map_xyz[XR_GLES_MAX_MAP * 3];
     int map_count;
-    float map_R[9], map_p[3];                       /* body->world at map_ts */
+    float map_R[9], map_p[3], map_v[3];             /* body->world at map_ts */
     uint64_t map_ts;
+    uint64_t (*time_fn)(void);                      /* IMU-clock now */
 
     /* depth passthrough: rectified-frame geometry + colorized image */
     float rect_R[9], rect_f, rect_cx, rect_cy;
@@ -443,11 +444,25 @@ static void render_frame(int mode, int fresh, const float *dR,
                 if (G.timewarp && G.pose_fn && G.map_ts &&
                     G.pose_fn(G.map_ts, dRm) == 0)
                     pm = dRm;
+                /* head position extrapolated by the VIO velocity between
+                 * the 30 Hz pose updates (capped: stale poses stay put) */
+                float ph[3] = { G.map_p[0], G.map_p[1], G.map_p[2] };
+                if (G.time_fn && G.map_ts) {
+                    uint64_t tn = G.time_fn();
+                    if (tn > G.map_ts) {
+                        float dt = (float)(tn - G.map_ts) * 1e-9f;
+                        if (dt < 0.2f) {
+                            ph[0] += G.map_v[0] * dt;
+                            ph[1] += G.map_v[1] * dt;
+                            ph[2] += G.map_v[2] * dt;
+                        }
+                    }
+                }
                 const float *R = G.map_R;
                 for (int i = 0; i < G.map_count; i++) {
                     const float *w2 = &G.map_xyz[i * 3];
-                    float rel[3] = { w2[0] - G.map_p[0], w2[1] - G.map_p[1],
-                                     w2[2] - G.map_p[2] };
+                    float rel[3] = { w2[0] - ph[0], w2[1] - ph[1],
+                                     w2[2] - ph[2] };
                     /* world -> body at map_ts (R maps body->world) */
                     float a[3] = {
                         R[0] * rel[0] + R[3] * rel[1] + R[6] * rel[2],
@@ -728,17 +743,25 @@ void xr_gles_set_show_points(int on) {
 }
 
 void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
-                     const float p_base[3], uint64_t ts_ns) {
+                     const float p_base[3], const float v_base[3],
+                     uint64_t ts_ns) {
     if (n > XR_GLES_MAX_MAP) n = XR_GLES_MAX_MAP;
     pthread_mutex_lock(&G.lock);
     if (n > 0) {
         memcpy(G.map_xyz, xyz_world, sizeof(float) * (size_t)n * 3);
         memcpy(G.map_R, R_base, sizeof G.map_R);
         memcpy(G.map_p, p_base, sizeof G.map_p);
+        memcpy(G.map_v, v_base, sizeof G.map_v);
         G.map_ts = ts_ns;
     }
     G.map_count = n;
     pthread_cond_signal(&G.cond);
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_time_fn(uint64_t (*fn)(void)) {
+    pthread_mutex_lock(&G.lock);
+    G.time_fn = fn;
     pthread_mutex_unlock(&G.lock);
 }
 

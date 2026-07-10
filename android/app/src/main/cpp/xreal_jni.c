@@ -506,6 +506,14 @@ static int pose_delta_between(uint64_t ts_a, uint64_t ts_b, float dR[9]) {
     return 0;
 }
 
+/* newest IMU-clock timestamp, for the renderer's position extrapolation */
+static uint64_t imu_now(void) {
+    pthread_mutex_lock(&S.imu_lock);
+    uint64_t t = S.imu_latest.ts_ns;
+    pthread_mutex_unlock(&S.imu_lock);
+    return t;
+}
+
 /* dR = R(q_exposure)^T * R(q_now) with the timewarp deadband: how a fixed
  * world direction moved in the IMU frame since the camera exposure. Drift
  * cancels over this short window, so the AHRS absolute error is irrelevant. */
@@ -646,7 +654,7 @@ static void *slam_worker(void *arg) {
                                    st.ts);
                 float Rw[9];
                 wxyz_to_rot(st.q, Rw);
-                xr_gles_set_map(map_snap, mn, Rw, st.p, st.ts);
+                xr_gles_set_map(map_snap, mn, Rw, st.p, st.v, st.ts);
 
                 /* session-map layer: motion-gated keyframes on the same
                  * conditioned feed Basalt sees; heavy work (XFeat/ORB +
@@ -1156,6 +1164,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
     LOGI("streaming started");
     imu_start();   /* best effort — camera works without it */
     xr_gles_set_pose_fn(pose_delta);   /* timewarp pose source */
+    xr_gles_set_time_fn(imu_now);      /* AR map position extrapolation */
     slam_start();
     return 0;
 }
@@ -1268,7 +1277,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls
     pthread_mutex_unlock(&S.lock);
     S.slam_prev_ts = 0;
     xr_gles_set_points(NULL, 0, 0);
-    xr_gles_set_map(NULL, 0, NULL, NULL, 0);
+    xr_gles_set_map(NULL, 0, NULL, NULL, NULL, 0);
     LOGI("SLAM reset");
 }
 
