@@ -416,8 +416,11 @@ int xr_slam_poll(xr_slam_state *out) {
             };
             memcpy(out->feat_ray[i], ri, sizeof ri);
 
-            /* landmark: camera point at distance 1/invd -> IMU -> world */
-            if (invd > 0.02f && invd < 20.0f) {        /* 5 cm .. 50 m */
+            /* landmark: camera point at distance 1/invd -> IMU -> world.
+             * Low-parallax landmarks triangulate to garbage distances, so
+             * the map only takes 5 cm .. 30 m (the live overlays still
+             * show every feature). */
+            if (invd > 0.0333f && invd < 20.0f) {
                 float dist = 1.0f / invd;
                 float pi[3] = { ri[0] * dist + B.p_ic[0][0],
                                 ri[1] * dist + B.p_ic[0][1],

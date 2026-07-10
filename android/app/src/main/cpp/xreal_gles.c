@@ -497,7 +497,10 @@ static void *render_thread(void *arg) {
         if (can_atw) {
             struct timespec until;
             clock_gettime(CLOCK_REALTIME, &until);
-            until.tv_nsec += 8 * 1000000L;
+            /* the glasses' SBS mode scans out at 60 Hz — re-warping faster
+             * than the panel refresh only burns a big core (mesh reproject
+             * per present) and heats the SoC into throttling */
+            until.tv_nsec += 16 * 1000000L;
             if (until.tv_nsec >= 1000000000L) {
                 until.tv_sec++;
                 until.tv_nsec -= 1000000000L;

@@ -154,7 +154,13 @@ static xr_stereo ST;
 /* same .bss rule: the Basalt feed frames and the accumulated landmark map
  * (open-addressed on landmark id, stamp 0 = empty slot; guarded by S.lock) */
 static uint8_t SLAM_FEED[2][XR_OW * XR_OH];   /* contrast-stretched frames */
-static struct { int32_t id; float x, y, z; uint32_t stamp; } MAP_PT[4096];
+static struct {
+    int32_t id;
+    float x, y, z;
+    uint32_t stamp;
+    uint16_t seen;      /* observations: one-shot triangulations are noise */
+    uint16_t pad_;
+} MAP_PT[4096];
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -536,11 +542,22 @@ static void *slam_worker(void *arg) {
                         }
                     }
                     if (slot < 0) slot = oldest;   /* neighborhood full: evict */
-                    if (MAP_PT[slot].stamp == 0) S.map_n++;
-                    MAP_PT[slot].id = st.lm_id[i];
-                    MAP_PT[slot].x = st.lm_xyz[i][0];
-                    MAP_PT[slot].y = st.lm_xyz[i][1];
-                    MAP_PT[slot].z = st.lm_xyz[i][2];
+                    if (MAP_PT[slot].stamp != 0 &&
+                        MAP_PT[slot].id == st.lm_id[i]) {
+                        /* re-observed: blend toward the newer (better-
+                         * converged) estimate instead of keeping the first */
+                        MAP_PT[slot].x = 0.7f * MAP_PT[slot].x + 0.3f * st.lm_xyz[i][0];
+                        MAP_PT[slot].y = 0.7f * MAP_PT[slot].y + 0.3f * st.lm_xyz[i][1];
+                        MAP_PT[slot].z = 0.7f * MAP_PT[slot].z + 0.3f * st.lm_xyz[i][2];
+                        if (MAP_PT[slot].seen < 65535) MAP_PT[slot].seen++;
+                    } else {
+                        if (MAP_PT[slot].stamp == 0) S.map_n++;
+                        MAP_PT[slot].id = st.lm_id[i];
+                        MAP_PT[slot].x = st.lm_xyz[i][0];
+                        MAP_PT[slot].y = st.lm_xyz[i][1];
+                        MAP_PT[slot].z = st.lm_xyz[i][2];
+                        MAP_PT[slot].seen = 1;
+                    }
                     MAP_PT[slot].stamp = S.map_stamp;
                 }
                 pthread_mutex_unlock(&S.lock);
@@ -1176,7 +1193,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabMap(JNIEnv *env, jclass cls,
     int n = 0;
     pthread_mutex_lock(&S.lock);
     for (int i = 0; i < 4096 && n < max; i++) {
-        if (!MAP_PT[i].stamp) continue;
+        /* one- and two-shot landmarks are mostly bad triangulations */
+        if (!MAP_PT[i].stamp || MAP_PT[i].seen < 3) continue;
         memcpy(dst + 4 + (size_t)n * 12, &MAP_PT[i].x, 12);
         n++;
     }

@@ -124,6 +124,8 @@ class MainActivity : Activity() {
     private val mapBuffer: ByteBuffer =            // 4096 landmarks max
         ByteBuffer.allocateDirect(4 + 4096 * 12).order(ByteOrder.nativeOrder())
     private val mapPoints = FloatArray(4096 * 3)
+    private var lastHealthLog = 0L
+    private var thermalMark = ""
     private val handler = Handler(Looper.getMainLooper())
 
     private val pollFrame = object : Runnable {
@@ -148,6 +150,22 @@ class MainActivity : Activity() {
                 for (i in 0..2) imuG[i] = imuBuffer.float
                 for (i in 0..2) imuA[i] = imuBuffer.float
                 poseMap.setImuDebug(imuA, imuG)
+            }
+
+            // lag forensics: thermal state vs native-heap growth, every 10 s
+            if (now - lastHealthLog > 10_000) {
+                lastHealthLog = now
+                val heapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576
+                var thermal = -1
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                    thermal = pm.currentThermalStatus
+                    thermalMark = if (thermal >= android.os.PowerManager.THERMAL_STATUS_MODERATE)
+                        " [hot:$thermal]" else ""
+                }
+                android.util.Log.i("xrealcam",
+                    "health: nativeHeap=${heapMb}MB thermal=$thermal " +
+                    "(0=none 1=light 2=moderate 3=severe)")
             }
 
             // accumulated landmark cloud for the 3D map view
@@ -193,7 +211,7 @@ class MainActivity : Activity() {
                     !stereoMode -> "  [glasses sbs]"
                     alignReady -> "  [glasses stereo]"
                     else -> "  [glasses uncal]"
-                }
+                } + thermalMark
             }
             if (streaming) handler.postDelayed(this, FRAME_INTERVAL_MS)
         }
