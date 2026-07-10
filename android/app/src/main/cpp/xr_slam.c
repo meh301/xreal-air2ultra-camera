@@ -5,7 +5,9 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <android/log.h>
 
@@ -56,11 +58,43 @@ void xr_slam_set_config(const char *unified_config_path) {
  * IMU history before the first frame arrives */
 #define IMU_WARMUP_SAMPLES 300
 
+/* Basalt reports through std::cout/cerr, which Android swallows. Redirect
+ * both into logcat (tag "basalt") so config echoes, queue warnings and
+ * assertion messages are visible. */
+static void *stdio_pump(void *arg) {
+    int fd = (int)(intptr_t)arg;
+    char buf[512];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        if (n <= 0) break;
+        buf[n] = 0;
+        __android_log_write(ANDROID_LOG_INFO, "basalt", buf);
+    }
+    return NULL;
+}
+
+static void redirect_stdio(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    int p[2];
+    if (pipe(p) != 0) return;
+    dup2(p[1], 1);
+    dup2(p[1], 2);
+    close(p[1]);
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    pthread_t t;
+    pthread_create(&t, NULL, stdio_pump, (void *)(intptr_t)p[0]);
+    pthread_detach(t);
+}
+
 int xr_slam_load(void) {
     static int attempted;
     if (B.dl) return 1;
     if (attempted) return 0;
     attempted = 1;
+    redirect_stdio();
     B.dl = dlopen("libbasalt.so", RTLD_NOW | RTLD_LOCAL);
     if (!B.dl) {
         LOGI("Basalt backend not present (%s) — using built-in tracker", dlerror());
