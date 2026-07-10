@@ -37,8 +37,10 @@
 #define MAX_W (2 * XR_W)     /* scrambled view: 1280x480 */
 #define MAX_H XR_OH          /* clean view:      960x640 */
 
-/* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS). */
-#define XR_ENABLE_BASALT 1
+/* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS).
+ * Stays 0 until the IMU pose is verified on-device with the confirmed
+ * remap — Basalt only re-enters after that sign-off. */
+#define XR_ENABLE_BASALT 0
 
 static struct {
     uvc_context_t *ctx;
