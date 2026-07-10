@@ -92,6 +92,8 @@ class MainActivity : Activity() {
         // and microphones unless the app holds these runtime permissions
         val RUNTIME_PERMS = arrayOf(Manifest.permission.CAMERA,
                                     Manifest.permission.RECORD_AUDIO)
+        // session-map descriptors: XFeat (ONNX) when true, mini-ORB when false
+        const val ENABLE_XFEAT = false
     }
 
     private lateinit var usbManager: UsbManager
@@ -114,7 +116,7 @@ class MainActivity : Activity() {
     private var alignReady = false
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
     private val poseBuffer: ByteBuffer =
-        ByteBuffer.allocateDirect(44).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder())
     private val poseQ = FloatArray(4)
     private val poseP = FloatArray(3)
     private val imuBuffer: ByteBuffer =
@@ -187,7 +189,8 @@ class MainActivity : Activity() {
                 depthMs = poseBuffer.float
                 val flags = poseBuffer.int
                 val kf = poseBuffer.int
-                poseMap.update(poseQ, poseP, tracked, depthMs, flags, kf)
+                val trackedR = poseBuffer.int
+                poseMap.update(poseQ, poseP, tracked, depthMs, flags, kf, trackedR)
             }
 
             val packed = XrealNative.nativeGrabFrame(frameBuffer)
@@ -442,7 +445,7 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "Basalt config staging failed: $e")
         }
-        try {
+        if (ENABLE_XFEAT) try {
             val model = java.io.File(filesDir, "xfeat.onnx")
             assets.open("xfeat.onnx").use { src ->
                 model.outputStream().use { dst -> src.copyTo(dst) }
@@ -451,6 +454,8 @@ class MainActivity : Activity() {
             android.util.Log.i("xrealcam", "XFeat model staged: ${model.absolutePath}")
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "XFeat staging failed (mini-ORB fallback): $e")
+        } else {
+            android.util.Log.i("xrealcam", "XFeat disabled — session map uses mini-ORB")
         }
     }
 

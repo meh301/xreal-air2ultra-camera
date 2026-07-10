@@ -1355,6 +1355,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabPose(JNIEnv *env, jclass cls,
 
     pthread_mutex_lock(&S.lock);
     int32_t tracked = S.track_count;
+    int32_t tracked_r = S.pts_n_r;
     float depth_ms = S.depth_ms;
     if (S.vio_fresh && xr_slam_running()) {
         memcpy(q, S.vio.q, sizeof q);
@@ -1379,9 +1380,10 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabPose(JNIEnv *env, jclass cls,
     memcpy(dst + 28, &tracked, 4);
     memcpy(dst + 32, &depth_ms, 4);
     memcpy(dst + 36, &flags, 4);
-    if ((*env)->GetDirectBufferCapacity(env, buf) >= 44) {
+    if ((*env)->GetDirectBufferCapacity(env, buf) >= 48) {
         int32_t kf = xr_map_num_keyframes();
         memcpy(dst + 40, &kf, 4);
+        memcpy(dst + 44, &tracked_r, 4);   /* right-camera observations */
     }
     return has_q ? JNI_TRUE : JNI_FALSE;
 }
