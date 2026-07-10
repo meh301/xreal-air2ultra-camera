@@ -248,21 +248,28 @@ class PoseMapView @JvmOverloads constructor(
             project(p[0] + tmpW[0], p[1] + tmpW[1], p[2] + tmpW[2], pb)
             canvas.drawCircle(pb[0], pb[1], 5f, frustumPaint)
 
-            // body axes (factory frame: x right = red, y down = green,
-            // z forward = blue), so motions are attributable per axis
+            // labeled body axes (factory frame): R = its RIGHT (red),
+            // D = its DOWN (green), F = its FORWARD (blue). The labels
+            // remove the viewing-side ambiguity of a wireframe frustum —
+            // apparent yaw/roll direction flips when seen from the front,
+            // which once poisoned a whole diagnostic round.
             project(p[0], p[1], p[2], pa)
             val bodyAxes = arrayOf(
                 floatArrayOf(0.45f, 0f, 0f), floatArrayOf(0f, 0.45f, 0f),
-                floatArrayOf(0f, 0f, 0.45f))
+                floatArrayOf(0f, 0f, 0.6f))
             val axisColors = intArrayOf(
                 Color.rgb(255, 80, 80), Color.rgb(80, 255, 80),
                 Color.rgb(100, 140, 255))
+            val axisNames = arrayOf("R", "D", "F")
             for (i in 0..2) {
                 rotate(bodyAxes[i], tmpW)
                 project(p[0] + tmpW[0], p[1] + tmpW[1], p[2] + tmpW[2], pb)
                 axisPaint.color = axisColors[i]
                 canvas.drawLine(pa[0], pa[1], pb[0], pb[1], axisPaint)
+                textPaint.color = axisColors[i]
+                canvas.drawText(axisNames[i], pb[0] + 4f, pb[1] - 4f, textPaint)
             }
+            textPaint.color = Color.rgb(0, 255, 102)
         }
 
         // state text

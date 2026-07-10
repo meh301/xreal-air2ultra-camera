@@ -742,10 +742,9 @@ static void *imu_worker(void *arg) {
         stalls = 0;
 
         /* forensics: average the RAW (pre-remap) gyro over the first second
-         * at rest and compare against the factory bias (0.85, -0.12, 0.53
-         * deg/s in the calibration frame). Current two-channel map predicts
-         * chip (-0.85, +0.53, -0.12); a flipped roll channel would predict
-         * chip (-0.85, -0.53, -0.12) — the middle sign is the arbiter. */
+         * at rest. Expected on this unit: about (-0.94, -0.55, -0.01) deg/s
+         * = the factory bias (0.85, -0.12, 0.53) pulled back through the
+         * chip->factory map below (x/z temperature-dependent). */
         if (S.raw_gbias_n < 1000) {
             for (int i = 0; i < 3; i++) S.raw_gbias[i] += s.gyro_dps[i];
             if (++S.raw_gbias_n == 1000)
@@ -754,29 +753,34 @@ static void *imu_worker(void *arg) {
                      S.raw_gbias[2] / 1000.0);
         }
 
-        /* Raw stream -> factory calibration frame (x right, y DOWN,
-         * z FORWARD — the frame of imu_q_cam/imu_p_cam/biases).
+        /* Raw chip frame -> factory calibration frame.
          *
-         * Accel: chip streams ENU-style (x right, y forward, z up — worn
-         * level it reads +1 g on z):        a_f = ( ax, -az,  ay )
+         * Chip frame, pinned by physical ground truth (xreal_imu_axistest:
+         * yaw-CCW -> z+, front-up -> x-, right-side-down -> y-; rest accel
+         * +1 g on z; raw bias (-0.94,-0.55,-0.01) deg/s matches the factory
+         * file through this map): x = LEFT, y = BACK, z = UP, right-handed,
+         * gyro and accel healthy and mutually consistent.
          *
-         * Gyro: the x and z channels are streamed SIGN-FLIPPED relative
-         * to the accel channels (established by the AHRS-only diagnostic:
-         * with the shared mapping, roll tracked correctly while pitch and
-         * yaw ran inverted — gravity pins the accel map, roll pins the
-         * gyro z channel, so this is the unique remaining solution):
-         *                                   w_f = (-gx,  gz,  gy )
+         * The factory frame (imu_q_cam / imu_p_cam / biases, ~= the display
+         * frame) is x = right, y = down, z = forward, so ONE proper
+         * rotation maps BOTH sensors:
          *
-         * Invisible to a self-contained AHRS (its world is consistently
-         * warped); fusing against the factory calibration exposes it. */
+         *     v_f = ( -vx, -vz, -vy )
+         *
+         * (The earlier per-sensor sign hacks came from misreading the pose
+         * view: watching the frustum from its FRONT flips apparent yaw and
+         * roll while pitch stays invariant — hence the axis labels in
+         * PoseMapView.) */
         {
-            float gx = s.gyro_dps[0], gy = s.gyro_dps[1], gz = s.gyro_dps[2];
-            s.gyro_dps[0] = -gx;
-            s.gyro_dps[1] = gz;
-            s.gyro_dps[2] = gy;
-            float t = s.accel_g[1];
+            float t;
+            s.gyro_dps[0] = -s.gyro_dps[0];
+            t = s.gyro_dps[1];
+            s.gyro_dps[1] = -s.gyro_dps[2];
+            s.gyro_dps[2] = -t;
+            s.accel_g[0] = -s.accel_g[0];
+            t = s.accel_g[1];
             s.accel_g[1] = -s.accel_g[2];
-            s.accel_g[2] = t;
+            s.accel_g[2] = -t;
         }
 
         int has_q = xr_ahrs_feed(&S.ahrs, &s);

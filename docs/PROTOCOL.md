@@ -186,27 +186,27 @@ Values are in the raw sensor frame (at rest: \|accel\| = 1.010 g, gyro bias
 ≈ (−1.0, −0.5, 0.0) deg/s on the tested unit). ar-drivers-rs maps to its
 world convention as `(-x, z, y)` and subtracts the config biases.
 
-**Sensor frame vs the factory calibration frame** (established on-device
-via an AHRS-only diagnostic, research branch): every quantity in the
-calibration JSON (`imu_q_cam`, `imu_p_cam`, the biases) lives in a
-camera-style device frame — x right, y **down**, z **forward** (the
-display extrinsics pin it). The raw stream does NOT use that frame, and
-the two sensors even disagree with each other:
+**Sensor frame vs the factory calibration frame** (established by
+physical ground truth — `python/xreal_imu_axistest.py`: yaw-CCW → z+,
+front-up → x−, right-side-down → y−; gravity on +z at rest; and the raw
+gyro bias matches the factory bias file through the map below):
 
-- **accelerometer**: ENU-style chip frame, x right, y forward, z up
-  (worn level it reads +1 g on z). Remap: `a_dev = (ax, −az, ay)`.
-- **gyroscope**: same axes, but the **x and z channels are streamed
-  sign-flipped** relative to the accelerometer (equivalently: the gyro
-  sub-frame is rotated 180° about chip-y). With the accel mapping
-  applied to the gyro, roll tracks correctly while pitch and yaw run
-  inverted — gravity pins the accel map and roll pins the gyro z
-  channel, making this the unique solution. Remap:
-  `w_dev = (−gx, gz, gy)`.
+- **Chip frame** (both sensors, healthy and mutually consistent):
+  **x = LEFT, y = BACK, z = UP**, right-handed. Worn level, the accel
+  reads +1 g on z; the wireframe in `xreal_imu_scope.py` (temple arms
+  along +y) draws this frame directly.
+- **Factory calibration frame** (`imu_q_cam`, `imu_p_cam`, the biases;
+  ≈ the display frame): x = right, y = down, z = forward.
+- One proper rotation maps both sensors:  **`v_dev = (−vx, −vz, −vy)`**.
 
-A self-contained gyro+accel AHRS cannot detect this (its world is
-consistently warped); fusing against the factory calibration (VIO,
-timewarp) requires both remaps. The python tools still consume the raw
-frame as-is.
+The stream has no sign quirks. A self-contained gyro+accel AHRS (the
+python scope) is correct in the raw chip frame with no remap; consumers
+fusing against the factory calibration (VIO, timewarp) apply the single
+rotation above. The descrambled camera raster matches the factory
+convention as well — verified by measuring the fisheye vignette center
+against the calibrated principal points (`python/xreal_vignette_check.py`;
+the factory cc_x values sit ~±7 px off-center in mirror-paired
+directions, which makes the test decisive).
 
 **The device streams raw inertial data only — there is no onboard
 orientation/quaternion output.** The vendor stack fuses host-side, and so
