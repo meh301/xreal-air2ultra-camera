@@ -57,14 +57,17 @@ class PoseMapView @JvmOverloads constructor(
         haveImu = true
     }
 
+    private var kfCount = 0
+
     /** [quat] wxyz body->world, [pos] meters. Call from the UI thread. */
     fun update(quat: FloatArray, pos: FloatArray, trackedCount: Int,
-               depthMillis: Float, stateFlags: Int) {
+               depthMillis: Float, stateFlags: Int, keyframes: Int = 0) {
         quat.copyInto(q)
         pos.copyInto(p)
         tracked = trackedCount
         depthMs = depthMillis
         flags = stateFlags
+        kfCount = keyframes
         haveState = true
         val last = trail.lastOrNull()
         val moved = last == null || run {
@@ -304,8 +307,8 @@ class PoseMapView @JvmOverloads constructor(
         // state text
         val rect = if (flags and 2 != 0) "rect✓" else "rect…"
         val dep = if (flags and 1 != 0) "%.0fms".format(depthMs) else "off"
-        canvas.drawText("trk=%d  map=%d  depth=%s  %s".format(tracked, cloudN, dep, rect),
-            12f, 30f, textPaint)
+        canvas.drawText("trk=%d  map=%d  kf=%d  depth=%s  %s".format(
+            tracked, cloudN, kfCount, dep, rect), 12f, 30f, textPaint)
         val backend = if (flags and 8 != 0)
             "pose: Basalt VIO (6-DoF)  p=[%.2f %.2f %.2f]m".format(p[0], p[1], p[2])
         else

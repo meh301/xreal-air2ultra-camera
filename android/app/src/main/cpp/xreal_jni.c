@@ -22,6 +22,7 @@
 #include <libusb.h>
 #include <libuvc/libuvc.h>
 
+#include "xr_map.h"
 #include "xr_slam.h"
 #include "xr_stereo.h"
 #include "xr_track.h"
@@ -563,6 +564,13 @@ static void *slam_worker(void *arg) {
                 pthread_mutex_unlock(&S.lock);
                 xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0,
                                    st.ts);
+
+                /* session-map layer: motion-gated keyframes with a history
+                 * timeout (10 min); logs loop/reloc candidates */
+                xr_map_tick(st.ts, 600ull * 1000000000ull);
+                xr_map_maybe_keyframe(st.q, st.p, st.ts, S.slam_in[0],
+                                      st.lm_id, st.lm_xyz, st.lm_uv,
+                                      st.n_landmarks);
             }
         } else if (!xr_slam_load()) {
             /* fallback front end (ONLY when libbasalt.so is absent, e.g.
@@ -1165,6 +1173,7 @@ JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;
     xr_slam_reset();
+    xr_map_reset();
     pthread_mutex_lock(&S.lock);
     xr_track_reset(&S.track);      /* worker touches it only between locks */
     S.pts_n = 0;
@@ -1292,6 +1301,10 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabPose(JNIEnv *env, jclass cls,
     memcpy(dst + 28, &tracked, 4);
     memcpy(dst + 32, &depth_ms, 4);
     memcpy(dst + 36, &flags, 4);
+    if ((*env)->GetDirectBufferCapacity(env, buf) >= 44) {
+        int32_t kf = xr_map_num_keyframes();
+        memcpy(dst + 40, &kf, 4);
+    }
     return has_q ? JNI_TRUE : JNI_FALSE;
 }
 

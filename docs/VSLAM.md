@@ -212,6 +212,39 @@ exists and runs, with a lightweight stand-in front end where Basalt will sit:
    landmarks to `xr_gles_set_points` instead of tracker rays. The depth
    path stays as-is.
 
+### Session mapping & relocalization architecture (agreed, in progress)
+
+GLIM's module split (odometry / local mapping / global mapping) transposed
+to our visual-inertial stack — three frames, three owners:
+
+1. **Odometry — Basalt, untouched.** Drifting `odom` frame at 30 Hz.
+   Basalt cannot consume pose corrections and doesn't need to.
+2. **Session map — on-device (`xr_map.c`).** Motion-gated keyframes
+   (≥ 0.3 m / 15°) holding the odom pose, ~200 compact ORB-style
+   descriptors (FAST-9 + intensity-centroid orientation + rotated
+   256-bit BRIEF from a fixed seeded pattern — self-consistent, no
+   OpenCV), and the landmark geometry (ids, world xyz, pixels) for
+   geometric verification. **Bounded**: ≤ 200 keyframes AND a history
+   timeout (10 min) — the "keep it light" requirement. Loop/reloc
+   candidates come from brute-force Hamming matching (fine at session
+   scale); status: **candidate detection live (logcat "LOOP CANDIDATE")**,
+   next: P3P/RANSAC verification against the stored landmark xyz and a
+   `T_session←odom` correction (map→odom pattern) applied to displayed
+   pose/cloud — a pose-graph-lite instead of touching the VIO.
+3. **Global map — fog side.** Long-term map building from the uploaded
+   keyframes/landmarks (the WebSocket `keyframe`/`landmarks` payloads are
+   exactly the keyframe struct). The **session map is matched against the
+   entire cloud map** (fog compute), returning `T_global←session`; the
+   device just composes it. Not for immediate relocalization — that's the
+   session layer's job.
+
+Borrowed from GLIM/koide3's CPU playbook: the module split itself, bounded
+incremental containers instead of grow-forever structures, keyframe
+decimation so expensive work touches few nodes, and (when session scale
+ever demands it) voxel-hashed association à la small_gicp instead of
+trees. small_gicp (MIT) is also the natural library for the session→cloud
+registration step on the fog side.
+
 ### GPU depth (queued behind Basalt)
 
 The CPU SGM is NEON-vectorized and auto-decimates, but Basalt will want

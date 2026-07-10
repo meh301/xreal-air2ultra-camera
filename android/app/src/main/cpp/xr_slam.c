@@ -430,6 +430,8 @@ int xr_slam_poll(xr_slam_state *out) {
                 out->lm_xyz[k][0] = Rw[0] * pi[0] + Rw[1] * pi[1] + Rw[2] * pi[2] + out->p[0];
                 out->lm_xyz[k][1] = Rw[3] * pi[0] + Rw[4] * pi[1] + Rw[5] * pi[2] + out->p[1];
                 out->lm_xyz[k][2] = Rw[6] * pi[0] + Rw[7] * pi[1] + Rw[8] * pi[2] + out->p[2];
+                out->lm_uv[k][0] = u;
+                out->lm_uv[k][1] = v;
                 out->n_landmarks = k + 1;
             }
         }

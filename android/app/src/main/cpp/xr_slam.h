@@ -35,6 +35,7 @@ typedef struct {
     int n_landmarks;
     int32_t lm_id[XR_SLAM_MAX_FEATURES];
     float lm_xyz[XR_SLAM_MAX_FEATURES][3];
+    float lm_uv[XR_SLAM_MAX_FEATURES][2];  /* their left-cam pixels */
 } xr_slam_state;
 
 /* dlopen libbasalt.so and resolve the VIT symbols; idempotent.
