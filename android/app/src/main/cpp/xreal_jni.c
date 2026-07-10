@@ -731,18 +731,30 @@ static void *imu_worker(void *arg) {
         if (xr_imu_parse(buf, (size_t)got, &s) != 0) continue;
         stalls = 0;
 
-        /* Raw chip frame -> factory calibration frame. The IMU is mounted
-         * ENU-style (x right, y forward, z up: worn level, accel reads +1 g
-         * on z — hence the "pointing straight up" pose), while every factory
-         * quantity (imu_q_cam, imu_p_cam, biases) lives in the camera-style
-         * frame x right, y DOWN, z FORWARD. Everything downstream — AHRS,
-         * timewarp, Basalt — must see the factory frame, else rotation
-         * deltas land on the wrong axis (head yaw warped as image roll):
-         * x_f = x_r, y_f = -z_r, z_f = y_r. */
+        /* Raw stream -> factory calibration frame (x right, y DOWN,
+         * z FORWARD — the frame of imu_q_cam/imu_p_cam/biases).
+         *
+         * Accelerometer: mounted ENU-style (x right, y forward, z up —
+         * worn level it reads +1 g on z, which is why the naive pose
+         * pointed straight at the sky):    a_f = ( ax, -az,  ay ).
+         *
+         * Gyroscope: streamed MIRRORED relative to the accel (opposite
+         * rotation handedness — same firmware quirk family as the mirrored
+         * camera stream). Verified on-device: with the shared mapping the
+         * start pose is right but every rotation runs backwards (up=down,
+         * left=right). A rate is not a plain vector, so it gets its own
+         * sign-flipped mapping:            w_f = (-gx,  gz, -gy ).
+         *
+         * Everything downstream — AHRS, timewarp, Basalt — sees only the
+         * factory frame. */
         {
-            float t;
-            t = s.gyro_dps[1]; s.gyro_dps[1] = -s.gyro_dps[2]; s.gyro_dps[2] = t;
-            t = s.accel_g[1]; s.accel_g[1] = -s.accel_g[2]; s.accel_g[2] = t;
+            float gx = s.gyro_dps[0], gy = s.gyro_dps[1], gz = s.gyro_dps[2];
+            s.gyro_dps[0] = -gx;
+            s.gyro_dps[1] = gz;
+            s.gyro_dps[2] = -gy;
+            float t = s.accel_g[1];
+            s.accel_g[1] = -s.accel_g[2];
+            s.accel_g[2] = t;
         }
 
         int has_q = xr_ahrs_feed(&S.ahrs, &s);
