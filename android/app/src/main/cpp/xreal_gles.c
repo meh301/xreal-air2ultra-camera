@@ -63,6 +63,12 @@ static struct {
     int show_points;
     int eye_mode;                                   /* XR_EYE_* */
 
+    /* AR map: world points + the pose they are relative to */
+    float map_xyz[XR_GLES_MAX_MAP * 3];
+    int map_count;
+    float map_R[9], map_p[3];                       /* body->world at map_ts */
+    uint64_t map_ts;
+
     /* depth passthrough: rectified-frame geometry + colorized image */
     float rect_R[9], rect_f, rect_cx, rect_cy;
     int rect_valid;
@@ -80,7 +86,7 @@ static struct {
     GLuint prog, tex_eye[2], tex_pair, tex_depth;
     GLint loc_pos, loc_uv, loc_tex;
     GLuint prog_pt;
-    GLint loc_pt_pos;
+    GLint loc_pt_pos, loc_pt_color;
     GLuint vbo_pt;
     GLuint vbo_eye[2], vbo_quad, ibo;
     int mesh_ready, pair_tex_w, pair_tex_h;
@@ -111,11 +117,12 @@ static const char *FS =
     "precision mediump float; varying vec2 vUV; uniform sampler2D uTex;\n"
     "void main(){ gl_FragColor = texture2D(uTex, vUV); }\n";
 static const char *VS_PT =
-    "attribute vec2 aPos;\n"
-    "void main(){ gl_Position = vec4(aPos, 0.0, 1.0); gl_PointSize = 7.0; }\n";
+    "attribute vec3 aPos;\n"          /* x, y (NDC), point size */
+    "void main(){ gl_Position = vec4(aPos.xy, 0.0, 1.0);\n"
+    "             gl_PointSize = aPos.z; }\n";
 static const char *FS_PT =
-    "precision mediump float;\n"
-    "void main(){ gl_FragColor = vec4(0.0, 1.0, 0.4, 1.0); }\n";
+    "precision mediump float; uniform vec4 uColor;\n"
+    "void main(){ gl_FragColor = uColor; }\n";
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -178,6 +185,7 @@ static int gl_objects_init(void) {
     glAttachShader(G.prog_pt, fsp);
     glLinkProgram(G.prog_pt);
     G.loc_pt_pos = glGetAttribLocation(G.prog_pt, "aPos");
+    G.loc_pt_color = glGetUniformLocation(G.prog_pt, "uColor");
     glGenBuffers(1, &G.vbo_pt);
 
     glGenBuffers(2, G.vbo_eye);
@@ -421,12 +429,58 @@ static void render_frame(int mode, int fresh, const float *dR,
             glDrawElements(GL_TRIANGLES, IDX, GL_UNSIGNED_SHORT, (void *)0);
             }
 
-            /* tracked-point overlay, timewarped with its OWN pose delta:
-             * the points usually come from an older frame than the image */
-            if (G.show_points && eye_mode != XR_EYE_OFF && G.pt_count > 0) {
+            /* point overlays. AR mode: the accumulated LANDMARK MAP as
+             * world-anchored points with full 6-DoF parallax — the direct
+             * in-AR check of the SLAM system (drift shows as the cloud
+             * detaching from the world). Other modes: the live tracked
+             * features as rays, timewarped with their own pose delta. */
+            static float ndc[XR_GLES_MAX_MAP * 3];   /* render thread only */
+            int n = 0;
+            if (eye_mode == XR_EYE_AR && G.show_points && G.map_count > 0) {
+                /* dR for the map's reference time re-orients to now */
+                float dRm[9];
+                const float *pm = NULL;
+                if (G.timewarp && G.pose_fn && G.map_ts &&
+                    G.pose_fn(G.map_ts, dRm) == 0)
+                    pm = dRm;
+                const float *R = G.map_R;
+                for (int i = 0; i < G.map_count; i++) {
+                    const float *w2 = &G.map_xyz[i * 3];
+                    float rel[3] = { w2[0] - G.map_p[0], w2[1] - G.map_p[1],
+                                     w2[2] - G.map_p[2] };
+                    /* world -> body at map_ts (R maps body->world) */
+                    float a[3] = {
+                        R[0] * rel[0] + R[3] * rel[1] + R[6] * rel[2],
+                        R[1] * rel[0] + R[4] * rel[1] + R[7] * rel[2],
+                        R[2] * rel[0] + R[5] * rel[1] + R[8] * rel[2],
+                    };
+                    float dist = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+                    if (dist < 0.3f) continue;
+                    /* re-orient to the present (world-fixed direction) */
+                    float d[3];
+                    if (pm) {
+                        d[0] = pm[0] * a[0] + pm[3] * a[1] + pm[6] * a[2];
+                        d[1] = pm[1] * a[0] + pm[4] * a[1] + pm[7] * a[2];
+                        d[2] = pm[2] * a[0] + pm[5] * a[1] + pm[8] * a[2];
+                    } else {
+                        d[0] = a[0]; d[1] = a[1]; d[2] = a[2];
+                    }
+                    float u, v;
+                    if (xr_align_ray_to_display(&G.eyes_calib[e],
+                                                G.calib_variant, d, &u, &v))
+                        continue;
+                    if (u < 0 || u > 1920 || v < 0 || v > 1080) continue;
+                    float size = 9.0f / dist;
+                    if (size < 3.0f) size = 3.0f;
+                    if (size > 16.0f) size = 16.0f;
+                    ndc[n * 3] = u / 960.0f - 1.0f;
+                    ndc[n * 3 + 1] = 1.0f - v / 540.0f;
+                    ndc[n * 3 + 2] = size;
+                    n++;
+                }
+            } else if (eye_mode != XR_EYE_OFF && eye_mode != XR_EYE_AR &&
+                       G.show_points && G.pt_count > 0) {
                 const float *pw = dR_pts ? dR_pts : dR;
-                float ndc[XR_GLES_MAX_POINTS * 2];
-                int n = 0;
                 for (int i = 0; i < G.pt_count; i++) {
                     const float *r = &G.pt_rays[i * 3];
                     float wr[3];
@@ -442,20 +496,25 @@ static void render_frame(int mode, int fresh, const float *dR,
                                                 G.calib_variant, wr, &u, &v))
                         continue;
                     if (u < 0 || u > 1920 || v < 0 || v > 1080) continue;
-                    ndc[n * 2] = u / 960.0f - 1.0f;
-                    ndc[n * 2 + 1] = 1.0f - v / 540.0f;
+                    ndc[n * 3] = u / 960.0f - 1.0f;
+                    ndc[n * 3 + 1] = 1.0f - v / 540.0f;
+                    ndc[n * 3 + 2] = 7.0f;
                     n++;
                 }
-                if (n > 0) {
-                    glUseProgram(G.prog_pt);
-                    glBindBuffer(GL_ARRAY_BUFFER, G.vbo_pt);
-                    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * n * 2, ndc,
-                                 GL_STREAM_DRAW);
-                    glVertexAttribPointer((GLuint)G.loc_pt_pos, 2, GL_FLOAT,
-                                          GL_FALSE, 0, (void *)0);
-                    glEnableVertexAttribArray((GLuint)G.loc_pt_pos);
-                    glDrawArrays(GL_POINTS, 0, n);
-                }
+            }
+            if (n > 0) {
+                glUseProgram(G.prog_pt);
+                if (eye_mode == XR_EYE_AR)
+                    glUniform4f(G.loc_pt_color, 0.35f, 0.78f, 1.0f, 1.0f);
+                else
+                    glUniform4f(G.loc_pt_color, 0.0f, 1.0f, 0.4f, 1.0f);
+                glBindBuffer(GL_ARRAY_BUFFER, G.vbo_pt);
+                glBufferData(GL_ARRAY_BUFFER, sizeof(float) * (size_t)n * 3,
+                             ndc, GL_STREAM_DRAW);
+                glVertexAttribPointer((GLuint)G.loc_pt_pos, 3, GL_FLOAT,
+                                      GL_FALSE, 0, (void *)0);
+                glEnableVertexAttribArray((GLuint)G.loc_pt_pos);
+                glDrawArrays(GL_POINTS, 0, n);
             }
         }
     } else {
@@ -665,6 +724,21 @@ void xr_gles_set_points(const float *rays_imu, int n, uint64_t exposure_ts_ns) {
 void xr_gles_set_show_points(int on) {
     pthread_mutex_lock(&G.lock);
     G.show_points = on ? 1 : 0;
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
+                     const float p_base[3], uint64_t ts_ns) {
+    if (n > XR_GLES_MAX_MAP) n = XR_GLES_MAX_MAP;
+    pthread_mutex_lock(&G.lock);
+    if (n > 0) {
+        memcpy(G.map_xyz, xyz_world, sizeof(float) * (size_t)n * 3);
+        memcpy(G.map_R, R_base, sizeof G.map_R);
+        memcpy(G.map_p, p_base, sizeof G.map_p);
+        G.map_ts = ts_ns;
+    }
+    G.map_count = n;
+    pthread_cond_signal(&G.cond);
     pthread_mutex_unlock(&G.lock);
 }
 

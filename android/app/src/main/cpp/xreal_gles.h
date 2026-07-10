@@ -58,6 +58,15 @@ void xr_gles_set_timewarp(int on);
 enum { XR_GLES_MAX_POINTS = 256 };
 void xr_gles_set_points(const float *rays_imu, int n, uint64_t exposure_ts_ns);
 
+/* Stage the accumulated landmark map for the AR eye mode: world-frame
+ * points plus the reference pose they should be viewed from (body->world
+ * rotation R, position p, at IMU-clock ts). Every present re-orients by
+ * the 1 kHz pose delta and renders with full 6-DoF parallax — SLAM drift
+ * becomes directly visible against the real world. */
+enum { XR_GLES_MAX_MAP = 4096 };
+void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
+                     const float p_base[3], uint64_t ts_ns);
+
 /* Show/hide the point overlay (default on; drawn in every eye mode
  * except OFF). */
 void xr_gles_set_show_points(int on);

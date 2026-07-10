@@ -630,9 +630,23 @@ static void *slam_worker(void *arg) {
                     }
                     MAP_PT[slot].stamp = S.map_stamp;
                 }
+                /* AR eye mode: snapshot the gated landmark map + this pose
+                 * so the renderer can draw world-anchored points */
+                static float map_snap[XR_GLES_MAX_MAP * 3]; /* worker only */
+                int mn = 0;
+                for (int i = 0; i < 4096 && mn < XR_GLES_MAX_MAP; i++) {
+                    if (!MAP_PT[i].stamp || MAP_PT[i].seen < 3) continue;
+                    map_snap[mn * 3] = MAP_PT[i].x;
+                    map_snap[mn * 3 + 1] = MAP_PT[i].y;
+                    map_snap[mn * 3 + 2] = MAP_PT[i].z;
+                    mn++;
+                }
                 pthread_mutex_unlock(&S.lock);
                 xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0,
                                    st.ts);
+                float Rw[9];
+                wxyz_to_rot(st.q, Rw);
+                xr_gles_set_map(map_snap, mn, Rw, st.p, st.ts);
 
                 /* session-map layer: motion-gated keyframes on the same
                  * conditioned feed Basalt sees; heavy work (XFeat/ORB +
@@ -1254,6 +1268,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls
     pthread_mutex_unlock(&S.lock);
     S.slam_prev_ts = 0;
     xr_gles_set_points(NULL, 0, 0);
+    xr_gles_set_map(NULL, 0, NULL, NULL, 0);
     LOGI("SLAM reset");
 }
 

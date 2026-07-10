@@ -79,8 +79,10 @@ view then says "Basalt not loaded" and a built-in tracker draws the points.
      *Snap* saves a PNG of the panes to Pictures/XREAL.
    - **buttons, row 2** — *Eye:…* cycles what the glasses show in 3D mode:
      **Cam** (camera passthrough) → **Dep** (colorized stereo depth,
-     world-aligned per eye) → **AR** (black background, tracked points
-     floating over the real world) → **Off**; *L|Dep / L|R* switches the
+     world-aligned per eye) → **AR** (black background, the accumulated
+     **landmark map** rendered as world-anchored points with full 6-DoF
+     parallax — near points larger, drift shows as the cloud detaching
+     from the world) → **Off**; *L|Dep / L|R* switches the
      phone's right pane between the depth map and the right camera;
      *SBS/3D* switches the glasses between plain side-by-side and
      calibrated per-eye stereo.
