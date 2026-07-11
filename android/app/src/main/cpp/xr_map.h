@@ -59,4 +59,10 @@ int xr_map_last_candidate(uint64_t *ts_a, uint64_t *ts_b, int *matches);
  * most recent one. Returns 1 when at least one has occurred. */
 int xr_map_loop_stats(int *count, float pos[3], int *matches);
 
+/* The most recent match's keyframe landmarks (stored odom-frame world xyz,
+ * n x 3 floats) — the AR loop/reloc flash. Returns the count copied
+ * (<= max). Their offset from the live cloud of the same physical spot IS
+ * the accumulated drift a correction stage would remove. */
+int xr_map_loop_points(float *xyz, int max);
+
 #endif

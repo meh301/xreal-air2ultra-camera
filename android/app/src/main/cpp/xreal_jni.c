@@ -501,6 +501,14 @@ static void quat_delta(const float qa[4], const float qb[4], float qd[4]) {
     if (qd[0] < 0) { qd[0] = -qd[0]; qd[1] = -qd[1]; qd[2] = -qd[2]; qd[3] = -qd[3]; }
 }
 
+/* Hamilton product qc = qa * qb (wxyz). */
+static void quat_mul(const float qa[4], const float qb[4], float qc[4]) {
+    qc[0] = qa[0] * qb[0] - qa[1] * qb[1] - qa[2] * qb[2] - qa[3] * qb[3];
+    qc[1] = qa[0] * qb[1] + qa[1] * qb[0] + qa[2] * qb[3] - qa[3] * qb[2];
+    qc[2] = qa[0] * qb[2] - qa[1] * qb[3] + qa[2] * qb[0] + qa[3] * qb[1];
+    qc[3] = qa[0] * qb[3] + qa[1] * qb[2] - qa[2] * qb[1] + qa[3] * qb[0];
+}
+
 /* raw rotation of the IMU frame between two history times (no deadband) —
  * used for the tracker's search-window prediction. ts_b == 0 -> now. */
 static int pose_delta_between(uint64_t ts_a, uint64_t ts_b, float dR[9]) {
@@ -538,6 +546,37 @@ static int pose_delta(uint64_t ts_exposure, float dR[9]) {
     float s = sinf(soft * 0.5f) / vn;
     qd[0] = cosf(soft * 0.5f);
     qd[1] *= s; qd[2] *= s; qd[3] *= s;
+    wxyz_to_rot(qd, dR);
+    return 0;
+}
+
+/* AR-overlay variant: NO deadband (against the real world the deadband
+ * reads as the cloud sticking to the head at every rotation onset, then
+ * trailing by its width) and the newest pose predicted forward to photon
+ * time by the current gyro rate — removes the mean motion-to-photon lag
+ * (present interval + front-buffer scanout) that camera passthrough masks
+ * but see-through AR shows as swim. */
+static int pose_delta_ar(uint64_t ts_ref, float dR[9]) {
+    float qe[4], qn[4], qd[4];
+    if (qhist_get(ts_ref, qe) || qhist_get(0, qn)) return -1;
+    float w[3];
+    pthread_mutex_lock(&S.imu_lock);
+    w[0] = S.imu_latest.gyro_dps[0];
+    w[1] = S.imu_latest.gyro_dps[1];
+    w[2] = S.imu_latest.gyro_dps[2];
+    pthread_mutex_unlock(&S.imu_lock);
+    const float k = (float)M_PI / 180.0f;
+    w[0] *= k; w[1] *= k; w[2] *= k;
+    float wn = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    if (wn > 1e-4f) {
+        float half = 0.5f * wn * ((float)XR_GLES_PREDICT_NS * 1e-9f);
+        float s = sinf(half) / wn;
+        float dq[4] = { cosf(half), w[0] * s, w[1] * s, w[2] * s };
+        float qp[4];
+        quat_mul(qn, dq, qp);              /* body rates: right-multiply */
+        memcpy(qn, qp, sizeof qn);
+    }
+    quat_delta(qe, qn, qd);
     wxyz_to_rot(qd, dR);
     return 0;
 }
@@ -673,6 +712,23 @@ static void *slam_worker(void *arg) {
                  * matching) runs on the dedicated map thread */
                 xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
                              st.lm_id, st.lm_xyz, st.lm_uv, st.n_landmarks);
+
+                /* new loop/reloc event -> flash the matched keyframe's
+                 * stored landmarks magenta in the AR view */
+                static int loop_seen;              /* worker-only */
+                int lc, lm_n;
+                float lp[3];
+                if (xr_map_loop_stats(&lc, lp, &lm_n)) {
+                    if (lc != loop_seen) {
+                        loop_seen = lc;
+                        static float loop_xyz[XR_GLES_MAX_LOOP * 3];
+                        int ln = xr_map_loop_points(loop_xyz,
+                                                    XR_GLES_MAX_LOOP);
+                        xr_gles_set_loop_points(loop_xyz, ln);
+                    }
+                } else {
+                    loop_seen = 0;                 /* map was reset */
+                }
             }
         } else if (!xr_slam_load()) {
             /* fallback front end (ONLY when libbasalt.so is absent, e.g.
@@ -1176,6 +1232,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
     LOGI("streaming started");
     imu_start();   /* best effort — camera works without it */
     xr_gles_set_pose_fn(pose_delta);   /* timewarp pose source */
+    xr_gles_set_ar_pose_fn(pose_delta_ar); /* deadband-free + predicted */
     xr_gles_set_time_fn(imu_now);      /* AR map position extrapolation */
     slam_start();
     return 0;

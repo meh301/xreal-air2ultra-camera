@@ -74,6 +74,27 @@ void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
  * extrapolation above. */
 void xr_gles_set_time_fn(uint64_t (*fn)(void));
 
+/* Forward-prediction horizon for the AR overlay. The newest IMU sample is
+ * still ~a present interval + front-buffer scanout behind the photons;
+ * predicting the head pose this far ahead removes the mean motion-to-
+ * photon lag, which see-through AR shows as the cloud trailing head
+ * rotation (camera passthrough masks it — the image moves with itself). */
+#define XR_GLES_PREDICT_NS 25000000u
+
+/* AR-mode pose delta: like the timewarp pose fn but sampled WITHOUT the
+ * rest deadband (against the real world the deadband reads as the cloud
+ * sticking to the head at every rotation onset) and predicted forward by
+ * XR_GLES_PREDICT_NS via the current gyro rate. Falls back to the
+ * timewarp pose fn when unset. */
+void xr_gles_set_ar_pose_fn(int (*fn)(uint64_t ts_ref_ns, float dR[9]));
+
+/* Loop/reloc flash for the AR eye mode: the matched keyframe's stored
+ * landmarks (odom-frame world xyz, n x 3 floats), drawn magenta over the
+ * map for a few seconds after each event. Stamped internally via the
+ * time fn; n = 0 clears. */
+enum { XR_GLES_MAX_LOOP = 256 };
+void xr_gles_set_loop_points(const float *xyz_world, int n);
+
 /* Show/hide the point overlay (default on; drawn in every eye mode
  * except OFF). */
 void xr_gles_set_show_points(int on);

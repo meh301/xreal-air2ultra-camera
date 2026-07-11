@@ -69,6 +69,9 @@ static struct {
     float map_R[9], map_p[3], map_v[3];             /* body->world at map_ts */
     uint64_t map_ts;
     uint64_t (*time_fn)(void);                      /* IMU-clock now */
+    int (*pose_ar_fn)(uint64_t, float[9]);          /* deadband-free+predicted */
+    int loop_n;                                     /* loop/reloc flash */
+    uint64_t loop_ts;                               /* event time, IMU clock */
 
     /* depth passthrough: rectified-frame geometry + colorized image */
     float rect_R[9], rect_f, rect_cx, rect_cy;
@@ -102,6 +105,8 @@ static struct {
 } G = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
         .calib_variant = XR_ALIGN_VARIANT_DEFAULT, .timewarp = 1,
         .show_points = 1, .eye_mode = XR_EYE_CAM };
+
+static float LOOP_XYZ[XR_GLES_MAX_LOOP * 3];        /* .bss, G.lock */
 
 static int64_t now_ms64(void) {
     struct timespec ts;
@@ -368,6 +373,55 @@ static int egl_bind_window(ANativeWindow *win) {
     return 0;
 }
 
+/* Project one world point of the AR map into display pixels for eye e:
+ * rel = w - ph into the body frame at map_ts (R maps body->world), then
+ * re-oriented to the present by pm (both transpose-applied). Returns 0
+ * with (u, v, dist) when it lands on the display. */
+static int map_pt_project(int e, const float w2[3], const float ph[3],
+                          const float *R, const float *pm,
+                          float *u, float *v, float *dist) {
+    float rel[3] = { w2[0] - ph[0], w2[1] - ph[1], w2[2] - ph[2] };
+    float a[3] = {
+        R[0] * rel[0] + R[3] * rel[1] + R[6] * rel[2],
+        R[1] * rel[0] + R[4] * rel[1] + R[7] * rel[2],
+        R[2] * rel[0] + R[5] * rel[1] + R[8] * rel[2],
+    };
+    *dist = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    if (*dist < 0.3f) return -1;
+    float d[3];
+    if (pm) {
+        d[0] = pm[0] * a[0] + pm[3] * a[1] + pm[6] * a[2];
+        d[1] = pm[1] * a[0] + pm[4] * a[1] + pm[7] * a[2];
+        d[2] = pm[2] * a[0] + pm[5] * a[1] + pm[8] * a[2];
+    } else {
+        d[0] = a[0]; d[1] = a[1]; d[2] = a[2];
+    }
+    if (xr_align_ray_to_display(&G.eyes_calib[e], G.calib_variant, d, u, v))
+        return -1;
+    if (*u < 0 || *u > 1920 || *v < 0 || *v > 1080) return -1;
+    return 0;
+}
+
+/* Draw n points already in NDC (x, y, size); alpha < 1 blends (the
+ * loop-flash fade-out). */
+static void pt_draw(int n, const float *ndc, float r, float g, float b,
+                    float a) {
+    glUseProgram(G.prog_pt);
+    glUniform4f(G.loc_pt_color, r, g, b, a);
+    glBindBuffer(GL_ARRAY_BUFFER, G.vbo_pt);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * (size_t)n * 3, ndc,
+                 GL_STREAM_DRAW);
+    glVertexAttribPointer((GLuint)G.loc_pt_pos, 3, GL_FLOAT, GL_FALSE, 0,
+                          (void *)0);
+    glEnableVertexAttribArray((GLuint)G.loc_pt_pos);
+    if (a < 1.0f) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+    glDrawArrays(GL_POINTS, 0, n);
+    if (a < 1.0f) glDisable(GL_BLEND);
+}
+
 static void render_frame(int mode, int fresh, const float *dR,
                          const float *dR_pts) {
     EGLint w = 0, h = 0;
@@ -438,19 +492,25 @@ static void render_frame(int mode, int fresh, const float *dR,
             static float ndc[XR_GLES_MAX_MAP * 3];   /* render thread only */
             int n = 0;
             if (eye_mode == XR_EYE_AR && G.show_points && G.map_count > 0) {
-                /* dR for the map's reference time re-orients to now */
+                /* dR for the map's reference time re-orients to now. The
+                 * AR pose fn is deadband-free and gyro-predicted to photon
+                 * time — see-through AR shows every millisecond of motion-
+                 * to-photon lag as the cloud trailing the head */
                 float dRm[9];
                 const float *pm = NULL;
-                if (G.timewarp && G.pose_fn && G.map_ts &&
-                    G.pose_fn(G.map_ts, dRm) == 0)
+                int (*pfn)(uint64_t, float[9]) =
+                    G.pose_ar_fn ? G.pose_ar_fn : G.pose_fn;
+                if (G.timewarp && pfn && G.map_ts && pfn(G.map_ts, dRm) == 0)
                     pm = dRm;
-                /* head position extrapolated by the VIO velocity between
-                 * the 30 Hz pose updates (capped: stale poses stay put) */
+                /* head position extrapolated by the VIO velocity to the
+                 * same predicted photon time (capped: stale poses stay put) */
                 float ph[3] = { G.map_p[0], G.map_p[1], G.map_p[2] };
+                uint64_t tn = 0;
                 if (G.time_fn && G.map_ts) {
-                    uint64_t tn = G.time_fn();
+                    tn = G.time_fn();
                     if (tn > G.map_ts) {
-                        float dt = (float)(tn - G.map_ts) * 1e-9f;
+                        float dt = (float)(tn - G.map_ts + XR_GLES_PREDICT_NS)
+                                   * 1e-9f;
                         if (dt < 0.2f) {
                             ph[0] += G.map_v[0] * dt;
                             ph[1] += G.map_v[1] * dt;
@@ -458,33 +518,11 @@ static void render_frame(int mode, int fresh, const float *dR,
                         }
                     }
                 }
-                const float *R = G.map_R;
                 for (int i = 0; i < G.map_count; i++) {
-                    const float *w2 = &G.map_xyz[i * 3];
-                    float rel[3] = { w2[0] - ph[0], w2[1] - ph[1],
-                                     w2[2] - ph[2] };
-                    /* world -> body at map_ts (R maps body->world) */
-                    float a[3] = {
-                        R[0] * rel[0] + R[3] * rel[1] + R[6] * rel[2],
-                        R[1] * rel[0] + R[4] * rel[1] + R[7] * rel[2],
-                        R[2] * rel[0] + R[5] * rel[1] + R[8] * rel[2],
-                    };
-                    float dist = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-                    if (dist < 0.3f) continue;
-                    /* re-orient to the present (world-fixed direction) */
-                    float d[3];
-                    if (pm) {
-                        d[0] = pm[0] * a[0] + pm[3] * a[1] + pm[6] * a[2];
-                        d[1] = pm[1] * a[0] + pm[4] * a[1] + pm[7] * a[2];
-                        d[2] = pm[2] * a[0] + pm[5] * a[1] + pm[8] * a[2];
-                    } else {
-                        d[0] = a[0]; d[1] = a[1]; d[2] = a[2];
-                    }
-                    float u, v;
-                    if (xr_align_ray_to_display(&G.eyes_calib[e],
-                                                G.calib_variant, d, &u, &v))
+                    float u, v, dist;
+                    if (map_pt_project(e, &G.map_xyz[i * 3], ph, G.map_R,
+                                       pm, &u, &v, &dist))
                         continue;
-                    if (u < 0 || u > 1920 || v < 0 || v > 1080) continue;
                     float size = 9.0f / dist;
                     if (size < 3.0f) size = 3.0f;
                     if (size > 16.0f) size = 16.0f;
@@ -493,6 +531,35 @@ static void render_frame(int mode, int fresh, const float *dR,
                     ndc[n * 3 + 2] = size;
                     n++;
                 }
+                if (n > 0)
+                    pt_draw(n, ndc, 0.35f, 0.78f, 1.0f, 1.0f);
+                /* loop/reloc flash: the matched keyframe's stored landmarks
+                 * in magenta, fading over ~3.5 s — where the session map
+                 * believes it recognized. Offset vs the live cyan points of
+                 * the same spot = the drift a correction would remove. */
+                if (G.loop_n > 0 && G.loop_ts && tn > G.loop_ts) {
+                    float age = (float)(tn - G.loop_ts) * 1e-9f;
+                    if (age < 3.5f) {
+                        n = 0;
+                        for (int i = 0; i < G.loop_n; i++) {
+                            float u, v, dist;
+                            if (map_pt_project(e, &LOOP_XYZ[i * 3], ph,
+                                               G.map_R, pm, &u, &v, &dist))
+                                continue;
+                            float size = 13.0f / dist;
+                            if (size < 5.0f) size = 5.0f;
+                            if (size > 20.0f) size = 20.0f;
+                            ndc[n * 3] = u / 960.0f - 1.0f;
+                            ndc[n * 3 + 1] = 1.0f - v / 540.0f;
+                            ndc[n * 3 + 2] = size;
+                            n++;
+                        }
+                        if (n > 0)
+                            pt_draw(n, ndc, 1.0f, 0.25f, 0.95f,
+                                    1.0f - age / 3.5f);
+                    }
+                }
+                n = 0;                             /* drawn above */
             } else if (eye_mode != XR_EYE_OFF && eye_mode != XR_EYE_AR &&
                        G.show_points && G.pt_count > 0) {
                 const float *pw = dR_pts ? dR_pts : dR;
@@ -517,20 +584,8 @@ static void render_frame(int mode, int fresh, const float *dR,
                     n++;
                 }
             }
-            if (n > 0) {
-                glUseProgram(G.prog_pt);
-                if (eye_mode == XR_EYE_AR)
-                    glUniform4f(G.loc_pt_color, 0.35f, 0.78f, 1.0f, 1.0f);
-                else
-                    glUniform4f(G.loc_pt_color, 0.0f, 1.0f, 0.4f, 1.0f);
-                glBindBuffer(GL_ARRAY_BUFFER, G.vbo_pt);
-                glBufferData(GL_ARRAY_BUFFER, sizeof(float) * (size_t)n * 3,
-                             ndc, GL_STREAM_DRAW);
-                glVertexAttribPointer((GLuint)G.loc_pt_pos, 3, GL_FLOAT,
-                                      GL_FALSE, 0, (void *)0);
-                glEnableVertexAttribArray((GLuint)G.loc_pt_pos);
-                glDrawArrays(GL_POINTS, 0, n);
-            }
+            if (n > 0)
+                pt_draw(n, ndc, 0.0f, 1.0f, 0.4f, 1.0f);   /* live features */
         }
     } else {
         glBindTexture(GL_TEXTURE_2D, G.tex_pair);
@@ -560,6 +615,7 @@ static void *render_thread(void *arg) {
     (void)arg;
     uint32_t done_seq = 0;
     int warps = 0;
+    int64_t next_tick_ns = 0;      /* absolute ATW pacing, CLOCK_REALTIME */
     for (;;) {
         pthread_mutex_lock(&G.lock);
         /* asynchronous timewarp: once an eyes frame is on screen, wake at
@@ -573,12 +629,17 @@ static void *render_thread(void *arg) {
             clock_gettime(CLOCK_REALTIME, &until);
             /* the glasses' SBS mode scans out at 60 Hz — re-warping faster
              * than the panel refresh only burns a big core (mesh reproject
-             * per present) and heats the SoC into throttling */
-            until.tv_nsec += 16 * 1000000L;
-            if (until.tv_nsec >= 1000000000L) {
-                until.tv_sec++;
-                until.tv_nsec -= 1000000000L;
-            }
+             * per present) and heats the SoC into throttling. Paced from
+             * the PREVIOUS tick so render time doesn't stretch the period
+             * below 60 Hz. */
+            int64_t now_ns = (int64_t)until.tv_sec * 1000000000LL +
+                             until.tv_nsec;
+            next_tick_ns += 16666667LL;
+            if (next_tick_ns <= now_ns ||
+                next_tick_ns > now_ns + 17000000LL)
+                next_tick_ns = now_ns + 16666667LL;    /* resync */
+            until.tv_sec = next_tick_ns / 1000000000LL;
+            until.tv_nsec = (long)(next_tick_ns % 1000000000LL);
             while (!G.win_changed && G.frame_seq == done_seq && !G.calib_staged)
                 if (pthread_cond_timedwait(&G.cond, &G.lock, &until) == ETIMEDOUT)
                     break;
@@ -756,6 +817,22 @@ void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
     }
     G.map_count = n;
     pthread_cond_signal(&G.cond);
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_ar_pose_fn(int (*fn)(uint64_t, float[9])) {
+    pthread_mutex_lock(&G.lock);
+    G.pose_ar_fn = fn;
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_loop_points(const float *xyz_world, int n) {
+    if (n > XR_GLES_MAX_LOOP) n = XR_GLES_MAX_LOOP;
+    pthread_mutex_lock(&G.lock);
+    if (n > 0)
+        memcpy(LOOP_XYZ, xyz_world, sizeof(float) * 3u * (size_t)n);
+    G.loop_n = n;
+    G.loop_ts = (n > 0 && G.time_fn) ? G.time_fn() : 0;
     pthread_mutex_unlock(&G.lock);
 }
 
