@@ -95,6 +95,7 @@ static struct { float q[4], p[3]; int have; } LAST_POSE;
 static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
+static atomic_int GRAPH_ON = 1;
 
 /* Live session correction D = C_newest ∘ O_newest⁻¹ (map -> odom pattern):
  * composes onto every odom-frame quantity leaving the SLAM worker. Updated
@@ -109,6 +110,12 @@ void xr_map_set_model(const char *onnx_path) {
 void xr_map_set_mapping(int on) {
     atomic_store(&MAPPING, on ? 1 : 0);
     LOGI("session map: %s", on ? "MAPPING" : "LOCALIZATION-ONLY (frozen)");
+}
+
+void xr_map_set_graph(int on) {
+    atomic_store(&GRAPH_ON, on ? 1 : 0);
+    LOGI("session map: pose graph %s",
+         on ? "ON" : "OFF (descriptor candidates only, no correction)");
 }
 
 void xr_map_reset(void) {
@@ -707,7 +714,7 @@ static void process_keyframe(void) {
          * kf-capture-odom coords) becomes a pose-graph constraint. */
         int verified = 0, n3 = 0, nin = 0;
         float qa[4], ta[3];
-        {
+        if (atomic_load(&GRAPH_ON)) {
             static int prs[XR_MAP_KP_PER_KF][2];          /* map thread */
             static float Pq[XR_MAP_KP_PER_KF][3];
             static float Pk[XR_MAP_KP_PER_KF][3];

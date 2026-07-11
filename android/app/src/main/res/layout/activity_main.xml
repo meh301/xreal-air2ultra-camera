@@ -23,26 +23,16 @@
         android:layout_marginTop="2dp"
         android:layout_weight="2" />
 
+    <!-- the general log line is drawn along the bottom of the 3D viewer;
+         the full row width belongs to the buttons -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="#88000000"
-        android:gravity="center_vertical"
+        android:gravity="center"
         android:orientation="horizontal"
         android:paddingHorizontal="4dp"
         android:paddingTop="4dp">
-
-        <TextView
-            android:id="@+id/status"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:ellipsize="end"
-            android:fontFamily="monospace"
-            android:maxLines="1"
-            android:text="@string/status_plug_in"
-            android:textColor="#00FF66"
-            android:textSize="12sp" />
 
         <Button
             android:id="@+id/slam_reset"
@@ -60,6 +50,11 @@
             android:text="@string/dep_on" />
 
         <Button
+            android:id="@+id/pane_mode"
+            style="@style/ThinButton"
+            android:text="@string/pane_ldep" />
+
+        <Button
             android:id="@+id/snapshot"
             style="@style/ThinButton"
             android:text="@string/snapshot" />
@@ -69,7 +64,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="#88000000"
-        android:gravity="center_vertical|end"
+        android:gravity="center"
         android:orientation="horizontal"
         android:paddingHorizontal="4dp"
         android:paddingBottom="4dp">
@@ -80,14 +75,19 @@
             android:text="@string/map_on" />
 
         <Button
+            android:id="@+id/graph_mode"
+            style="@style/ThinButton"
+            android:text="@string/graph_on" />
+
+        <Button
+            android:id="@+id/prop_mode"
+            style="@style/ThinButton"
+            android:text="@string/prop_on" />
+
+        <Button
             android:id="@+id/eye_mode"
             style="@style/ThinButton"
             android:text="@string/eye_cam" />
-
-        <Button
-            android:id="@+id/pane_mode"
-            style="@style/ThinButton"
-            android:text="@string/pane_ldep" />
 
         <Button
             android:id="@+id/view_mode"

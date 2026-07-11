@@ -444,6 +444,43 @@ static void render_frame(int mode, int fresh, const float *dR,
             glClearColor(0, 0, 0, 1);
             glClear(GL_COLOR_BUFFER_BIT);
         }
+        /* AR head pose: fetched ONCE per present and shared by both eyes.
+         * A per-eye fetch hands the eyes poses ~1-2 ms apart — during head
+         * rotation that interocular mismatch reads as jitter even when
+         * each eye's own pose is perfectly smooth. */
+        float ar_R[9], ar_ph[3], ar_dRm[9];
+        const float *ar_pm = NULL;
+        int ar_ready = 0;
+        uint64_t ar_tn = 0;
+        if (eye_mode == XR_EYE_AR && G.show_points && G.map_count > 0) {
+            ar_tn = G.time_fn ? G.time_fn() : 0;
+            if (G.head_fn && G.head_fn(ar_R, ar_ph) == 0) {
+                ar_ready = 1;          /* 1 kHz propagator, photon-time */
+            } else {
+                /* fallback: last VIO pose warped by the AHRS delta plus
+                 * velocity extrapolation */
+                memcpy(ar_R, G.map_R, sizeof ar_R);
+                int (*pfn)(uint64_t, float[9]) =
+                    G.pose_ar_fn ? G.pose_ar_fn : G.pose_fn;
+                if (G.timewarp && pfn && G.map_ts &&
+                    pfn(G.map_ts, ar_dRm) == 0)
+                    ar_pm = ar_dRm;
+                ar_ph[0] = G.map_p[0];
+                ar_ph[1] = G.map_p[1];
+                ar_ph[2] = G.map_p[2];
+                if (ar_tn && G.map_ts && ar_tn > G.map_ts) {
+                    float dt = (float)(ar_tn - G.map_ts + XR_GLES_PREDICT_NS)
+                               * 1e-9f;
+                    if (dt < 0.2f) {
+                        ar_ph[0] += G.map_v[0] * dt;
+                        ar_ph[1] += G.map_v[1] * dt;
+                        ar_ph[2] += G.map_v[2] * dt;
+                    }
+                }
+                ar_ready = 1;
+            }
+        }
+
         if (eye_mode == XR_EYE_DEPTH) {
             glBindTexture(GL_TEXTURE_2D, G.tex_depth);
             if (G.depth_tex_w != G.depth_w || G.depth_tex_h != G.depth_h) {
@@ -492,36 +529,11 @@ static void render_frame(int mode, int fresh, const float *dR,
              * features as rays, timewarped with their own pose delta. */
             static float ndc[XR_GLES_MAX_MAP * 3];   /* render thread only */
             int n = 0;
-            if (eye_mode == XR_EYE_AR && G.show_points && G.map_count > 0) {
-                uint64_t tn = G.time_fn ? G.time_fn() : 0;
-                /* head pose: the 1 kHz propagator when available — fresh
-                 * 6-DoF, already predicted to photon time, no feed
-                 * timestamps involved. Fallback: warp the last VIO pose
-                 * by the AHRS delta + velocity extrapolation. */
-                float Rh[9], ph[3], dRm[9];
-                const float *R = Rh, *pm = NULL;
-                if (!(G.head_fn && G.head_fn(Rh, ph) == 0)) {
-                    R = G.map_R;
-                    int (*pfn)(uint64_t, float[9]) =
-                        G.pose_ar_fn ? G.pose_ar_fn : G.pose_fn;
-                    if (G.timewarp && pfn && G.map_ts &&
-                        pfn(G.map_ts, dRm) == 0)
-                        pm = dRm;
-                    ph[0] = G.map_p[0]; ph[1] = G.map_p[1]; ph[2] = G.map_p[2];
-                    if (tn && G.map_ts && tn > G.map_ts) {
-                        float dt = (float)(tn - G.map_ts + XR_GLES_PREDICT_NS)
-                                   * 1e-9f;
-                        if (dt < 0.2f) {
-                            ph[0] += G.map_v[0] * dt;
-                            ph[1] += G.map_v[1] * dt;
-                            ph[2] += G.map_v[2] * dt;
-                        }
-                    }
-                }
+            if (eye_mode == XR_EYE_AR && ar_ready) {
                 for (int i = 0; i < G.map_count; i++) {
                     float u, v, dist;
-                    if (map_pt_project(e, &G.map_xyz[i * 3], ph, R,
-                                       pm, &u, &v, &dist))
+                    if (map_pt_project(e, &G.map_xyz[i * 3], ar_ph, ar_R,
+                                       ar_pm, &u, &v, &dist))
                         continue;
                     float size = 9.0f / dist;
                     if (size < 3.0f) size = 3.0f;
@@ -537,14 +549,14 @@ static void render_frame(int mode, int fresh, const float *dR,
                  * in magenta, fading over ~3.5 s — where the session map
                  * believes it recognized. Offset vs the live cyan points of
                  * the same spot = the drift a correction would remove. */
-                if (G.loop_n > 0 && G.loop_ts && tn > G.loop_ts) {
-                    float age = (float)(tn - G.loop_ts) * 1e-9f;
+                if (G.loop_n > 0 && G.loop_ts && ar_tn > G.loop_ts) {
+                    float age = (float)(ar_tn - G.loop_ts) * 1e-9f;
                     if (age < 3.5f) {
                         n = 0;
                         for (int i = 0; i < G.loop_n; i++) {
                             float u, v, dist;
-                            if (map_pt_project(e, &LOOP_XYZ[i * 3], ph,
-                                               R, pm, &u, &v, &dist))
+                            if (map_pt_project(e, &LOOP_XYZ[i * 3], ar_ph,
+                                               ar_R, ar_pm, &u, &v, &dist))
                                 continue;
                             float size = 13.0f / dist;
                             if (size < 5.0f) size = 5.0f;
@@ -627,17 +639,20 @@ static void *render_thread(void *arg) {
         if (can_atw) {
             struct timespec until;
             clock_gettime(CLOCK_REALTIME, &until);
-            /* the glasses' SBS mode scans out at 60 Hz — re-warping faster
-             * than the panel refresh only burns a big core (mesh reproject
-             * per present) and heats the SoC into throttling. Paced from
-             * the PREVIOUS tick so render time doesn't stretch the period
-             * below 60 Hz. */
+            /* camera/depth modes re-warp at the panel's 60 Hz — faster
+             * only burns a big core on mesh reprojection and heats the SoC
+             * into throttling. The AR point pass has no mesh and is cheap,
+             * so it ticks at ~120 Hz: with an unsynced front buffer the
+             * present-to-scanout phase error halves, which halves the
+             * rotation judder. Paced from the PREVIOUS tick so render time
+             * doesn't stretch the period. */
+            int64_t tick = G.eye_mode == XR_EYE_AR ? 8333333LL : 16666667LL;
             int64_t now_ns = (int64_t)until.tv_sec * 1000000000LL +
                              until.tv_nsec;
-            next_tick_ns += 16666667LL;
+            next_tick_ns += tick;
             if (next_tick_ns <= now_ns ||
-                next_tick_ns > now_ns + 17000000LL)
-                next_tick_ns = now_ns + 16666667LL;    /* resync */
+                next_tick_ns > now_ns + tick + 1000000LL)
+                next_tick_ns = now_ns + tick;          /* resync */
             until.tv_sec = next_tick_ns / 1000000000LL;
             until.tv_nsec = (long)(next_tick_ns % 1000000000LL);
             while (!G.win_changed && G.frame_seq == done_seq && !G.calib_staged)

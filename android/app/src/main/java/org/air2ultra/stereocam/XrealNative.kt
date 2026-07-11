@@ -57,6 +57,14 @@ object XrealNative {
      */
     external fun nativeSetMapping(on: Boolean)
 
+    /** Advanced loop closure: geometric verification + pose-graph
+     *  correction (off = descriptor candidates only, no correction). */
+    external fun nativeSetGraph(on: Boolean)
+
+    /** 1 kHz head-pose propagator for the AR eye mode (off = legacy
+     *  VIO-pose + AHRS-delta warp path, for A/B comparison). */
+    external fun nativeSetPropagator(on: Boolean)
+
     /**
      * Copy the newest pose/SLAM state into [buf] (direct ByteBuffer >= 40
      * bytes, native order): f32 quat_wxyz[4], f32 pos_m[3], i32 tracked

@@ -141,6 +141,7 @@ static struct {
      * subtracted accel dead reckoning, re-anchored by every VIO pose with
      * the difference blended in smoothly — the AR renderer reads THIS, at
      * full IMU rate, with no feed timestamps involved. Guarded by imu_lock. */
+    atomic_int prop_on;                     /* UI A/B: off -> warp fallback */
     struct {
         int valid;
         uint64_t ts;                /* propagated-to (IMU clock) */
@@ -160,7 +161,8 @@ static struct {
         .slam_lock = PTHREAD_MUTEX_INITIALIZER,
         .slam_cond = PTHREAD_COND_INITIALIZER,
         .align_variant = XR_ALIGN_VARIANT_DEFAULT,
-        .stereo_mode = 1, .depth_on = 1, .show_pts = 1, .map_on = 1 };
+        .stereo_mode = 1, .depth_on = 1, .show_pts = 1, .map_on = 1,
+        .prop_on = 1 };
 
 /* ~14 MB of rectification maps + SGM scratch. Kept outside S: S has nonzero
  * initializers, so its members live in .data and would bloat the .so by
@@ -754,6 +756,7 @@ static void prop_correct(const float q[4], const float p[3],
  * photon time. Fails (-> renderer fallback) until the VIO anchors it, or
  * when anchors stop arriving (dead reckoning alone diverges in seconds). */
 static int head_pose_now(float R[9], float p[3]) {
+    if (!atomic_load(&S.prop_on)) return -1;
     pthread_mutex_lock(&S.imu_lock);
     if (!S.prop.valid ||
         S.prop.ts - S.prop.anchor_ts > 500000000ull) {
@@ -1684,7 +1687,26 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetMapping(JNIEnv *env, jclass cl
                                                           jboolean on) {
     (void)env; (void)cls;
     atomic_store(&S.map_on, on ? 1 : 0);
-    xr_map_set_mapping(on ? 1 : 0);
+    xr_map_set_mapping(on);
+}
+
+/* Advanced loop closure: geometric verification + pose-graph correction. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetGraph(JNIEnv *env,
+                                                        jclass cls,
+                                                        jboolean on) {
+    (void)env; (void)cls;
+    xr_map_set_graph(on);
+}
+
+/* 1 kHz head-pose propagator for the AR eye mode (off = legacy warp). */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetPropagator(JNIEnv *env,
+                                                             jclass cls,
+                                                             jboolean on) {
+    (void)env; (void)cls;
+    atomic_store(&S.prop_on, on ? 1 : 0);
+    LOGI("head-pose propagator %s", on ? "ON" : "OFF (warp fallback)");
 }
 
 /* Path of the staged XFeat ONNX model for session-map descriptors. */

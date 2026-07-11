@@ -9,8 +9,9 @@
     <string name="status_open_failed">Could not open the USB device.</string>
     <string name="status_native_error">Stream failed to start (libuvc error %1$d).</string>
     <string name="status_starting">Streaming — waiting for the first stereo pair…</string>
-    <!-- tracked features, camera fps, depth compute time -->
-    <string name="status_streaming">trk=%1$d  %2$.0f fps  depth=%3$.0f ms</string>
+    <!-- camera fps only: tracking/map/depth numbers live on the 3D
+         viewer's own header lines, not here (no duplication) -->
+    <string name="status_streaming">%1$.0f fps</string>
     <string name="status_unplugged">Glasses unplugged.</string>
     <string name="slam_reset">Rst</string>
     <!-- the points/depth buttons show the CURRENT state -->
@@ -29,6 +30,12 @@
     <!-- session map mode (shows the CURRENT mode) -->
     <string name="map_on">Map✓</string>
     <string name="map_loc">Loc</string>
+    <!-- advanced loop closure: verification + pose-graph correction -->
+    <string name="graph_on">LC✓</string>
+    <string name="graph_off">LC✕</string>
+    <!-- AR head pose: 1 kHz propagator vs legacy warp (A/B) -->
+    <string name="prop_on">Prop✓</string>
+    <string name="prop_off">Prop✕</string>
     <!-- the mode button shows the mode you switch TO -->
     <string name="mode_sbs">SBS</string>
     <string name="mode_stereo">3D</string>

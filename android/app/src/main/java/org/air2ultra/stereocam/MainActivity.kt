@@ -24,7 +24,6 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Button
 import android.widget.ImageView
-import android.widget.TextView
 import android.widget.Toast
 import java.io.File
 import java.io.FileOutputStream
@@ -98,7 +97,9 @@ class MainActivity : Activity() {
 
     private lateinit var usbManager: UsbManager
     private lateinit var imageView: ImageView
-    private lateinit var statusView: TextView
+    /** General log line, drawn along the bottom of the 3D viewer (same
+     *  monospace font as the viewer's own header lines). */
+    private fun setStatus(s: CharSequence) = poseMap.setStatusLine(s.toString())
     private lateinit var poseMap: PoseMapView
 
     private var connection: UsbDeviceConnection? = null
@@ -109,6 +110,8 @@ class MainActivity : Activity() {
     private var eyeMode = 0             // glasses: 0 cam, 1 depth, 2 AR, 3 off
     private var paneMode = 0            // phone: 0 = L|depth, 1 = L|R
     private var mappingOn = true        // false = localization-only (frozen map)
+    private var graphOn = true          // verified loop closure + correction
+    private var propOn = true           // 1 kHz AR head-pose propagator
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
     private lateinit var displayManager: DisplayManager
@@ -142,7 +145,7 @@ class MainActivity : Activity() {
                 now - lastReconnectAt > 6000) {
                 lastReconnectAt = now
                 lastFrameAt = 0L
-                statusView.text = getString(R.string.status_reconnecting)
+                setStatus(getString(R.string.status_reconnecting))
                 stopStreaming()
                 connectToGlasses(null)
                 return   // connect flow restarts the poll loop
@@ -213,14 +216,12 @@ class MainActivity : Activity() {
                 frameBuffer.position(0)
                 bm.copyPixelsFromBuffer(frameBuffer)
                 imageView.invalidate()
-                statusView.text = getString(
-                    R.string.status_streaming, tracked, fps, depthMs
-                ) + when {
+                setStatus(getString(R.string.status_streaming, fps) + when {
                     presentation == null -> "  [no ext display]"
                     !stereoMode -> "  [glasses sbs]"
                     alignReady -> "  [glasses stereo]"
                     else -> "  [glasses uncal]"
-                } + thermalMark
+                } + thermalMark)
             }
             if (streaming) handler.postDelayed(this, FRAME_INTERVAL_MS)
         }
@@ -261,14 +262,14 @@ class MainActivity : Activity() {
                     ) {
                         openDevice(device)
                     } else {
-                        statusView.text = getString(R.string.status_permission_denied)
+                        setStatus(getString(R.string.status_permission_denied))
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     if (device != null && isXreal(device)) {
                         stopStreaming()
-                        statusView.text = getString(R.string.status_unplugged)
+                        setStatus(getString(R.string.status_unplugged))
                     }
                 }
             }
@@ -280,8 +281,8 @@ class MainActivity : Activity() {
         setContentView(R.layout.activity_main)
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         imageView = findViewById(R.id.preview)
-        statusView = findViewById(R.id.status)
         poseMap = findViewById(R.id.pose_map)
+        setStatus(getString(R.string.status_plug_in))
 
         findViewById<Button>(R.id.slam_reset).setOnClickListener {
             XrealNative.nativeSlamReset()
@@ -322,6 +323,23 @@ class MainActivity : Activity() {
             XrealNative.nativeSetMapping(mappingOn)
             mapButton.text =
                 getString(if (mappingOn) R.string.map_on else R.string.map_loc)
+        }
+        val graphButton = findViewById<Button>(R.id.graph_mode)
+        graphButton.setOnClickListener {
+            // advanced loop closure: geometric verification + pose-graph
+            // correction. Off = descriptor candidates only, no correction.
+            graphOn = !graphOn
+            XrealNative.nativeSetGraph(graphOn)
+            graphButton.text =
+                getString(if (graphOn) R.string.graph_on else R.string.graph_off)
+        }
+        val propButton = findViewById<Button>(R.id.prop_mode)
+        propButton.setOnClickListener {
+            // AR head pose: 1 kHz propagator vs the legacy warp path (A/B)
+            propOn = !propOn
+            XrealNative.nativeSetPropagator(propOn)
+            propButton.text =
+                getString(if (propOn) R.string.prop_on else R.string.prop_off)
         }
         val paneButton = findViewById<Button>(R.id.pane_mode)
         paneButton.setOnClickListener {
@@ -372,7 +390,7 @@ class MainActivity : Activity() {
         if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             connectToGlasses(null)
         } else {
-            statusView.text = getString(R.string.status_permissions_denied)
+            setStatus(getString(R.string.status_permissions_denied))
         }
     }
 
@@ -384,7 +402,7 @@ class MainActivity : Activity() {
             checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isNotEmpty()) {
-            statusView.text = getString(R.string.status_need_permissions)
+            setStatus(getString(R.string.status_need_permissions))
             requestPermissions(missing.toTypedArray(), REQ_RUNTIME_PERMS)
             return   // continues from onRequestPermissionsResult
         }
@@ -394,13 +412,13 @@ class MainActivity : Activity() {
         val device = fromIntent?.takeIf { isXreal(it) }
             ?: usbManager.deviceList.values.firstOrNull { isXreal(it) }
         if (device == null) {
-            statusView.text = getString(R.string.status_plug_in)
+            setStatus(getString(R.string.status_plug_in))
             return
         }
         if (usbManager.hasPermission(device)) {
             openDevice(device)
         } else {
-            statusView.text = getString(R.string.status_waiting_permission)
+            setStatus(getString(R.string.status_waiting_permission))
             val flags = if (Build.VERSION.SDK_INT >= 31) {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
             } else {
@@ -416,20 +434,20 @@ class MainActivity : Activity() {
     private fun openDevice(device: UsbDevice) {
         val conn = usbManager.openDevice(device)
         if (conn == null) {
-            statusView.text = getString(R.string.status_open_failed)
+            setStatus(getString(R.string.status_open_failed))
             return
         }
         connection = conn // must stay open while native code streams on its fd
         val rc = XrealNative.nativeStart(conn.fileDescriptor)
         if (rc != 0) {
-            statusView.text = getString(R.string.status_native_error, rc)
+            setStatus(getString(R.string.status_native_error, rc))
             conn.close()
             connection = null
             return
         }
         streaming = true
         lastFrameAt = System.currentTimeMillis()   // arm the watchdog from start
-        statusView.text = getString(R.string.status_starting)
+        setStatus(getString(R.string.status_starting))
         setupAlignment()
         handler.post(pollFrame)
     }

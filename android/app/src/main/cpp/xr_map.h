@@ -32,6 +32,12 @@ void xr_map_set_model(const char *onnx_path);
  * relocalization query) but nothing new is stored. */
 void xr_map_set_mapping(int on);
 
+/* Pose graph on (default) / off. Off = descriptor candidates only: no
+ * geometric verification, no chain relaxation, and the live correction
+ * stays wherever it was — pure passive place recognition over stock
+ * odometry. */
+void xr_map_set_graph(int on);
+
 void xr_map_reset(void);
 
 /* Offer a keyframe from the SLAM worker (non-blocking; drops when the

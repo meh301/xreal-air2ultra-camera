@@ -50,6 +50,17 @@ class PoseMapView @JvmOverloads constructor(
     private val imuG = FloatArray(3)
     private var haveImu = false
 
+    // general log line (fps, connection state, thermal), drawn along the
+    // bottom edge — fed by MainActivity
+    private var statusLine = ""
+
+    fun setStatusLine(s: String) {
+        if (s != statusLine) {
+            statusLine = s
+            invalidate()
+        }
+    }
+
     /** Latest remapped IMU sample: accel in g, gyro in deg/s. */
     fun setImuDebug(a: FloatArray, g: FloatArray) {
         a.copyInto(imuA)
@@ -239,11 +250,8 @@ class PoseMapView @JvmOverloads constructor(
         color = Color.rgb(0, 255, 102); textSize = 24f
         typeface = android.graphics.Typeface.MONOSPACE; isAntiAlias = true
     }
-    private val dimTextPaint = Paint(textPaint).apply {
-        color = Color.rgb(110, 110, 110)
-    }
     private val btnPaint = Paint().apply { isAntiAlias = true }
-    private val btnTextPaint = Paint(textPaint).apply { textSize = 22f }
+    private val btnTextPaint = Paint(textPaint).apply { textSize = 25f }
 
     private val pa = FloatArray(2)
     private val pb = FloatArray(2)
@@ -346,12 +354,15 @@ class PoseMapView @JvmOverloads constructor(
             textPaint.color = Color.rgb(0, 255, 102)
         }
 
-        // state text
+        // state text: two lines, up to ~3/4 width (the Follow button owns
+        // the top-right corner)
         val rect = if (flags and 2 != 0) "rect✓" else "rect…"
         val dep = if (flags and 1 != 0) "%.0fms".format(depthMs) else "off"
-        canvas.drawText("trk=%d|%d  map=%d  kf=%d  loop=%d  depth=%s  %s".format(
-            tracked, trackedR, cloudN, kfCount, loopCount, dep, rect),
-            12f, 30f, textPaint)
+        val src = if (flags and 8 != 0) "" else "  AHRS-only"
+        canvas.drawText("trk=%d|%d  map=%d  kf=%d  loop=%d".format(
+            tracked, trackedR, cloudN, kfCount, loopCount), 12f, 30f, textPaint)
+        canvas.drawText("p=[%+.2f %+.2f %+.2f]m  depth=%s  %s%s".format(
+            p[0], p[1], p[2], dep, rect, src), 12f, 58f, textPaint)
 
         // loop/reloc event: pulsing ring at the matched keyframe (~3 s)
         val since = System.currentTimeMillis() - loopFlashMs
@@ -362,20 +373,18 @@ class PoseMapView @JvmOverloads constructor(
             canvas.drawCircle(pa[0], pa[1], 10f + t * 40f, loopPaint)
             canvas.drawCircle(pa[0], pa[1], 4f, loopPaint)
         }
-        val backend = if (flags and 8 != 0)
-            "pose: Basalt VIO (6-DoF)  p=[%.2f %.2f %.2f]m".format(p[0], p[1], p[2])
-        else
-            "pose: AHRS — Basalt not active"
-        canvas.drawText(backend, 12f, 58f, dimTextPaint)
-
         // follow toggle, top right
-        btnRect.set(width - 128f, 8f, width - 8f, 48f)
+        btnRect.set(width - 146f, 8f, width - 8f, 54f)
         btnPaint.color = if (follow) Color.rgb(22, 66, 38) else Color.rgb(30, 34, 30)
-        canvas.drawRoundRect(btnRect, 9f, 9f, btnPaint)
+        canvas.drawRoundRect(btnRect, 10f, 10f, btnPaint)
         btnTextPaint.color =
             if (follow) Color.rgb(0, 255, 102) else Color.rgb(150, 150, 150)
         canvas.drawText(if (follow) "Follow✓" else "Follow✗",
-                        btnRect.left + 12f, btnRect.centerY() + 8f, btnTextPaint)
+                        btnRect.left + 13f, btnRect.centerY() + 9f, btnTextPaint)
+
+        // general log line along the bottom (full viewer width)
+        if (statusLine.isNotEmpty())
+            canvas.drawText(statusLine, 12f, height - 12f, textPaint)
         if (haveImu) {
             canvas.drawText(
                 "a=(%+.2f %+.2f %+.2f)g".format(imuA[0], imuA[1], imuA[2]),
