@@ -54,4 +54,9 @@ int xr_map_num_keyframes(void);      /* thread-safe (atomic) */
  * two keyframe timestamps + match count, or 0 when none happened yet. */
 int xr_map_last_candidate(uint64_t *ts_a, uint64_t *ts_b, int *matches);
 
+/* Loop/reloc statistics: total accepted candidates this session, and the
+ * matched keyframe's stored (odom-frame) position + match count of the
+ * most recent one. Returns 1 when at least one has occurred. */
+int xr_map_loop_stats(int *count, float pos[3], int *matches);
+
 #endif

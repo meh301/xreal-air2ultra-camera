@@ -59,11 +59,15 @@ class PoseMapView @JvmOverloads constructor(
 
     private var kfCount = 0
     private var trackedR = 0
+    private var loopCount = 0
+    private val loopAt = FloatArray(3)
+    private var loopFlashMs = 0L        // wall time of the latest loop event
 
     /** [quat] wxyz body->world, [pos] meters. Call from the UI thread. */
     fun update(quat: FloatArray, pos: FloatArray, trackedCount: Int,
                depthMillis: Float, stateFlags: Int, keyframes: Int = 0,
-               trackedRight: Int = 0) {
+               trackedRight: Int = 0, loops: Int = 0,
+               loopPosition: FloatArray? = null) {
         quat.copyInto(q)
         pos.copyInto(p)
         tracked = trackedCount
@@ -71,6 +75,11 @@ class PoseMapView @JvmOverloads constructor(
         flags = stateFlags
         kfCount = keyframes
         trackedR = trackedRight
+        if (loops > loopCount && loopPosition != null) {
+            loopPosition.copyInto(loopAt)
+            loopFlashMs = System.currentTimeMillis()
+        }
+        loopCount = loops
         haveState = true
         val last = trail.lastOrNull()
         val moved = last == null || run {
@@ -201,6 +210,10 @@ class PoseMapView @JvmOverloads constructor(
         color = Color.rgb(90, 200, 255); strokeWidth = 2f
         strokeCap = Paint.Cap.ROUND
     }
+    private val loopPaint = Paint().apply {
+        color = Color.rgb(255, 210, 60); strokeWidth = 3f
+        style = Paint.Style.STROKE; isAntiAlias = true
+    }
     private val textPaint = Paint().apply {
         color = Color.rgb(0, 255, 102); textSize = 24f
         typeface = android.graphics.Typeface.MONOSPACE; isAntiAlias = true
@@ -310,8 +323,19 @@ class PoseMapView @JvmOverloads constructor(
         // state text
         val rect = if (flags and 2 != 0) "rect✓" else "rect…"
         val dep = if (flags and 1 != 0) "%.0fms".format(depthMs) else "off"
-        canvas.drawText("trk=%d|%d  map=%d  kf=%d  depth=%s  %s".format(
-            tracked, trackedR, cloudN, kfCount, dep, rect), 12f, 30f, textPaint)
+        canvas.drawText("trk=%d|%d  map=%d  kf=%d  loop=%d  depth=%s  %s".format(
+            tracked, trackedR, cloudN, kfCount, loopCount, dep, rect),
+            12f, 30f, textPaint)
+
+        // loop/reloc event: pulsing ring at the matched keyframe (~3 s)
+        val since = System.currentTimeMillis() - loopFlashMs
+        if (loopFlashMs > 0 && since < 3000) {
+            project(loopAt[0], loopAt[1], loopAt[2], pa)
+            val t = since / 3000f
+            loopPaint.alpha = ((1f - t) * 255).toInt()
+            canvas.drawCircle(pa[0], pa[1], 10f + t * 40f, loopPaint)
+            canvas.drawCircle(pa[0], pa[1], 4f, loopPaint)
+        }
         val backend = if (flags and 8 != 0)
             "pose: Basalt VIO (6-DoF)  p=[%.2f %.2f %.2f]m".format(p[0], p[1], p[2])
         else

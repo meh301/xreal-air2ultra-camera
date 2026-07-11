@@ -153,6 +153,10 @@ static struct {
  * this much per ABI; a plain zero static stays in .bss. */
 static xr_stereo ST;
 
+/* rolling landmark budget: past this the map replaces its stalest points
+ * instead of growing (the SD888 heats up rendering/exporting more) */
+#define XR_MAP_POINT_CAP 3000
+
 /* same .bss rule: the Basalt feed frames and the accumulated landmark map
  * (open-addressed on landmark id, stamp 0 = empty slot; guarded by S.lock) */
 static uint8_t SLAM_FEED[2][XR_OW * XR_OH];   /* contrast-stretched frames */
@@ -611,17 +615,21 @@ static void *slam_worker(void *arg) {
                 S.map_stamp++;
                 for (int i = 0; i < st.n_landmarks; i++) {
                     uint32_t h = ((uint32_t)st.lm_id[i] * 2654435761u) & 4095u;
-                    int slot = -1, oldest = -1;
+                    int slot = -1, oldest = -1, was_empty = 0;
                     uint32_t oldest_stamp = 0xFFFFFFFFu;
                     for (int k = 0; k < 32; k++) {
                         uint32_t j = (h + k) & 4095u;
-                        if (MAP_PT[j].stamp == 0) { slot = (int)j; break; }
+                        if (MAP_PT[j].stamp == 0) { slot = (int)j; was_empty = 1; break; }
                         if (MAP_PT[j].id == st.lm_id[i]) { slot = (int)j; break; }
                         if (MAP_PT[j].stamp < oldest_stamp) {
                             oldest_stamp = MAP_PT[j].stamp;
                             oldest = (int)j;
                         }
                     }
+                    /* at the point budget, roll: replace the stalest probed
+                     * entry instead of occupying a fresh slot */
+                    if (was_empty && S.map_n >= XR_MAP_POINT_CAP && oldest >= 0)
+                        slot = oldest;
                     if (slot < 0) slot = oldest;   /* neighborhood full: evict */
                     if (MAP_PT[slot].stamp != 0 &&
                         MAP_PT[slot].id == st.lm_id[i]) {
@@ -1419,10 +1427,15 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabPose(JNIEnv *env, jclass cls,
     memcpy(dst + 28, &tracked, 4);
     memcpy(dst + 32, &depth_ms, 4);
     memcpy(dst + 36, &flags, 4);
-    if ((*env)->GetDirectBufferCapacity(env, buf) >= 48) {
+    if ((*env)->GetDirectBufferCapacity(env, buf) >= 64) {
         int32_t kf = xr_map_num_keyframes();
         memcpy(dst + 40, &kf, 4);
         memcpy(dst + 44, &tracked_r, 4);   /* right-camera observations */
+        int32_t loops = 0, lmatch = 0;
+        float lpos[3] = { 0, 0, 0 };
+        xr_map_loop_stats(&loops, lpos, &lmatch);
+        memcpy(dst + 48, &loops, 4);       /* loop/reloc candidate count */
+        memcpy(dst + 52, lpos, 12);        /* matched keyframe position */
     }
     return has_q ? JNI_TRUE : JNI_FALSE;
 }

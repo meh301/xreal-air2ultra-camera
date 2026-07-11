@@ -70,6 +70,7 @@ static xr_kf KF[XR_MAP_MAX_KF];        /* .bss */
 static int KF_N;
 static atomic_int KF_COUNT_PUB;
 static struct { uint64_t a, b; int matches; int have; } LAST_CAND;
+static struct { int count; float pos[3]; int matches; } LOOP_STATS;
 
 static pthread_mutex_t MAP_LOCK = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t MAP_COND = PTHREAD_COND_INITIALIZER;
@@ -104,8 +105,19 @@ void xr_map_reset(void) {
     LAST_CAND.have = 0;
     LAST_POSE.have = 0;
     MBOX.full = 0;
+    memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     atomic_store(&KF_COUNT_PUB, 0);
     pthread_mutex_unlock(&MAP_LOCK);
+}
+
+int xr_map_loop_stats(int *count, float pos[3], int *matches) {
+    pthread_mutex_lock(&MAP_LOCK);
+    *count = LOOP_STATS.count;
+    memcpy(pos, LOOP_STATS.pos, sizeof LOOP_STATS.pos);
+    *matches = LOOP_STATS.matches;
+    int have = LOOP_STATS.count > 0;
+    pthread_mutex_unlock(&MAP_LOCK);
+    return have;
 }
 
 int xr_map_num_keyframes(void) {
@@ -327,6 +339,9 @@ static void process_keyframe(void) {
         LAST_CAND.b = KF[best_i].ts;
         LAST_CAND.matches = best_m;
         LAST_CAND.have = 1;
+        LOOP_STATS.count++;
+        memcpy(LOOP_STATS.pos, KF[best_i].p, sizeof LOOP_STATS.pos);
+        LOOP_STATS.matches = best_m;
         LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs)",
              mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
              best_m, work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
