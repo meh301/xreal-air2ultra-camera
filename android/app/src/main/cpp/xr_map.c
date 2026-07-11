@@ -56,6 +56,12 @@
  * carrying geometry, at a bounded rate. */
 #define STORE_MIN_LM 10
 #define STORE_MIN_INTERVAL_NS 350000000ull
+/* loop SEARCH is the heavy work (descriptor extraction + match against
+ * every keyframe + PnP RANSAC). Un-throttled it ran back-to-back on
+ * every offer — 15-20x/s in a loop-rich scene — and starved Basalt's VIO
+ * threads (IMU queue overflow -> divergence -> "flying off"). ~3 Hz is
+ * ample for relocalization; storage keeps its own (faster) cadence. */
+#define LOOP_SEARCH_INTERVAL_NS 300000000ull
 /* stationary reloc cadence: when the motion gate blocks, a query-only
  * offer still goes through this often — matching (against the SAME
  * old-keyframe set the moving queries use) but never storing. Standing
@@ -735,6 +741,20 @@ static void process_keyframe(void) {
     MBOX.full = 0;
     pthread_mutex_unlock(&MAP_LOCK);
 
+    int mapping = atomic_load(&MAPPING);
+    /* rate gates (map-thread-only timing). When this offer will neither
+     * search for loops nor store a keyframe, skip ALL the heavy work
+     * (descriptor extraction + matching + PnP). This is what keeps the
+     * map thread from monopolising a core and starving Basalt. */
+    static uint64_t last_search_ns;
+    int do_search = last_search_ns == 0 ||
+                    work.ts - last_search_ns >= LOOP_SEARCH_INTERVAL_NS;
+    int may_store = mapping && !q_only && work.n_lm >= STORE_MIN_LM &&
+                    work.ts - LAST_STORE_NS >= STORE_MIN_INTERVAL_NS;
+    if (!do_search && !may_store)
+        return;
+    if (do_search) last_search_ns = work.ts;
+
     /* descriptors: XFeat when available, mini-ORB otherwise */
     if (MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);
     if (xr_xfeat_available()) {
@@ -762,7 +782,6 @@ static void process_keyframe(void) {
         orb_extract(img, &work);
     }
 
-    int mapping = atomic_load(&MAPPING);
     pthread_mutex_lock(&MAP_LOCK);
     memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
     memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
@@ -777,16 +796,18 @@ static void process_keyframe(void) {
             KF[i].last_used = work.ts;
     }
 
+    int j_corrected = 0;      /* verified closure filled work.qc/pc */
     /* loop/reloc candidates: match the CURRENT view against the store
      * (runs in both modes — in localization-only this IS the reloc query).
-     * In mapping mode skip the most recent keyframes (always similar). */
+     * In mapping mode skip the most recent keyframes (always similar).
+     * Throttled (do_search) so it can't monopolise the CPU. */
+    if (do_search) {
     int lim = KF_N - (mapping ? CAND_SKIP_RECENT : 0);
     int best_m = 0, best_i = -1;
     for (int i = 0; i < lim; i++) {
         int m = match_count(&work, &KF[i]);
         if (m > best_m) { best_m = m; best_i = i; }
     }
-    int j_corrected = 0;      /* verified closure filled work.qc/pc */
     if (best_i >= 0 && best_m < CAND_MIN_MATCHES) {
         /* below the candidate bar: say so occasionally, so a "nothing
          * happens" report can distinguish no-match from no-verify */
@@ -1006,6 +1027,7 @@ static void process_keyframe(void) {
             }
         }
     }
+    }   /* end throttled loop search (do_search) */
 
     /* store (mapping mode only; never for a stationary query — those are
      * matching-only; only frames that carry verifiable geometry, at a
@@ -1035,7 +1057,7 @@ static void process_keyframe(void) {
 
 static void *map_thread(void *arg) {
     (void)arg;
-    setpriority(PRIO_PROCESS, (id_t)gettid(), 15);   /* lowest of our threads */
+    setpriority(PRIO_PROCESS, (id_t)gettid(), 19);   /* never outrank VIO */
     pthread_mutex_lock(&MAP_LOCK);
     for (;;) {
         while (!MBOX.full) pthread_cond_wait(&MAP_COND, &MAP_LOCK);
