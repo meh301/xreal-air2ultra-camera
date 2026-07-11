@@ -142,6 +142,13 @@ static struct {
      * the difference blended in smoothly — the AR renderer reads THIS, at
      * full IMU rate, with no feed timestamps involved. Guarded by imu_lock. */
     atomic_int prop_on;                     /* UI A/B: off -> warp fallback */
+
+    /* raw-IMU shake detector (imu_lock): mechanical violence is
+     * unambiguous in the 1 kHz stream — |a| far from 1 g or extreme
+     * rates — unlike in the VIO output, which degrades quietly */
+    uint64_t shake_until;                   /* guarded until (IMU clock) */
+    int shake_hits;
+
     struct {
         int valid;
         uint64_t ts;                /* propagated-to (IMU clock) */
@@ -847,7 +854,14 @@ static void *slam_worker(void *arg) {
                 static int nlm_prev;
                 float vmag = sqrtf(st.v[0] * st.v[0] + st.v[1] * st.v[1] +
                                    st.v[2] * st.v[2]);
-                int degen = vmag > 6.0f ||
+                pthread_mutex_lock(&S.imu_lock);
+                uint64_t shake_until = S.shake_until;
+                pthread_mutex_unlock(&S.imu_lock);
+                /* the raw-IMU detector catches mechanical violence the
+                 * instant it happens; the VIO-side signals below catch
+                 * the quiet failures (occlusion, texture loss) */
+                int degen = st.ts < shake_until ||
+                            vmag > 6.0f ||
                             (nlm_prev > 25 && st.n_landmarks < 5);
                 nlm_prev = st.n_landmarks;
                 if (degen) {
@@ -1404,6 +1418,32 @@ static void *imu_worker(void *arg) {
 
         pthread_mutex_lock(&S.imu_lock);
         S.imu_latest = s;
+        /* shake detector: a violent sample = |a| far outside 1 g or an
+         * extreme rate; a handful within a short burst arms the guard for
+         * 1 s past the last one. Normal fast head turns (~400 dps, |a|
+         * near 1 g) stay well below both thresholds. */
+        {
+            float a2 = s.accel_g[0] * s.accel_g[0] +
+                       s.accel_g[1] * s.accel_g[1] +
+                       s.accel_g[2] * s.accel_g[2];
+            float w2 = s.gyro_dps[0] * s.gyro_dps[0] +
+                       s.gyro_dps[1] * s.gyro_dps[1] +
+                       s.gyro_dps[2] * s.gyro_dps[2];
+            int violent = a2 > 2.8f * 2.8f || a2 < 0.2f * 0.2f ||
+                          w2 > 500.0f * 500.0f;
+            if (violent) {
+                if (S.shake_hits < 100) S.shake_hits++;
+                if (S.shake_hits >= 6) {
+                    if (s.ts_ns > S.shake_until)
+                        LOGI("IMU shake detected (|a|=%.1fg |w|=%.0fdps) — "
+                             "map guarded", (double)sqrtf(a2),
+                             (double)sqrtf(w2));
+                    S.shake_until = s.ts_ns + 1000000000ull;
+                }
+            } else if (S.shake_hits > 0) {
+                S.shake_hits--;
+            }
+        }
         if (S.prop.valid) {
             float pdt = (float)(s.ts_ns - S.prop.ts) * 1e-9f;
             if (pdt > 0 && pdt < 0.05f) prop_step(&s, pdt);
@@ -1462,6 +1502,8 @@ static void imu_start(void) {
     S.ring_head = S.ring_tail = 0;
     S.qhist_n = 0;
     memset(&S.prop, 0, sizeof S.prop);
+    S.shake_until = 0;
+    S.shake_hits = 0;
     imu_enable();
     atomic_store(&S.imu_running, 1);
     pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
