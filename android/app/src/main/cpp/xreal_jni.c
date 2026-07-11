@@ -828,6 +828,39 @@ static void *slam_worker(void *arg) {
              * feature u,v are per-camera pixels — the panes are 1:1) */
             static xr_slam_state st;               /* worker thread only */
             if (xr_slam_poll(&st)) {
+                /* VIO health machine: disruption (shake) -> wait for a
+                 * SUSTAINED recovery -> open the snap-back window. The
+                 * gate is on recovery-complete, not disruption-start:
+                 * corrections while the estimator is degenerate corrupt
+                 * the session frame beyond repair (verified on-device). */
+                static uint64_t disrupted_at, stable_since;   /* worker */
+                static int nlm_prev;
+                float vmag = sqrtf(st.v[0] * st.v[0] + st.v[1] * st.v[1] +
+                                   st.v[2] * st.v[2]);
+                int degen = vmag > 6.0f ||
+                            (nlm_prev > 25 && st.n_landmarks < 5);
+                nlm_prev = st.n_landmarks;
+                if (degen) {
+                    if (!disrupted_at)
+                        LOGI("VIO disruption (|v|=%.1f m/s, lm=%d) — "
+                             "map corrections suspended", (double)vmag,
+                             st.n_landmarks);
+                    disrupted_at = st.ts;
+                    stable_since = 0;
+                } else if (disrupted_at) {
+                    int stable = vmag < 2.0f && st.n_landmarks >= 20;
+                    if (!stable) {
+                        stable_since = 0;
+                    } else if (!stable_since) {
+                        stable_since = st.ts;
+                    } else if (st.ts - stable_since > 2000000000ull) {
+                        disrupted_at = 0;
+                        stable_since = 0;
+                        xr_map_open_snap_window(st.ts);
+                    }
+                }
+                xr_map_set_healthy(disrupted_at == 0);
+
                 /* keyframes store raw ODOM poses + landmarks — the pose
                  * graph's measurements. Offer BEFORE the correction. */
                 xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
@@ -1174,10 +1207,25 @@ static int mcu_set_display_mode(uint8_t mode) {
     return 1;
 }
 
-/* Enter stereo. SBS 60 Hz is this hardware's limit (mode 9 / 90 Hz never
- * engages on-device), so go straight there - one clean renegotiation. */
+/* Enter stereo, negotiating the fastest SBS scan the unit ACKS:
+ * 90 -> 72 -> 60 Hz. This Air 2 Ultra's firmware rejects 90 (observed);
+ * 72 is untested and newer devices may take both. Only an explicit ack
+ * accepts a fast mode — a blind send falls through to 60, the known-good
+ * default. The achieved rate drives the renderer's present pacing. */
 static void mcu_enter_stereo(void) {
+    static const struct { uint8_t mode; int hz; } TRY[] = {
+        { XR_DISPLAY_SBS_90, 90 },
+        { XR_DISPLAY_SBS_72, 72 },
+    };
+    for (int i = 0; i < 2; i++) {
+        if (mcu_set_display_mode(TRY[i].mode) == 0) {
+            LOGI("stereo display: SBS %d Hz engaged", TRY[i].hz);
+            xr_gles_set_refresh(TRY[i].hz);
+            return;
+        }
+    }
     mcu_set_display_mode(XR_DISPLAY_SBS_60);
+    xr_gles_set_refresh(60);
 }
 
 static int imu_send_cmd(uint8_t cmd, const uint8_t *data, size_t n) {

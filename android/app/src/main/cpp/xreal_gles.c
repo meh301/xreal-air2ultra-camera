@@ -71,6 +71,7 @@ static struct {
     uint64_t (*time_fn)(void);                      /* IMU-clock now */
     int (*pose_ar_fn)(uint64_t, float[9]);          /* deadband-free+predicted */
     int (*head_fn)(float[9], float[3]);             /* 1 kHz propagated pose */
+    int refresh_hz;                                 /* panel rate (0 = 60) */
     int loop_n;                                     /* loop/reloc flash */
     uint64_t loop_ts;                               /* event time, IMU clock */
 
@@ -639,14 +640,16 @@ static void *render_thread(void *arg) {
         if (can_atw) {
             struct timespec until;
             clock_gettime(CLOCK_REALTIME, &until);
-            /* camera/depth modes re-warp at the panel's 60 Hz — faster
-             * only burns a big core on mesh reprojection and heats the SoC
-             * into throttling. The AR point pass has no mesh and is cheap,
-             * so it ticks at ~120 Hz: with an unsynced front buffer the
-             * present-to-scanout phase error halves, which halves the
-             * rotation judder. Paced from the PREVIOUS tick so render time
-             * doesn't stretch the period. */
-            int64_t tick = G.eye_mode == XR_EYE_AR ? 8333333LL : 16666667LL;
+            /* camera/depth modes re-warp at the panel rate — faster only
+             * burns a big core on mesh reprojection and heats the SoC
+             * into throttling. The AR point pass has no mesh and is
+             * cheap, so it ticks at twice the panel: with an unsynced
+             * front buffer the present-to-scanout phase error halves,
+             * which halves the rotation judder. Paced from the PREVIOUS
+             * tick so render time doesn't stretch the period. */
+            int hz = G.refresh_hz > 0 ? G.refresh_hz : 60;
+            int64_t period = 1000000000LL / hz;
+            int64_t tick = G.eye_mode == XR_EYE_AR ? period / 2 : period;
             int64_t now_ns = (int64_t)until.tv_sec * 1000000000LL +
                              until.tv_nsec;
             next_tick_ns += tick;
@@ -844,6 +847,12 @@ void xr_gles_set_ar_pose_fn(int (*fn)(uint64_t, float[9])) {
 void xr_gles_set_head_fn(int (*fn)(float[9], float[3])) {
     pthread_mutex_lock(&G.lock);
     G.head_fn = fn;
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_refresh(int hz) {
+    pthread_mutex_lock(&G.lock);
+    G.refresh_hz = hz;
     pthread_mutex_unlock(&G.lock);
 }
 

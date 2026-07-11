@@ -50,6 +50,10 @@ void xr_gles_set_pose_fn(int (*fn)(uint64_t ts_exposure_ns, float dR[9]));
 /* Enable/disable the timewarp at runtime (default on). */
 void xr_gles_set_timewarp(int on);
 
+/* The glasses panel's negotiated refresh rate (default 60). Camera/depth
+ * modes re-present at this rate; the AR point pass at twice it. */
+void xr_gles_set_refresh(int hz);
+
 /* Stage tracked points / landmarks as IMU-frame rays (n x 3 floats) with
  * the exposure timestamp of the frame they were measured in (IMU clock;
  * 0 = unknown). The overlay is timewarped by ITS OWN pose delta, so points

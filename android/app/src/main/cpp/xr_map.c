@@ -49,6 +49,19 @@
 #define CAND_MIN_MATCHES 22
 #define CAND_SKIP_RECENT 5
 
+/* Post-disruption snap-back. While the VIO is DEGENERATE (shake: huge
+ * velocity, landmark collapse) the worker marks the map unhealthy and NO
+ * verification or correction runs — a diverging odometry produces
+ * locally-coherent garbage that passes RANSAC and poisons the corrections
+ * (learned the hard way). Once the worker sees a sustained recovery it
+ * opens this window: young keyframes become matchable, stationary reloc
+ * queries run, and the correction caps relax so the accumulated shake
+ * error can snap out in one verified closure. */
+#define SNAP_WINDOW_NS 20000000000ull
+#define QUERY_INTERVAL_NS 2000000000ull
+#define SNAP_MAX_T_M 5.0f
+#define SNAP_MAX_ANG_RAD 0.79f     /* ~45 deg */
+
 enum { DESC_ORB = 0, DESC_XFEAT = 1 };
 
 typedef struct {
@@ -83,6 +96,7 @@ static pthread_mutex_t MAP_LOCK = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t MAP_COND = PTHREAD_COND_INITIALIZER;
 static struct {                        /* worker -> map thread mailbox */
     int full;
+    int query_only;                    /* snap-window stationary query */
     uint64_t ts;
     float q[4], p[3];
     uint8_t img[XR_OW * XR_OH];
@@ -96,6 +110,9 @@ static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
 static atomic_int GRAPH_ON = 1;
+static atomic_int HEALTHY = 1;         /* driven by the SLAM worker */
+static uint64_t SNAP_UNTIL;            /* snap-back window end (MAP_LOCK) */
+static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
 
 /* Live session correction D = C_newest ∘ O_newest⁻¹ (map -> odom pattern):
  * composes onto every odom-frame quantity leaving the SLAM worker. Updated
@@ -118,12 +135,25 @@ void xr_map_set_graph(int on) {
          on ? "ON" : "OFF (descriptor candidates only, no correction)");
 }
 
+void xr_map_set_healthy(int healthy) {
+    atomic_store(&HEALTHY, healthy ? 1 : 0);
+}
+
+void xr_map_open_snap_window(uint64_t ts_ns) {
+    pthread_mutex_lock(&MAP_LOCK);
+    SNAP_UNTIL = ts_ns + SNAP_WINDOW_NS;
+    pthread_mutex_unlock(&MAP_LOCK);
+    LOGI("session map: VIO recovered -> snap-back reloc window (20 s)");
+}
+
 void xr_map_reset(void) {
     pthread_mutex_lock(&MAP_LOCK);
     KF_N = 0;
     LAST_CAND.have = 0;
     LAST_POSE.have = 0;
     MBOX.full = 0;
+    SNAP_UNTIL = 0;
+    LAST_ACCEPT_NS = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
     CORR.p[0] = CORR.p[1] = CORR.p[2] = 0;
@@ -637,6 +667,7 @@ static void process_keyframe(void) {
     static xr_kf work;                      /* map thread only */
     static uint8_t img[XR_OW * XR_OH];
     pthread_mutex_lock(&MAP_LOCK);
+    int q_only = MBOX.query_only;
     work.ts = MBOX.ts;
     memcpy(work.q, MBOX.q, sizeof work.q);
     memcpy(work.p, MBOX.p, sizeof work.p);
@@ -676,24 +707,30 @@ static void process_keyframe(void) {
     }
 
     int mapping = atomic_load(&MAPPING);
+    int healthy = atomic_load(&HEALTHY);
     pthread_mutex_lock(&MAP_LOCK);
+    int snap = work.ts < SNAP_UNTIL;
     memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
     memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
     LAST_POSE.have = 1;
 
     /* spatial recency: keyframes near the current position stay fresh, so
-     * living in the same space never rolls its map away */
-    for (int i = 0; i < KF_N; i++) {
-        float dx = work.p[0] - KF[i].p[0], dy = work.p[1] - KF[i].p[1],
-              dz = work.p[2] - KF[i].p[2];
-        if (dx * dx + dy * dy + dz * dz < KF_NEAR_M * KF_NEAR_M)
-            KF[i].last_used = work.ts;
-    }
+     * living in the same space never rolls its map away (skipped while
+     * the VIO is degenerate — a garbage pose must not touch eviction) */
+    if (healthy)
+        for (int i = 0; i < KF_N; i++) {
+            float dx = work.p[0] - KF[i].p[0], dy = work.p[1] - KF[i].p[1],
+                  dz = work.p[2] - KF[i].p[2];
+            if (dx * dx + dy * dy + dz * dz < KF_NEAR_M * KF_NEAR_M)
+                KF[i].last_used = work.ts;
+        }
 
     /* loop/reloc candidates: match the CURRENT view against the store
      * (runs in both modes — in localization-only this IS the reloc query).
-     * In mapping mode skip the most recent keyframes (always similar). */
-    int lim = KF_N - (mapping ? CAND_SKIP_RECENT : 0);
+     * In mapping mode skip the most recent keyframes (always similar) —
+     * except inside the snap-back window, where a match against the scene
+     * mapped just before the shake is exactly the cure. */
+    int lim = KF_N - ((mapping && !snap) ? CAND_SKIP_RECENT : 0);
     int best_m = 0, best_i = -1;
     for (int i = 0; i < lim; i++) {
         int m = match_count(&work, &KF[i]);
@@ -712,9 +749,13 @@ static void process_keyframe(void) {
         /* ---- geometric verification: rigid 3D-3D alignment over the
          * matched landmark pairs. A verified alignment A (query-odom ->
          * kf-capture-odom coords) becomes a pose-graph constraint. */
+        /* verification and correction are structurally impossible while
+         * the VIO is degenerate: a diverging odometry emits locally-
+         * coherent garbage geometry that can pass RANSAC, and one such
+         * "verified" closure corrupts the whole correction chain */
         int verified = 0, n3 = 0, nin = 0;
         float qa[4], ta[3];
-        if (atomic_load(&GRAPH_ON)) {
+        if (atomic_load(&GRAPH_ON) && healthy) {
             static int prs[XR_MAP_KP_PER_KF][2];          /* map thread */
             static float Pq[XR_MAP_KP_PER_KF][3];
             static float Pk[XR_MAP_KP_PER_KF][3];
@@ -747,8 +788,11 @@ static void process_keyframe(void) {
                     float ang = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] +
                                       rv[2] * rv[2]);
                     float tn2 = ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2];
-                    if (ang < VER_MAX_ANG_RAD &&
-                        tn2 < VER_MAX_T_M * VER_MAX_T_M)
+                    /* snap-back window: allow the large correction the
+                     * shake accumulated to come out in one closure */
+                    float mxa = snap ? SNAP_MAX_ANG_RAD : VER_MAX_ANG_RAD;
+                    float mxt = snap ? SNAP_MAX_T_M : VER_MAX_T_M;
+                    if (ang < mxa && tn2 < mxt * mxt)
                         verified = 1;
                 }
             }
@@ -851,8 +895,11 @@ static void process_keyframe(void) {
         }
     }
 
-    /* store (mapping mode only), rolling cap: evict least-recently-useful */
-    if (mapping) {
+    /* store (mapping mode only; never from a degenerate VIO — a keyframe
+     * with a garbage pose becomes a booby trap for later closures — and
+     * never from a stationary snap query), rolling cap: evict the
+     * least-recently-useful */
+    if (mapping && healthy && !q_only) {
         if (KF_N == XR_MAP_MAX_KF) {
             int victim = 0;
             for (int i = 1; i < KF_N; i++)
@@ -900,6 +947,7 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
         pthread_mutex_unlock(&MAP_LOCK);
         return;
     }
+    int query_only = 0;
     if (LAST_POSE.have) {
         float dx = p[0] - LAST_POSE.p[0], dy = p[1] - LAST_POSE.p[1],
               dz = p[2] - LAST_POSE.p[2];
@@ -907,10 +955,19 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
                          q[2] * LAST_POSE.q[2] + q[3] * LAST_POSE.q[3]);
         if (dx * dx + dy * dy + dz * dz < KF_DIST_M * KF_DIST_M &&
             qd > KF_ANGLE_COS) {
-            pthread_mutex_unlock(&MAP_LOCK);
-            return;
+            /* stationary. Inside the snap-back window keep the reloc
+             * query alive on a slow cadence (staring at a known scene
+             * must be able to heal the pose); otherwise drop as before. */
+            if (ts_ns >= SNAP_UNTIL ||
+                ts_ns - LAST_ACCEPT_NS < QUERY_INTERVAL_NS) {
+                pthread_mutex_unlock(&MAP_LOCK);
+                return;
+            }
+            query_only = 1;
         }
     }
+    LAST_ACCEPT_NS = ts_ns;
+    MBOX.query_only = query_only;
     MBOX.ts = ts_ns;
     memcpy(MBOX.q, q, sizeof MBOX.q);
     memcpy(MBOX.p, p, sizeof MBOX.p);

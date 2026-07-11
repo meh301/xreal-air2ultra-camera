@@ -237,7 +237,8 @@ class MainActivity : Activity() {
     private fun updatePresentation() {
         for (d in displayManager.displays) {
             android.util.Log.i("xrealcam",
-                "display ${d.displayId}: '${d.name}' flags=0x${d.flags.toString(16)}")
+                "display ${d.displayId}: '${d.name}' " +
+                "flags=0x${d.flags.toString(16)} ${d.refreshRate}Hz")
         }
         val display = displayManager
             .getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
