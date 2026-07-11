@@ -956,24 +956,17 @@ static void *slam_worker(void *arg) {
                                                          (dtr - 1) * 0.5f)));
                     LOGI("correction gen %d APPLIED: shift %.2f m, %.1f deg",
                          gen, (double)dmag, (double)(dang * 57.3f));
-                    if (dmag > 0.25f || dang > 0.14f) {
-                        /* a real snap: the displayed cloud accumulated
-                         * during the bad-pose stretch is NON-rigid garbage
-                         * a rigid transform cannot heal — drop it and let
-                         * it re-fold clean from live landmarks (~1 s) */
-                        memset(MAP_PT, 0, sizeof MAP_PT);
-                        S.map_n = 0;
-                        LOGI("displayed cloud purged (rebuilds clean)");
-                    } else {
-                        for (int i = 0; i < 4096; i++) {
-                            if (!MAP_PT[i].stamp) continue;
-                            float x[3] = { MAP_PT[i].x, MAP_PT[i].y,
-                                           MAP_PT[i].z };
-                            m3v(DR2, x, t3);
-                            MAP_PT[i].x = t3[0] + dp2[0];
-                            MAP_PT[i].y = t3[1] + dp2[1];
-                            MAP_PT[i].z = t3[2] + dp2[2];
-                        }
+                    /* glue the drifted points back onto the main map: they
+                     * are valid geometry in the wrong frame, and ΔD is
+                     * exactly the transform that re-aligns them */
+                    for (int i = 0; i < 4096; i++) {
+                        if (!MAP_PT[i].stamp) continue;
+                        float x[3] = { MAP_PT[i].x, MAP_PT[i].y,
+                                       MAP_PT[i].z };
+                        m3v(DR2, x, t3);
+                        MAP_PT[i].x = t3[0] + dp2[0];
+                        MAP_PT[i].y = t3[1] + dp2[1];
+                        MAP_PT[i].z = t3[2] + dp2[2];
                     }
                     memcpy(Dq, cq, sizeof Dq);
                     memcpy(Dp, cp, sizeof Dp);

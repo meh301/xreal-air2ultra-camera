@@ -48,6 +48,14 @@
 
 #define CAND_MIN_MATCHES 22
 #define CAND_SKIP_RECENT 5
+
+/* Store gates, from the shake-flood logcat: a flailing pose re-passes
+ * the motion gate every few frames and stored ~140 zero-landmark
+ * keyframes in 16 s — junk that can never be verified against, which
+ * evicted the good map at the rolling cap. A keyframe earns storage by
+ * carrying geometry, at a bounded rate. */
+#define STORE_MIN_LM 10
+#define STORE_MIN_INTERVAL_NS 350000000ull
 /* stationary reloc cadence: when the motion gate blocks, a query-only
  * offer still goes through this often — matching (against the SAME
  * old-keyframe set the moving queries use) but never storing. Standing
@@ -104,6 +112,7 @@ static struct {                        /* worker -> map thread mailbox */
 } MBOX;
 static struct { float q[4], p[3]; int have; } LAST_POSE;
 static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
+static uint64_t LAST_STORE_NS;         /* keyframe store rate limit */
 static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
@@ -140,6 +149,7 @@ void xr_map_reset(void) {
     LAST_POSE.have = 0;
     MBOX.full = 0;
     LAST_ACCEPT_NS = 0;
+    LAST_STORE_NS = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     memset(&VER_LAST, 0, sizeof VER_LAST);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
@@ -955,8 +965,11 @@ static void process_keyframe(void) {
     }
 
     /* store (mapping mode only; never for a stationary query — those are
-     * matching-only), rolling cap: evict least-recently-useful */
-    if (mapping && !q_only) {
+     * matching-only; only frames that carry verifiable geometry, at a
+     * bounded rate), rolling cap: evict least-recently-useful */
+    if (mapping && !q_only && work.n_lm >= STORE_MIN_LM &&
+        work.ts - LAST_STORE_NS >= STORE_MIN_INTERVAL_NS) {
+        LAST_STORE_NS = work.ts;
         if (KF_N == XR_MAP_MAX_KF) {
             int victim = 0;
             for (int i = 1; i < KF_N; i++)

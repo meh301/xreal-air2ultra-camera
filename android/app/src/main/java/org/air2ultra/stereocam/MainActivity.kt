@@ -255,9 +255,26 @@ class MainActivity : Activity() {
         if (presentation?.display?.displayId == display.displayId) return
         presentation?.dismiss()
         presentation = GlassesPresentation(this, display).also { it.show() }
-        // the OS composites the glasses at ITS reported rate (seen: 90 Hz),
-        // not the MCU-negotiated scan — pace presents to match
-        XrealNative.nativeSetPanelHz(display.refreshRate)
+        // The glasses' DP link advertises both 60 and 90 Hz modes while the
+        // SBS panel scans at 60: if Android composites at 90, one frame in
+        // three is dropped at a fixed cadence inside the link — robotic
+        // judder no pose work can touch. Request the 60 Hz mode so the
+        // link matches the panel, and pace presents to whatever we got.
+        val mode60 = display.supportedModes
+            .minByOrNull { kotlin.math.abs(it.refreshRate - 60f) }
+        if (mode60 != null && kotlin.math.abs(mode60.refreshRate - 60f) < 3f) {
+            presentation?.window?.let { w ->
+                val attrs = w.attributes
+                attrs.preferredDisplayModeId = mode60.modeId
+                w.attributes = attrs
+            }
+            android.util.Log.i("xrealcam",
+                "requested glasses display mode ${mode60.modeId} " +
+                "(${mode60.refreshRate}Hz)")
+            XrealNative.nativeSetPanelHz(mode60.refreshRate)
+        } else {
+            XrealNative.nativeSetPanelHz(display.refreshRate)
+        }
     }
 
     private val usbReceiver = object : BroadcastReceiver() {
