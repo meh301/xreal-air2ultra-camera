@@ -537,20 +537,26 @@ static int anchored_count(const xr_kf *k) {
  * it in closed form, RANSAC picks the consensus, a linear pass refines
  * the camera center and yaw. */
 #define VER_MIN_PAIRS 8            /* 2D-3D matches needed to try */
-#define VER_COS_TOL 0.99905f       /* bearing inlier: ~2.5 deg */
+/* bearing inlier tolerance ~4 deg. 2.5 deg was too tight: mini-ORB
+ * keypoint noise (~0.5 deg) PLUS the map point's own inverse-depth
+ * position error (a near point off by the 0.35 m cache tolerance is
+ * degrees of bearing from a metre away) left genuine revisits one or two
+ * inliers short of the floor (the on-device "20 pairs, 7 inliers" near
+ * miss). The absolute floor (VER_MIN_PAIRS inliers) still rejects noise. */
+#define VER_COS_TOL 0.99756f       /* ~4 deg */
 #define VER_MIN_RANGE_M 0.3f
-#define VER_MAX_RANGE_M 10.0f      /* stored inverse-depth noisy far out */
+#define VER_MAX_RANGE_M 6.0f       /* near points have trustier depth */
 #define VER_ITERS 120
-#define VER_MAX_T_M 2.5f           /* wilder alignment = wrong place */
-#define VER_MAX_ANG_RAD 0.44f      /* ~25 deg */
+#define VER_MAX_T_M 3.5f           /* a shake can drift more than 2.5 m */
+#define VER_MAX_ANG_RAD 0.61f      /* ~35 deg */
 
 /* overwhelming place-recognition evidence permits a bigger snap: after a
  * violent shake the pose error can exceed the normal caps (especially in
  * yaw), while the map is CERTAIN it is the same scene */
 #define VER_STRONG_MATCHES 33      /* ~1.5x the candidate threshold */
-#define VER_STRONG_INLIERS 14
-#define VER_JUMP_T_M 6.0f
-#define VER_JUMP_ANG_RAD 1.05f     /* ~60 deg */
+#define VER_STRONG_INLIERS 11
+#define VER_JUMP_T_M 8.0f
+#define VER_JUMP_ANG_RAD 1.4f      /* ~80 deg */
 
 /* left-camera geometry, wired in from the SLAM bridge */
 static struct {
@@ -883,7 +889,7 @@ static void process_keyframe(void) {
                 nin = pnp2_ransac(Sw, Pw, n3, Rz, C);
                 VER_LAST.inliers = nin;
                 VER_LAST.outcome = VOUT_FEW_INLIERS;
-                if (nin >= VER_MIN_PAIRS && nin * 100 >= 40 * n3) {
+                if (nin >= VER_MIN_PAIRS && nin * 100 >= 33 * n3) {
                     /* A = T_target o T_cur^-1: the rotation part is
                      * exactly Rz; translation from the recovered body
                      * position (camera center minus the lever arm) */
