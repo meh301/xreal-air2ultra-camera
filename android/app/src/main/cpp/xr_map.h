@@ -41,14 +41,13 @@ void xr_map_set_graph(int on);
 /* VIO health, driven by the SLAM worker every tick. While unhealthy
  * (shake/divergence) NOTHING is verified, corrected, or stored — a
  * diverging odometry produces locally-coherent garbage that passes
- * RANSAC and poisons the correction chain. Candidates still log. */
+ * RANSAC and poisons the correction chain. Candidates still log.
+ * Relocalization needs no separate arming: every keyframe/stationary
+ * query is matched in two tiers (old = loop closure, young = reloc), a
+ * verified near-identity alignment is a silent no-op, and a meaningful
+ * one — the snap-back after a shake — corrects immediately, with jumps
+ * past the normal caps admitted only on strong geometric consensus. */
 void xr_map_set_healthy(int healthy);
-
-/* Called once when the worker sees the VIO demonstrably recovered from a
- * disruption: for the next 20 s young keyframes become matchable, reloc
- * queries run even while stationary, and the correction caps relax so
- * the accumulated shake error snaps out in one verified closure. */
-void xr_map_open_snap_window(uint64_t ts_ns);
 
 void xr_map_reset(void);
 

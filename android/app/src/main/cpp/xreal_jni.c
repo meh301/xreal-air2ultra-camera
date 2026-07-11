@@ -644,7 +644,15 @@ static void dead_reckon(float q[4], float p[3], float v[3], const float g[3],
     }
 }
 
-#define PROP_BLEND_S 0.12f          /* VIO corrections smear over this */
+#define PROP_BLEND_S 0.12f          /* position/velocity corrections */
+/* Orientation corrections blend MUCH slower: the gyro is excellent over
+ * seconds, so the VIO only needs to absorb slow drift — and any small
+ * time offset between the VIO stamp and the IMU replay makes the per-
+ * anchor orientation error proportional to the CURRENT rotation rate
+ * (err ~ ω·δt). Re-applying that at 30 Hz over 0.12 s produced a ~1°
+ * sawtooth during rotation ("snapping by degrees"); over ~1.5 s the
+ * ω-transient averages out while true drift still passes through. */
+#define PROP_BLEND_ROT_S 1.5f
 
 /* per-IMU-sample propagator step (imu_lock held, called by imu_worker) */
 static void prop_step(const xr_imu_sample *s, float dt) {
@@ -655,8 +663,10 @@ static void prop_step(const xr_imu_sample *s, float dt) {
     /* blend the pending VIO correction in — 30 Hz anchors never snap */
     float k = dt / PROP_BLEND_S;
     if (k > 1) k = 1;
-    float erv[3] = { S.prop.err_rv[0] * k, S.prop.err_rv[1] * k,
-                     S.prop.err_rv[2] * k };
+    float kr = dt / PROP_BLEND_ROT_S;
+    if (kr > 1) kr = 1;
+    float erv[3] = { S.prop.err_rv[0] * kr, S.prop.err_rv[1] * kr,
+                     S.prop.err_rv[2] * kr };
     float dq[4], qn[4];
     quat_from_rotvec(erv, dq);
     quat_mul(dq, S.prop.q, qn);                /* world-side: left-mult */
@@ -664,7 +674,7 @@ static void prop_step(const xr_imu_sample *s, float dt) {
     for (int i = 0; i < 3; i++) {
         S.prop.p[i] += S.prop.err_p[i] * k;
         S.prop.v[i] += S.prop.err_v[i] * k;
-        S.prop.err_rv[i] *= 1 - k;
+        S.prop.err_rv[i] *= 1 - kr;
         S.prop.err_p[i] *= 1 - k;
         S.prop.err_v[i] *= 1 - k;
     }
@@ -856,7 +866,7 @@ static void *slam_worker(void *arg) {
                     } else if (st.ts - stable_since > 2000000000ull) {
                         disrupted_at = 0;
                         stable_since = 0;
-                        xr_map_open_snap_window(st.ts);
+                        LOGI("VIO recovered — map corrections re-enabled");
                     }
                 }
                 xr_map_set_healthy(disrupted_at == 0);

@@ -47,20 +47,22 @@
 #define XF_MARGIN 1200
 
 #define CAND_MIN_MATCHES 22
-#define CAND_SKIP_RECENT 5
 
-/* Post-disruption snap-back. While the VIO is DEGENERATE (shake: huge
- * velocity, landmark collapse) the worker marks the map unhealthy and NO
- * verification or correction runs — a diverging odometry produces
- * locally-coherent garbage that passes RANSAC and poisons the corrections
- * (learned the hard way). Once the worker sees a sustained recovery it
- * opens this window: young keyframes become matchable, stationary reloc
- * queries run, and the correction caps relax so the accumulated shake
- * error can snap out in one verified closure. */
-#define SNAP_WINDOW_NS 20000000000ull
-#define QUERY_INTERVAL_NS 2000000000ull
-#define SNAP_MAX_T_M 5.0f
-#define SNAP_MAX_ANG_RAD 0.79f     /* ~45 deg */
+/* Relocalization without a disruption detector. Keyframes are scanned in
+ * two tiers — the best OLD match (a real loop) and the best YOUNG match
+ * (normally a trivial self-match). Verified alignments classify by
+ * magnitude: near-identity ones are the expected no-op and stay silent;
+ * a MEANINGFUL alignment against a young keyframe is precisely a
+ * post-disruption relocalization (the shake snap-back), and a jump
+ * beyond the normal caps is accepted only on STRONG geometric consensus.
+ * Stationary reloc queries always run on a slow cadence. */
+#define KF_YOUNG_NS 30000000000ull  /* two-tier boundary */
+#define QUERY_INTERVAL_NS 2500000000ull
+#define VER_TRIVIAL_T_M 0.15f       /* below this a closure is a no-op */
+#define VER_TRIVIAL_ANG_RAD 0.087f  /* ~5 deg */
+#define VER_STRONG_INLIERS 15       /* strong consensus permits a jump */
+#define VER_JUMP_T_M 5.0f
+#define VER_JUMP_ANG_RAD 0.79f      /* ~45 deg */
 
 enum { DESC_ORB = 0, DESC_XFEAT = 1 };
 
@@ -111,7 +113,6 @@ static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
 static atomic_int GRAPH_ON = 1;
 static atomic_int HEALTHY = 1;         /* driven by the SLAM worker */
-static uint64_t SNAP_UNTIL;            /* snap-back window end (MAP_LOCK) */
 static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
 
 /* Live session correction D = C_newest ∘ O_newest⁻¹ (map -> odom pattern):
@@ -139,20 +140,12 @@ void xr_map_set_healthy(int healthy) {
     atomic_store(&HEALTHY, healthy ? 1 : 0);
 }
 
-void xr_map_open_snap_window(uint64_t ts_ns) {
-    pthread_mutex_lock(&MAP_LOCK);
-    SNAP_UNTIL = ts_ns + SNAP_WINDOW_NS;
-    pthread_mutex_unlock(&MAP_LOCK);
-    LOGI("session map: VIO recovered -> snap-back reloc window (20 s)");
-}
-
 void xr_map_reset(void) {
     pthread_mutex_lock(&MAP_LOCK);
     KF_N = 0;
     LAST_CAND.have = 0;
     LAST_POSE.have = 0;
     MBOX.full = 0;
-    SNAP_UNTIL = 0;
     LAST_ACCEPT_NS = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
@@ -660,6 +653,204 @@ static int align_ransac(const float (*pq)[3], const float (*pk)[3], int n,
     return in2;
 }
 
+/* ---- candidate handling (MAP_LOCK held) ------------------------------------------ */
+
+/* the matched keyframe becomes the panel marker + AR flash, in the
+ * SESSION frame: stored landmarks through D_i = C_i ∘ O_i⁻¹ */
+static void record_event(const xr_kf *w, int best_i, int best_m) {
+    LAST_CAND.a = w->ts;
+    LAST_CAND.b = KF[best_i].ts;
+    LAST_CAND.matches = best_m;
+    LAST_CAND.have = 1;
+    LOOP_STATS.count++;
+    LOOP_STATS.matches = best_m;
+    float qoi[4], poi[3], qdi[4], pdi[3];
+    pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
+    pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
+    memcpy(LOOP_STATS.pos, KF[best_i].pc, sizeof LOOP_STATS.pos);
+    LOOP_STATS.n_lm = KF[best_i].n_lm;
+    for (int i = 0; i < KF[best_i].n_lm; i++) {
+        float t[3];
+        qrotv(qdi, KF[best_i].lm_xyz[i], t);
+        LOOP_STATS.lm[i][0] = t[0] + pdi[0];
+        LOOP_STATS.lm[i][1] = t[1] + pdi[1];
+        LOOP_STATS.lm[i][2] = t[2] + pdi[2];
+    }
+}
+
+/* Examine one tier's best match. Verified alignments classify by
+ * magnitude: near-identity = the expected no-op against a recent/nearby
+ * keyframe; meaningful = a real loop closure or (young tier) a
+ * post-disruption relocalization. A jump past the normal caps needs
+ * STRONG consensus — that is the shake snap-back, and it needs no
+ * disruption detector: the geometry itself is the evidence. */
+static void consider_candidate(xr_kf *w, int best_i, int best_m,
+                               int mapping, int healthy, int young,
+                               int *j_corrected) {
+    if (best_i < 0 || best_m < CAND_MIN_MATCHES) return;
+    KF[best_i].last_used = w->ts;          /* matched = useful */
+
+    int graph = atomic_load(&GRAPH_ON) && healthy;
+    if (!graph) {
+        /* candidates only (pose graph off / VIO degenerate). Young-tier
+         * matches are trivial by construction — report old ones. */
+        if (young) return;
+        record_event(w, best_i, best_m);
+        LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs)",
+             mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
+             best_m, w->desc_type == DESC_XFEAT ? "xfeat" : "orb",
+             (double)(w->ts - KF[best_i].ts) / 1e9);
+        return;
+    }
+
+    /* geometric verification: rigid 3D-3D alignment over matched
+     * landmark pairs (query-odom -> kf-capture-odom coords) */
+    int verified = 0, meaningful = 0, n3 = 0, nin = 0;
+    float qa[4], ta[3] = { 0, 0, 0 };
+    {
+        static int prs[XR_MAP_KP_PER_KF][2];          /* map thread */
+        static float Pq[XR_MAP_KP_PER_KF][3];
+        static float Pk[XR_MAP_KP_PER_KF][3];
+        int np = match_pairs(w, &KF[best_i], prs, XR_MAP_KP_PER_KF);
+        for (int m = 0; m < np; m++) {
+            int lq = w->lm_of_kp[prs[m][0]];
+            int lk = KF[best_i].lm_of_kp[prs[m][1]];
+            if (lq < 0 || lk < 0) continue;
+            float dq2 = 0, dk2 = 0;
+            for (int c = 0; c < 3; c++) {
+                float a = w->lm_xyz[lq][c] - w->p[c];
+                float b = KF[best_i].lm_xyz[lk][c] - KF[best_i].p[c];
+                dq2 += a * a;
+                dk2 += b * b;
+            }
+            if (dq2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M ||
+                dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M)
+                continue;
+            memcpy(Pq[n3], w->lm_xyz[lq], sizeof Pq[0]);
+            memcpy(Pk[n3], KF[best_i].lm_xyz[lk], sizeof Pk[0]);
+            n3++;
+        }
+        if (n3 >= VER_MIN_3D) {
+            float Ra[9];
+            nin = align_ransac(Pq, Pk, n3, Ra, ta);
+            if (nin >= VER_MIN_3D && nin * 100 >= 35 * n3) {
+                float rv[3];
+                R2q(Ra, qa);
+                rv_from_q(qa, rv);
+                float ang = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] +
+                                  rv[2] * rv[2]);
+                float tn = sqrtf(ta[0] * ta[0] + ta[1] * ta[1] +
+                                 ta[2] * ta[2]);
+                if (tn < VER_TRIVIAL_T_M && ang < VER_TRIVIAL_ANG_RAD) {
+                    verified = 1;          /* expected no-op */
+                } else {
+                    int strong = nin >= VER_STRONG_INLIERS &&
+                                 nin * 2 >= n3;
+                    float mxt = strong ? VER_JUMP_T_M : VER_MAX_T_M;
+                    float mxa = strong ? VER_JUMP_ANG_RAD : VER_MAX_ANG_RAD;
+                    if (tn < mxt && ang < mxa) {
+                        verified = 1;
+                        meaningful = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if (verified && !meaningful) {
+        /* near-identity closure: tracking agrees with the map here. For
+         * an OLD keyframe that is still a confirmed loop — count it. */
+        if (!young) {
+            record_event(w, best_i, best_m);
+            LOGI("session map: LOOP VERIFIED kf#%d: %d/%d 3D inliers, "
+                 "drift negligible", best_i, nin, n3);
+        }
+        return;
+    }
+    if (!verified) {
+        /* young unverified = the previous keyframe under blur/noise —
+         * only old-tier failures are worth reporting */
+        if (!young)
+            LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs) "
+                 "unverified (%d 3D pairs, %d inliers)",
+                 mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
+                 best_m, w->desc_type == DESC_XFEAT ? "xfeat" : "orb",
+                 (double)(w->ts - KF[best_i].ts) / 1e9, n3, nin);
+        return;
+    }
+
+    /* meaningful verified closure: apply the correction.
+     * D_i = C_i ∘ O_i⁻¹; session pose of the query: C_j = D_i ∘ A ∘ O_j */
+    float qoi[4], poi[3], qdi[4], pdi[3];
+    pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
+    pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
+    float qda[4], pda[3];                     /* D_i ∘ A */
+    pose_compose(qdi, pdi, qa, ta, qda, pda);
+    float qcj[4], pcj[3];                     /* C_j */
+    pose_compose(qda, pda, w->q, w->p, qcj, pcj);
+
+    if (mapping && KF_N > best_i + 1) {
+        /* distribute the change over the chain (i .. newest] by
+         * cumulative odom path length — drift accrues with distance.
+         * Node i itself is the trusted anchor. */
+        float qce[4], pce[3];                 /* current estimate */
+        pose_compose(CORR.q, CORR.p, w->q, w->p, qce, pce);
+        float qinv[4], pinv[3], qe[4], pe[3]; /* E = C_j ∘ est⁻¹ */
+        pose_invert(qce, pce, qinv, pinv);
+        pose_compose(qcj, pcj, qinv, pinv, qe, pe);
+        float rve[3];
+        rv_from_q(qe, rve);
+        float total = 0;
+        for (int k = best_i; k < KF_N - 1; k++) {
+            float d = 0;
+            for (int c = 0; c < 3; c++) {
+                float x = KF[k + 1].p[c] - KF[k].p[c];
+                d += x * x;
+            }
+            total += sqrtf(d);
+        }
+        float dlast = 0;
+        for (int c = 0; c < 3; c++) {
+            float x = w->p[c] - KF[KF_N - 1].p[c];
+            dlast += x * x;
+        }
+        total += sqrtf(dlast);
+        float cum = 0;
+        for (int k = best_i + 1; k < KF_N; k++) {
+            float d = 0;
+            for (int c = 0; c < 3; c++) {
+                float x = KF[k].p[c] - KF[k - 1].p[c];
+                d += x * x;
+            }
+            cum += sqrtf(d);
+            float f = total > 0.01f
+                          ? cum / total
+                          : (float)(k - best_i) / (float)(KF_N - best_i);
+            float rvf[3] = { rve[0] * f, rve[1] * f, rve[2] * f };
+            float qef[4], pef[3] = { pe[0] * f, pe[1] * f, pe[2] * f };
+            q_from_rv(rvf, qef);
+            float qn[4], pn[3];               /* E^f ∘ C_k */
+            pose_compose(qef, pef, KF[k].qc, KF[k].pc, qn, pn);
+            memcpy(KF[k].qc, qn, sizeof qn);
+            memcpy(KF[k].pc, pn, sizeof pn);
+        }
+    }
+    /* publish the live correction D = C_j ∘ O_j⁻¹ (in loc-only mode
+     * this IS the relocalization of the displayed pose) */
+    float qoj[4], poj[3];
+    pose_invert(w->q, w->p, qoj, poj);
+    pose_compose(qcj, pcj, qoj, poj, CORR.q, CORR.p);
+    CORR.gen++;
+    memcpy(w->qc, qcj, sizeof w->qc);
+    memcpy(w->pc, pcj, sizeof w->pc);
+    *j_corrected = 1;
+    record_event(w, best_i, best_m);
+    LOGI("session map: %s kf#%d: %d/%d 3D inliers, |t|=%.2fm, corr gen %d",
+         young ? "RELOC SNAP vs" : "LOOP VERIFIED", best_i, nin, n3,
+         sqrt((double)(ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2])),
+         CORR.gen);
+}
+
 /* ---- map thread ----------------------------------------------------------------- */
 
 static void process_keyframe(void) {
@@ -709,7 +900,6 @@ static void process_keyframe(void) {
     int mapping = atomic_load(&MAPPING);
     int healthy = atomic_load(&HEALTHY);
     pthread_mutex_lock(&MAP_LOCK);
-    int snap = work.ts < SNAP_UNTIL;
     memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
     memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
     LAST_POSE.have = 1;
@@ -725,175 +915,25 @@ static void process_keyframe(void) {
                 KF[i].last_used = work.ts;
         }
 
-    /* loop/reloc candidates: match the CURRENT view against the store
-     * (runs in both modes — in localization-only this IS the reloc query).
-     * In mapping mode skip the most recent keyframes (always similar) —
-     * except inside the snap-back window, where a match against the scene
-     * mapped just before the shake is exactly the cure. */
-    int lim = KF_N - ((mapping && !snap) ? CAND_SKIP_RECENT : 0);
-    int best_m = 0, best_i = -1;
-    for (int i = 0; i < lim; i++) {
+    /* candidate scan, two tiers: the best OLD keyframe (a real loop) and
+     * the best YOUNG one — normally a trivial self-match, but after a
+     * tracking discontinuity its verified alignment IS the snap-back
+     * relocalization (see consider_candidate) */
+    int best_mo = 0, best_io = -1, best_my = 0, best_iy = -1;
+    for (int i = 0; i < KF_N; i++) {
         int m = match_count(&work, &KF[i]);
-        if (m > best_m) { best_m = m; best_i = i; }
-    }
-    int j_corrected = 0;      /* verified closure filled work.qc/pc */
-    if (best_i >= 0 && best_m >= CAND_MIN_MATCHES) {
-        KF[best_i].last_used = work.ts;    /* matched = useful */
-        LAST_CAND.a = work.ts;
-        LAST_CAND.b = KF[best_i].ts;
-        LAST_CAND.matches = best_m;
-        LAST_CAND.have = 1;
-        LOOP_STATS.count++;
-        LOOP_STATS.matches = best_m;
-
-        /* ---- geometric verification: rigid 3D-3D alignment over the
-         * matched landmark pairs. A verified alignment A (query-odom ->
-         * kf-capture-odom coords) becomes a pose-graph constraint. */
-        /* verification and correction are structurally impossible while
-         * the VIO is degenerate: a diverging odometry emits locally-
-         * coherent garbage geometry that can pass RANSAC, and one such
-         * "verified" closure corrupts the whole correction chain */
-        int verified = 0, n3 = 0, nin = 0;
-        float qa[4], ta[3];
-        if (atomic_load(&GRAPH_ON) && healthy) {
-            static int prs[XR_MAP_KP_PER_KF][2];          /* map thread */
-            static float Pq[XR_MAP_KP_PER_KF][3];
-            static float Pk[XR_MAP_KP_PER_KF][3];
-            int np = match_pairs(&work, &KF[best_i], prs, XR_MAP_KP_PER_KF);
-            for (int m = 0; m < np; m++) {
-                int lq = work.lm_of_kp[prs[m][0]];
-                int lk = KF[best_i].lm_of_kp[prs[m][1]];
-                if (lq < 0 || lk < 0) continue;
-                float dq2 = 0, dk2 = 0;
-                for (int c = 0; c < 3; c++) {
-                    float a = work.lm_xyz[lq][c] - work.p[c];
-                    float b = KF[best_i].lm_xyz[lk][c] - KF[best_i].p[c];
-                    dq2 += a * a;
-                    dk2 += b * b;
-                }
-                if (dq2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M ||
-                    dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M)
-                    continue;
-                memcpy(Pq[n3], work.lm_xyz[lq], sizeof Pq[0]);
-                memcpy(Pk[n3], KF[best_i].lm_xyz[lk], sizeof Pk[0]);
-                n3++;
-            }
-            if (n3 >= VER_MIN_3D) {
-                float Ra[9];
-                nin = align_ransac(Pq, Pk, n3, Ra, ta);
-                if (nin >= VER_MIN_3D && nin * 100 >= 35 * n3) {
-                    float rv[3];
-                    R2q(Ra, qa);
-                    rv_from_q(qa, rv);
-                    float ang = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] +
-                                      rv[2] * rv[2]);
-                    float tn2 = ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2];
-                    /* snap-back window: allow the large correction the
-                     * shake accumulated to come out in one closure */
-                    float mxa = snap ? SNAP_MAX_ANG_RAD : VER_MAX_ANG_RAD;
-                    float mxt = snap ? SNAP_MAX_T_M : VER_MAX_T_M;
-                    if (ang < mxa && tn2 < mxt * mxt)
-                        verified = 1;
-                }
-            }
-        }
-
-        if (verified) {
-            /* D_i = C_i ∘ O_i⁻¹ (node i's point-level correction);
-             * session pose of the query: C_j = D_i ∘ A ∘ O_j */
-            float qoi[4], poi[3], qdi[4], pdi[3];
-            pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
-            pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
-            float qda[4], pda[3];                     /* D_i ∘ A */
-            pose_compose(qdi, pdi, qa, ta, qda, pda);
-            float qcj[4], pcj[3];                     /* C_j */
-            pose_compose(qda, pda, work.q, work.p, qcj, pcj);
-
-            if (mapping && KF_N > best_i + 1) {
-                /* distribute the change over the chain (i .. newest] by
-                 * cumulative odom path length — drift accrues with
-                 * distance. Node i itself is the trusted anchor. */
-                float qce[4], pce[3];                 /* current estimate */
-                pose_compose(CORR.q, CORR.p, work.q, work.p, qce, pce);
-                float qinv[4], pinv[3], qe[4], pe[3]; /* E = C_j ∘ est⁻¹ */
-                pose_invert(qce, pce, qinv, pinv);
-                pose_compose(qcj, pcj, qinv, pinv, qe, pe);
-                float rve[3];
-                rv_from_q(qe, rve);
-                float total = 0;
-                for (int k = best_i; k < KF_N - 1; k++) {
-                    float d = 0;
-                    for (int c = 0; c < 3; c++) {
-                        float x = KF[k + 1].p[c] - KF[k].p[c];
-                        d += x * x;
-                    }
-                    total += sqrtf(d);
-                }
-                float dlast = 0;
-                for (int c = 0; c < 3; c++) {
-                    float x = work.p[c] - KF[KF_N - 1].p[c];
-                    dlast += x * x;
-                }
-                total += sqrtf(dlast);
-                float cum = 0;
-                for (int k = best_i + 1; k < KF_N; k++) {
-                    float d = 0;
-                    for (int c = 0; c < 3; c++) {
-                        float x = KF[k].p[c] - KF[k - 1].p[c];
-                        d += x * x;
-                    }
-                    cum += sqrtf(d);
-                    float f = total > 0.01f
-                                  ? cum / total
-                                  : (float)(k - best_i) / (float)(KF_N - best_i);
-                    float rvf[3] = { rve[0] * f, rve[1] * f, rve[2] * f };
-                    float qef[4], pef[3] = { pe[0] * f, pe[1] * f, pe[2] * f };
-                    q_from_rv(rvf, qef);
-                    float qn[4], pn[3];               /* E^f ∘ C_k */
-                    pose_compose(qef, pef, KF[k].qc, KF[k].pc, qn, pn);
-                    memcpy(KF[k].qc, qn, sizeof qn);
-                    memcpy(KF[k].pc, pn, sizeof pn);
-                }
-            }
-            /* publish the live correction D = C_j ∘ O_j⁻¹ (in loc-only
-             * mode this IS the relocalization of the displayed pose) */
-            float qoj[4], poj[3];
-            pose_invert(work.q, work.p, qoj, poj);
-            pose_compose(qcj, pcj, qoj, poj, CORR.q, CORR.p);
-            CORR.gen++;
-            memcpy(work.qc, qcj, sizeof work.qc);
-            memcpy(work.pc, pcj, sizeof work.pc);
-            j_corrected = 1;
-            LOGI("session map: LOOP VERIFIED kf#%d: %d/%d 3D inliers, "
-                 "|t|=%.2fm, corr gen %d",
-                 best_i, nin, n3,
-                 sqrt((double)(ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2])),
-                 CORR.gen);
-        } else {
-            LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs) "
-                 "unverified (%d 3D pairs, %d inliers)",
-                 mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
-                 best_m, work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
-                 (double)(work.ts - KF[best_i].ts) / 1e9, n3, nin);
-        }
-
-        /* AR flash + panel marker, in the SESSION frame: stored landmarks
-         * through D_i = C_i ∘ O_i⁻¹ */
-        {
-            float qoi[4], poi[3], qdi[4], pdi[3];
-            pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
-            pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
-            memcpy(LOOP_STATS.pos, KF[best_i].pc, sizeof LOOP_STATS.pos);
-            LOOP_STATS.n_lm = KF[best_i].n_lm;
-            for (int i = 0; i < KF[best_i].n_lm; i++) {
-                float t[3];
-                qrotv(qdi, KF[best_i].lm_xyz[i], t);
-                LOOP_STATS.lm[i][0] = t[0] + pdi[0];
-                LOOP_STATS.lm[i][1] = t[1] + pdi[1];
-                LOOP_STATS.lm[i][2] = t[2] + pdi[2];
-            }
+        if (work.ts - KF[i].ts > KF_YOUNG_NS) {
+            if (m > best_mo) { best_mo = m; best_io = i; }
+        } else if (m > best_my) {
+            best_my = m;
+            best_iy = i;
         }
     }
+    int j_corrected = 0;      /* a verified closure filled work.qc/pc */
+    consider_candidate(&work, best_io, best_mo, mapping, healthy, 0,
+                       &j_corrected);
+    consider_candidate(&work, best_iy, best_my, mapping, healthy, 1,
+                       &j_corrected);
 
     /* store (mapping mode only; never from a degenerate VIO — a keyframe
      * with a garbage pose becomes a booby trap for later closures — and
@@ -955,11 +995,9 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
                          q[2] * LAST_POSE.q[2] + q[3] * LAST_POSE.q[3]);
         if (dx * dx + dy * dy + dz * dz < KF_DIST_M * KF_DIST_M &&
             qd > KF_ANGLE_COS) {
-            /* stationary. Inside the snap-back window keep the reloc
-             * query alive on a slow cadence (staring at a known scene
-             * must be able to heal the pose); otherwise drop as before. */
-            if (ts_ns >= SNAP_UNTIL ||
-                ts_ns - LAST_ACCEPT_NS < QUERY_INTERVAL_NS) {
+            /* stationary: keep the reloc query alive on a slow cadence —
+             * staring at a known scene must be able to heal the pose */
+            if (ts_ns - LAST_ACCEPT_NS < QUERY_INTERVAL_NS) {
                 pthread_mutex_unlock(&MAP_LOCK);
                 return;
             }
