@@ -47,19 +47,7 @@
 #define XF_MARGIN 1200
 
 #define CAND_MIN_MATCHES 22
-/* mapping mode: don't match keyframes younger than this — the odometry has
- * barely drifted, so the "loop" is trivial. Age-based (not index-based) so
- * a reloc after a tracking disruption can still reach recent scenes; the
- * disruption flag below lifts even this. */
-#define CAND_MIN_AGE_NS 10000000000ull
-/* stationary reloc cadence: when the motion gate blocks, a query-only
- * offer still goes through this often — without it, standing still and
- * looking at a known scene never queries the map at all */
-#define QUERY_INTERVAL_NS 2000000000ull
-/* don't store keyframes with fewer landmarks (shake/blur frames poison
- * the store and can't be verified against later) */
-#define STORE_MIN_LM 12
-#define DISRUPT_EAGER_NS 30000000000ull
+#define CAND_SKIP_RECENT 5
 
 enum { DESC_ORB = 0, DESC_XFEAT = 1 };
 
@@ -95,7 +83,6 @@ static pthread_mutex_t MAP_LOCK = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t MAP_COND = PTHREAD_COND_INITIALIZER;
 static struct {                        /* worker -> map thread mailbox */
     int full;
-    int query_only;                    /* stationary reloc query: no store */
     uint64_t ts;
     float q[4], p[3];
     uint8_t img[XR_OW * XR_OH];
@@ -104,8 +91,6 @@ static struct {                        /* worker -> map thread mailbox */
     float lm_xyz[XR_MAP_KP_PER_KF][3];
     float lm_uv[XR_MAP_KP_PER_KF][2];
 } MBOX;
-static uint64_t LAST_ACCEPT_NS;        /* offer cadence anchor */
-static uint64_t DISRUPT_UNTIL;         /* reloc-eager window end */
 static struct { float q[4], p[3]; int have; } LAST_POSE;
 static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
@@ -133,23 +118,12 @@ void xr_map_set_graph(int on) {
          on ? "ON" : "OFF (descriptor candidates only, no correction)");
 }
 
-void xr_map_note_disruption(uint64_t ts_ns) {
-    pthread_mutex_lock(&MAP_LOCK);
-    int fresh = ts_ns >= DISRUPT_UNTIL;
-    DISRUPT_UNTIL = ts_ns + DISRUPT_EAGER_NS;
-    pthread_mutex_unlock(&MAP_LOCK);
-    if (fresh)
-        LOGI("session map: tracking disruption -> reloc-eager for 30 s");
-}
-
 void xr_map_reset(void) {
     pthread_mutex_lock(&MAP_LOCK);
     KF_N = 0;
     LAST_CAND.have = 0;
     LAST_POSE.have = 0;
     MBOX.full = 0;
-    LAST_ACCEPT_NS = 0;
-    DISRUPT_UNTIL = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
     CORR.p[0] = CORR.p[1] = CORR.p[2] = 0;
@@ -663,7 +637,6 @@ static void process_keyframe(void) {
     static xr_kf work;                      /* map thread only */
     static uint8_t img[XR_OW * XR_OH];
     pthread_mutex_lock(&MAP_LOCK);
-    int q_only = MBOX.query_only;
     work.ts = MBOX.ts;
     memcpy(work.q, MBOX.q, sizeof work.q);
     memcpy(work.p, MBOX.p, sizeof work.p);
@@ -719,14 +692,10 @@ static void process_keyframe(void) {
 
     /* loop/reloc candidates: match the CURRENT view against the store
      * (runs in both modes — in localization-only this IS the reloc query).
-     * In mapping mode skip YOUNG keyframes (trivial matches), except in
-     * the reloc-eager window after a tracking disruption, where a match
-     * to a just-mapped scene is exactly the cure. */
-    int eager = work.ts < DISRUPT_UNTIL;
+     * In mapping mode skip the most recent keyframes (always similar). */
+    int lim = KF_N - (mapping ? CAND_SKIP_RECENT : 0);
     int best_m = 0, best_i = -1;
-    for (int i = 0; i < KF_N; i++) {
-        if (mapping && !eager && work.ts - KF[i].ts < CAND_MIN_AGE_NS)
-            continue;
+    for (int i = 0; i < lim; i++) {
         int m = match_count(&work, &KF[i]);
         if (m > best_m) { best_m = m; best_i = i; }
     }
@@ -882,10 +851,8 @@ static void process_keyframe(void) {
         }
     }
 
-    /* store (mapping mode only; not for stationary queries, and not for
-     * degraded frames — shake/blur keyframes poison the store and can
-     * never be verified against), rolling cap: evict least-recently-useful */
-    if (mapping && !q_only && work.n_lm >= STORE_MIN_LM) {
+    /* store (mapping mode only), rolling cap: evict least-recently-useful */
+    if (mapping) {
         if (KF_N == XR_MAP_MAX_KF) {
             int victim = 0;
             for (int i = 1; i < KF_N; i++)
@@ -933,7 +900,6 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
         pthread_mutex_unlock(&MAP_LOCK);
         return;
     }
-    int query_only = 0;
     if (LAST_POSE.have) {
         float dx = p[0] - LAST_POSE.p[0], dy = p[1] - LAST_POSE.p[1],
               dz = p[2] - LAST_POSE.p[2];
@@ -941,17 +907,10 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
                          q[2] * LAST_POSE.q[2] + q[3] * LAST_POSE.q[3]);
         if (dx * dx + dy * dy + dz * dz < KF_DIST_M * KF_DIST_M &&
             qd > KF_ANGLE_COS) {
-            /* stationary: keep the relocalization query alive on a slow
-             * cadence — matching runs, nothing is stored */
-            if (ts_ns - LAST_ACCEPT_NS < QUERY_INTERVAL_NS) {
-                pthread_mutex_unlock(&MAP_LOCK);
-                return;
-            }
-            query_only = 1;
+            pthread_mutex_unlock(&MAP_LOCK);
+            return;
         }
     }
-    LAST_ACCEPT_NS = ts_ns;
-    MBOX.query_only = query_only;
     MBOX.ts = ts_ns;
     memcpy(MBOX.q, q, sizeof MBOX.q);
     memcpy(MBOX.p, p, sizeof MBOX.p);

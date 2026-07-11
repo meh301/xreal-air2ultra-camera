@@ -40,12 +40,6 @@ void xr_map_set_graph(int on);
 
 void xr_map_reset(void);
 
-/* Tracking disruption (shake, occlusion, VIO reset): for the next 30 s
- * the candidate search also matches YOUNG keyframes (normally skipped in
- * mapping mode as trivial), so a reloc against a just-mapped scene can
- * heal the pose. Call with the current frame timestamp. */
-void xr_map_note_disruption(uint64_t ts_ns);
-
 /* Offer a keyframe from the SLAM worker (non-blocking; drops when the
  * map thread is busy). Processed when moved >= 0.3 m or turned >= 15 deg
  * since the last processed one. img = the conditioned left frame

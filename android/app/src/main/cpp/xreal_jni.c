@@ -828,26 +828,6 @@ static void *slam_worker(void *arg) {
              * feature u,v are per-camera pixels — the panes are 1:1) */
             static xr_slam_state st;               /* worker thread only */
             if (xr_slam_poll(&st)) {
-                /* tracking-disruption detector: a shake or occlusion makes
-                 * the odom pose jump or the landmark set collapse — tell
-                 * the session map to relocalize eagerly for a while */
-                static float dis_p[3];             /* worker only */
-                static uint64_t dis_ts;
-                static int dis_nlm;
-                if (dis_ts && st.ts > dis_ts) {
-                    float dt = (float)(st.ts - dis_ts) * 1e-9f;
-                    if (dt < 1e-3f) dt = 1e-3f;
-                    float dx = st.p[0] - dis_p[0], dy = st.p[1] - dis_p[1],
-                          dz = st.p[2] - dis_p[2];
-                    float sp = sqrtf(dx * dx + dy * dy + dz * dz) / dt;
-                    if (sp > 8.0f ||
-                        (dis_nlm > 25 && st.n_landmarks < 5))
-                        xr_map_note_disruption(st.ts);
-                }
-                memcpy(dis_p, st.p, sizeof dis_p);
-                dis_ts = st.ts;
-                dis_nlm = st.n_landmarks;
-
                 /* keyframes store raw ODOM poses + landmarks — the pose
                  * graph's measurements. Offer BEFORE the correction. */
                 xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
