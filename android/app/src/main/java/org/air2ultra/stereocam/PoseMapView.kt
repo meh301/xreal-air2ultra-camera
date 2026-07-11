@@ -375,6 +375,8 @@ class PoseMapView @JvmOverloads constructor(
             3 -> "ver=inliers:%d/%d".format(verInliers, verPairs)
             4 -> "ver=CAPPED %d/%d".format(verInliers, verPairs)
             5 -> "ver=SNAP %d/%d".format(verInliers, verPairs)
+            6 -> "ver=aligned %d/%d".format(verInliers, verPairs)
+            7 -> "ver=confirm? %d/%d".format(verInliers, verPairs)
             else -> "ver=—"
         }
         canvas.drawText("trk=%d|%d  map=%d  kf=%d  loop=%d  %s".format(

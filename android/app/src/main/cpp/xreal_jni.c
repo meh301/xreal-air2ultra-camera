@@ -943,12 +943,13 @@ static void *slam_worker(void *arg) {
                 }
 
                 /* keyframes store raw ODOM poses + landmarks — the pose
-                 * graph's measurements. Offer BEFORE the correction, but
-                 * never during a shake (that map is garbage and would
-                 * become a false relocalization target). */
-                if (st.ts >= atomic_load(&S.shake_until))
-                    xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
-                                 off_id, off_xyz, off_uv, off_n);
+                 * graph's measurements. During a shake, keep OFFERING
+                 * (the query must relocalize into the existing map) but
+                 * FREEZE storage so the garbage post-shake odometry cannot
+                 * lay down a competing map in the wrong frame. */
+                xr_map_freeze_storage(st.ts < atomic_load(&S.shake_until));
+                xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
+                             off_id, off_xyz, off_uv, off_n);
 
                 /* session correction from the pose graph (identity until
                  * the first VERIFIED loop closure), applied in place: the

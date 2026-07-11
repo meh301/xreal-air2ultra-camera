@@ -48,6 +48,10 @@ void xr_map_set_mapping(int on);
  * continuous and an external reference owns global placement. */
 void xr_map_set_recovery(int on);
 
+/* Freeze keyframe storage while tracking is shaken/lost (queries keep
+ * running so the pose can relocalize into the existing map). */
+void xr_map_freeze_storage(int frozen);
+
 /* Left-camera geometry for PnP verification (ORB-SLAM-style reloc: the
  * stored map supplies 3D, the query supplies pixels): pixel->camera-ray
  * unprojector plus the camera->IMU extrinsics. Wire once when the SLAM
