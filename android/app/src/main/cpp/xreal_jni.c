@@ -970,8 +970,6 @@ static void *slam_worker(void *arg) {
                 int nr = st.n_features;
                 pthread_mutex_lock(&S.lock);
                 if (corr_changed) {
-                    /* re-express the accumulated cloud in the corrected
-                     * frame: x' = ΔD·x with ΔD = D_new ∘ D_old⁻¹ */
                     corr_gen = gen;
                     float oR[9], DR2[9], dp2[3];
                     wxyz_to_rot(Dq, oR);
@@ -987,22 +985,32 @@ static void *slam_worker(void *arg) {
                     float dtr = DR2[0] + DR2[4] + DR2[8];
                     float dang = acosf(fminf(1.0f, fmaxf(-1.0f,
                                                          (dtr - 1) * 0.5f)));
-                    LOGI("correction gen %d APPLIED: shift %.2f m, %.1f deg",
-                         gen, (double)dmag, (double)(dang * 57.3f));
-                    /* glue the drifted points back onto the main map: they
-                     * are valid geometry in the wrong frame, and ΔD is
-                     * exactly the transform that re-aligns them */
-                    for (int i = 0; i < 4096; i++) {
-                        if (!MAP_PT[i].stamp) continue;
-                        float x[3] = { MAP_PT[i].x, MAP_PT[i].y,
-                                       MAP_PT[i].z };
-                        m3v(DR2, x, t3);
-                        MAP_PT[i].x = t3[0] + dp2[0];
-                        MAP_PT[i].y = t3[1] + dp2[1];
-                        MAP_PT[i].z = t3[2] + dp2[2];
+                    int mapping_now = atomic_load(&S.map_on);
+                    LOGI("correction gen %d APPLIED: shift %.2f m, %.1f deg "
+                         "(%s)", gen, (double)dmag, (double)(dang * 57.3f),
+                         mapping_now ? "map healed"
+                                     : "POSE SNAP to fixed map");
+                    /* Re-transform the displayed cloud ONLY while mapping
+                     * (glue the growing map to the correction). In
+                     * localization-only the frozen cloud is the FIXED
+                     * reference the pose SNAPS TO — moving it by the same
+                     * D as the pose is a rigid co-motion, which the
+                     * follow-centred 3D view and the head-relative AR
+                     * overlay both render as NO motion. That cancellation
+                     * is why reloc looked completely dead in every test. */
+                    if (mapping_now) {
+                        for (int i = 0; i < 4096; i++) {
+                            if (!MAP_PT[i].stamp) continue;
+                            float x[3] = { MAP_PT[i].x, MAP_PT[i].y,
+                                           MAP_PT[i].z };
+                            m3v(DR2, x, t3);
+                            MAP_PT[i].x = t3[0] + dp2[0];
+                            MAP_PT[i].y = t3[1] + dp2[1];
+                            MAP_PT[i].z = t3[2] + dp2[2];
+                        }
+                        memcpy(Dq, cq, sizeof Dq);
+                        memcpy(Dp, cp, sizeof Dp);
                     }
-                    memcpy(Dq, cq, sizeof Dq);
-                    memcpy(Dp, cp, sizeof Dp);
                 }
                 S.vio = st;
                 S.vio_fresh = 1;
