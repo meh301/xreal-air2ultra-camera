@@ -149,6 +149,11 @@ static struct {
      * the difference blended in smoothly — the AR renderer reads THIS, at
      * full IMU rate, with no feed timestamps involved. Guarded by imu_lock. */
     atomic_int prop_on;                     /* UI A/B: off -> warp fallback */
+    atomic_int lmc_clear;                   /* SLAM reset -> flush the
+                                               landmark cache (basalt's id
+                                               space restarts; stale entries
+                                               would join new ids against
+                                               old-world coordinates) */
     struct {
         int valid;
         uint64_t ts;                /* propagated-to (IMU clock) */
@@ -853,17 +858,21 @@ static void *slam_worker(void *arg) {
             if (xr_slam_poll(&st)) {
                 /* Landmark-ID cache (worker only, ODOM frame). Keyframes
                  * are captured at MOTION-gate moments — exactly when the
-                 * per-tick landmark export collapses (fresh re-tracks have
-                 * unconverged inverse depths and get range-filtered), so
-                 * keyframes stored 0-10 landmarks and verification starved
-                 * ("52 matches, 0 3D pairs"). The cache keeps every id's
-                 * last converged 3D for a few seconds; the offer joins it
-                 * with the CURRENT frame's feature pixels. */
+                 * per-tick landmark export collapses — so the offer joins
+                 * cached 3D with the CURRENT frame's feature pixels. A
+                 * position is only trusted after TWO exports that AGREE
+                 * (< 0.35 m): the last gate-passing value of a landmark
+                 * whose depth later diverged is often meters wrong, and
+                 * one such junk entry per few good ones starved RANSAC of
+                 * consensus ("19 3D pairs, 0 inliers"). */
                 static struct {
                     int32_t id;
                     float xyz[3];
                     uint64_t ts;
+                    int hits;
                 } LMC[1024];
+                if (atomic_exchange(&S.lmc_clear, 0))
+                    memset(LMC, 0, sizeof LMC);
                 for (int i = 0; i < st.n_landmarks; i++) {
                     uint32_t h = ((uint32_t)st.lm_id[i] * 2654435761u) & 1023u;
                     int slot = (int)h, oldest = (int)h;
@@ -876,7 +885,19 @@ static void *slam_worker(void *arg) {
                         if (LMC[j].ts < LMC[oldest].ts) oldest = (int)j;
                         slot = oldest;
                     }
-                    LMC[slot].id = st.lm_id[i];
+                    if (LMC[slot].ts && LMC[slot].id == st.lm_id[i]) {
+                        float dx = LMC[slot].xyz[0] - st.lm_xyz[i][0];
+                        float dy = LMC[slot].xyz[1] - st.lm_xyz[i][1];
+                        float dz = LMC[slot].xyz[2] - st.lm_xyz[i][2];
+                        if (dx * dx + dy * dy + dz * dz < 0.35f * 0.35f) {
+                            if (LMC[slot].hits < 100) LMC[slot].hits++;
+                        } else {
+                            LMC[slot].hits = 1;   /* moved: re-confirm */
+                        }
+                    } else {
+                        LMC[slot].id = st.lm_id[i];
+                        LMC[slot].hits = 1;
+                    }
                     memcpy(LMC[slot].xyz, st.lm_xyz[i], sizeof LMC[slot].xyz);
                     LMC[slot].ts = st.ts;
                 }
@@ -891,7 +912,8 @@ static void *slam_worker(void *arg) {
                         uint32_t j = (h + k) & 1023u;
                         if (!LMC[j].ts) break;
                         if (LMC[j].id == st.feat_id[i]) {
-                            if (st.ts - LMC[j].ts < 3000000000ull) {
+                            if (LMC[j].hits >= 2 &&
+                                st.ts - LMC[j].ts < 2000000000ull) {
                                 off_id[off_n] = st.feat_id[i];
                                 memcpy(off_xyz[off_n], LMC[j].xyz,
                                        sizeof off_xyz[0]);
@@ -1179,6 +1201,7 @@ static void slam_start(void) {
     S.depth_ms = 0;
     memset(S.disp, 0, sizeof S.disp);
     xr_track_reset(&S.track);
+    atomic_store(&S.lmc_clear, 1);
     atomic_store(&S.slam_running, 1);
     pthread_create(&S.slam_thread, NULL, slam_worker, NULL);
 }
@@ -1721,6 +1744,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls
     (void)env; (void)cls;
     xr_slam_reset();
     xr_map_reset();
+    atomic_store(&S.lmc_clear, 1);       /* basalt id space restarts */
     pthread_mutex_lock(&S.imu_lock);
     memset(&S.prop, 0, sizeof S.prop);   /* re-anchors on the next pose */
     pthread_mutex_unlock(&S.imu_lock);

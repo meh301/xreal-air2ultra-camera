@@ -111,6 +111,7 @@ class MainActivity : Activity() {
     private var paneMode = 0            // phone: 0 = L|depth, 1 = L|R
     private var mappingOn = true        // false = localization-only (frozen map)
     private var recoveryOn = true       // verified closures snap the live pose
+    private var lastSlamReset = 0L      // Rst debounce
     private var propOn = true           // 1 kHz AR head-pose propagator
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
@@ -310,8 +311,14 @@ class MainActivity : Activity() {
         setStatus(getString(R.string.status_plug_in))
 
         findViewById<Button>(R.id.slam_reset).setOnClickListener {
-            XrealNative.nativeSlamReset()
-            poseMap.reset()
+            // debounced: tap bounce fired 6 resets in 800 ms in the field,
+            // each one restarting Basalt mid-recovery
+            val now = System.currentTimeMillis()
+            if (now - lastSlamReset > 700) {
+                lastSlamReset = now
+                XrealNative.nativeSlamReset()
+                poseMap.reset()
+            }
         }
         val ptsButton = findViewById<Button>(R.id.toggle_points)
         ptsButton.setOnClickListener {
