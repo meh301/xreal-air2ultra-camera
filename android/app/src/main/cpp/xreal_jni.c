@@ -137,6 +137,13 @@ static struct {
     struct { uint64_t ts; float q[4]; } qhist[256];
     uint32_t qhist_n;
 
+    /* CLOCK_MONOTONIC stamp of the newest propagated sample. The renderer
+     * predicts from the sample's actual AGE: USB batching or a preempted
+     * IMU thread can freeze the pose 8-16 ms, and a fixed prediction from
+     * a stale sample steps the world by omega x gap — the "robotic"
+     * rotation. Guarded by imu_lock. */
+    int64_t imu_mono_ns;
+
     /* 1 kHz head-pose propagator (session frame): gyro + gravity-
      * subtracted accel dead reckoning, re-anchored by every VIO pose with
      * the difference blended in smoothly — the AR renderer reads THIS, at
@@ -535,6 +542,12 @@ static int pose_delta_between(uint64_t ts_a, uint64_t ts_b, float dR[9]) {
     return 0;
 }
 
+static int64_t now_mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
 /* newest IMU-clock timestamp, for the renderer's position extrapolation */
 static uint64_t imu_now(void) {
     pthread_mutex_lock(&S.imu_lock);
@@ -768,8 +781,18 @@ static int head_pose_now(float R[9], float p[3]) {
     memcpy(p, S.prop.p, 3 * sizeof(float));
     memcpy(v, S.prop.v, sizeof v);
     memcpy(w, S.prop.w_ema, sizeof w);
+    int64_t mono = S.imu_mono_ns;
     pthread_mutex_unlock(&S.imu_lock);
-    const float tp = (float)XR_GLES_PREDICT_NS * 1e-9f;
+    /* predict from the sample's actual AGE, not a fixed horizon: when
+     * USB batching or scheduling stalls the IMU thread, the newest
+     * sample can be 8-16 ms old — a fixed prediction then renders a
+     * FROZEN pose, stepping the world by omega x gap during rotation
+     * (the "robotic" jitter). Staleness-compensated prediction keeps
+     * the presented pose uniformly current through the gaps. */
+    int64_t stale = mono ? now_mono_ns() - mono : 0;
+    if (stale < 0) stale = 0;
+    if (stale > 48000000LL) stale = 48000000LL;      /* sanity */
+    const float tp = (float)(stale + XR_GLES_PREDICT_NS) * 1e-9f;
     float rv[3] = { w[0] * tp, w[1] * tp, w[2] * tp };
     float dq[4], qp[4];
     quat_from_rotvec(rv, dq);
@@ -1284,6 +1307,16 @@ static void *imu_worker(void *arg) {
     (void)arg;
     uint8_t buf[XR_IMU_REPORT];
     int stalls = 0, reenabled = 0;
+    /* the freshest-pose supplier for the AR view: on a saturated SoC a
+     * default-priority thread gets preempted for 8-16 ms bursts, which
+     * freezes the propagated pose and steps the rendered world by
+     * omega x gap during rotation */
+    if (setpriority(PRIO_PROCESS, (id_t)gettid(), -10) == 0)
+        LOGI("IMU thread priority raised (-10)");
+    /* arrival telemetry: burstiness here IS pose staleness */
+    int64_t tel_prev = 0, tel_t0 = 0;
+    double tel_sum = 0, tel_max = 0;
+    int tel_n = 0, tel_bursts = 0;
     while (atomic_load(&S.imu_running)) {
         int got = 0;
         int rc = libusb_interrupt_transfer(S.usb, S.imu_ep_in, buf, sizeof buf,
@@ -1359,8 +1392,28 @@ static void *imu_worker(void *arg) {
             S.imu_t0 = t;
         }
 
+        int64_t mono = now_mono_ns();
+        if (tel_prev) {
+            double gap = (double)(mono - tel_prev) * 1e-6;   /* ms */
+            tel_sum += gap;
+            tel_n++;
+            if (gap > tel_max) tel_max = gap;
+            if (gap > 4.0) tel_bursts++;
+        }
+        tel_prev = mono;
+        if (!tel_t0) tel_t0 = mono;
+        if (mono - tel_t0 >= 5000000000LL) {
+            LOGI("imu arrival: avg %.2f ms, max %.1f ms, %d gaps >4 ms "
+                 "(gaps freeze the AR pose)",
+                 tel_n ? tel_sum / tel_n : 0.0, tel_max, tel_bursts);
+            tel_t0 = mono;
+            tel_sum = tel_max = 0;
+            tel_n = tel_bursts = 0;
+        }
+
         pthread_mutex_lock(&S.imu_lock);
         S.imu_latest = s;
+        S.imu_mono_ns = mono;
         if (S.prop.valid) {
             float pdt = (float)(s.ts_ns - S.prop.ts) * 1e-9f;
             if (pdt > 0 && pdt < 0.05f) prop_step(&s, pdt);
