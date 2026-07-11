@@ -856,6 +856,17 @@ static void *slam_worker(void *arg) {
              * feature u,v are per-camera pixels — the panes are 1:1) */
             static xr_slam_state st;               /* worker thread only */
             if (xr_slam_poll(&st)) {
+                /* wire the session map's PnP geometry once the SLAM
+                 * bridge has its kb4 fit + extrinsics */
+                static int geom_wired;             /* worker only */
+                if (!geom_wired) {
+                    float Ric[9], pic[3];
+                    if (xr_slam_cam0_geom(Ric, pic) == 0) {
+                        xr_map_set_geom(xr_slam_unproject0, Ric, pic);
+                        geom_wired = 1;
+                    }
+                }
+
                 /* Landmark-ID cache (worker only, ODOM frame). Keyframes
                  * are captured at MOTION-gate moments — exactly when the
                  * per-tick landmark export collapses — so the offer joins

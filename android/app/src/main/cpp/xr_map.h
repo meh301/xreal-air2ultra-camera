@@ -40,6 +40,13 @@ void xr_map_set_mapping(int on);
  * continuous and an external reference owns global placement. */
 void xr_map_set_recovery(int on);
 
+/* Left-camera geometry for PnP verification (ORB-SLAM-style reloc: the
+ * stored map supplies 3D, the query supplies pixels): pixel->camera-ray
+ * unprojector plus the camera->IMU extrinsics. Wire once when the SLAM
+ * bridge has its calibration. */
+void xr_map_set_geom(int (*unproject)(float u, float v, float ray_cam[3]),
+                     const float R_ic[9], const float p_ic[3]);
+
 void xr_map_reset(void);
 
 /* Offer a keyframe from the SLAM worker (non-blocking; drops when the

@@ -62,6 +62,12 @@ void xr_slam_stop(void);
 void xr_slam_reset(void);
 int xr_slam_running(void);
 
+/* Left-camera geometry for the session map's PnP relocalization: unit
+ * ray (CAMERA frame) for a pixel, and the camera->IMU extrinsics.
+ * Return 0 when available (after xr_slam_start configured the kb4 fit). */
+int xr_slam_unproject0(float u, float v, float ray_cam[3]);
+int xr_slam_cam0_geom(float R_ic[9], float p_ic[3]);
+
 /* Push one IMU sample (single producer: the IMU drain thread).
  * gyro in deg/s and accel in g are converted internally. */
 void xr_slam_push_imu(uint64_t ts_ns, const float gyro_dps[3],

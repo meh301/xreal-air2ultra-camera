@@ -307,6 +307,21 @@ int xr_slam_running(void) {
     return atomic_load(&B.running);
 }
 
+static void kb4_unproject(const float k[8], float u, float v, float ray[3]);
+
+int xr_slam_unproject0(float u, float v, float ray_cam[3]) {
+    if (B.kb4[0][0] == 0) return -1;           /* not configured yet */
+    kb4_unproject(B.kb4[0], u, v, ray_cam);
+    return 0;
+}
+
+int xr_slam_cam0_geom(float R_ic[9], float p_ic[3]) {
+    if (B.kb4[0][0] == 0) return -1;
+    memcpy(R_ic, B.R_ic[0], 9 * sizeof(float));
+    memcpy(p_ic, B.p_ic[0], 3 * sizeof(float));
+    return 0;
+}
+
 void xr_slam_push_imu(uint64_t ts_ns, const float gyro_dps[3],
                       const float accel_g[3]) {
     if (!atomic_load(&B.running)) return;
