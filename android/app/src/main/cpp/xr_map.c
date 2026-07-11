@@ -762,6 +762,120 @@ static int pnp2_ransac(const float (*s)[3], const float (*P)[3], int n,
     return in;
 }
 
+/* ---- covisibility-pooled relocalization ----------------------------------------- */
+
+#define COVIS_R_M 3.0f             /* neighbours within this join the pool */
+#define COVIS_MAX_PAIRS (XR_MAP_KP_PER_KF * 3)
+
+/* Relocalize the query against the matched keyframe AND its spatial
+ * neighbours pooled together (the covisibility idea, cheap: one extra
+ * descriptor match per nearby keyframe). Every physical landmark
+ * contributes ONE correspondence — its session-frame position averaged
+ * across the keyframes that saw it, which cancels the single-view
+ * inverse-depth noise that starved the per-keyframe PnP. Fills D
+ * (odom -> session) and the inlier counts; returns 1 on a solved pose. */
+static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
+                     int *out_n3, int *out_nin) {
+    *out_n3 = 0;
+    *out_nin = 0;
+    if (!GEOM.have) return 0;
+
+    static float Sw[COVIS_MAX_PAIRS][3];   /* query bearing, current-odom */
+    static float Pw[COVIS_MAX_PAIRS][3];   /* map point, session frame */
+    static int32_t pid[COVIS_MAX_PAIRS];   /* physical landmark id */
+    static int pcnt[COVIS_MAX_PAIRS];
+    static int prs[XR_MAP_KP_PER_KF][2];
+    int n = 0;
+
+    float Rq[9];
+    q2R(w->q, Rq);                          /* body -> current odom */
+
+    for (int s = 0; s < KF_N; s++) {
+        if (s != best_i) {                  /* covisible neighbourhood */
+            float dx = KF[s].p[0] - KF[best_i].p[0];
+            float dy = KF[s].p[1] - KF[best_i].p[1];
+            float dz = KF[s].p[2] - KF[best_i].p[2];
+            if (dx * dx + dy * dy + dz * dz > COVIS_R_M * COVIS_R_M) continue;
+            if (KF[s].desc_type != w->desc_type) continue;
+        }
+        /* D_kf = C_kf ∘ O_kf⁻¹ maps this kf's landmarks into session */
+        float qoi[4], poi[3], qd[4], pd[3];
+        pose_invert(KF[s].q, KF[s].p, qoi, poi);
+        pose_compose(KF[s].qc, KF[s].pc, qoi, poi, qd, pd);
+
+        int nb = KF[s].desc_type == DESC_ORB ? anchored_count(&KF[s])
+                                             : KF[s].n_kp;
+        int np = match_pairs_lim(w, w->n_kp, &KF[s], nb, prs,
+                                 XR_MAP_KP_PER_KF);
+        for (int m = 0; m < np; m++) {
+            int lk = KF[s].lm_of_kp[prs[m][1]];
+            if (lk < 0) continue;
+            float dk2 = 0;
+            for (int c = 0; c < 3; c++) {
+                float d = KF[s].lm_xyz[lk][c] - KF[s].p[c];
+                dk2 += d * d;
+            }
+            if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) continue;
+
+            float ps[3];                    /* landmark -> session */
+            qrotv(qd, KF[s].lm_xyz[lk], ps);
+            ps[0] += pd[0]; ps[1] += pd[1]; ps[2] += pd[2];
+
+            int32_t id = KF[s].lm_id[lk];
+            int found = -1;
+            for (int k = 0; k < n; k++)
+                if (pid[k] == id) { found = k; break; }
+            if (found >= 0) {               /* average this landmark */
+                float c1 = (float)pcnt[found];
+                for (int c = 0; c < 3; c++)
+                    Pw[found][c] = (Pw[found][c] * c1 + ps[c]) / (c1 + 1);
+                pcnt[found]++;
+                continue;
+            }
+            if (n >= COVIS_MAX_PAIRS) continue;
+            float rc[3], rb[3];
+            if (GEOM.unproject(w->kp_uv[prs[m][0]][0],
+                               w->kp_uv[prs[m][0]][1], rc))
+                continue;
+            rb[0] = GEOM.R_ic[0] * rc[0] + GEOM.R_ic[1] * rc[1] +
+                    GEOM.R_ic[2] * rc[2];
+            rb[1] = GEOM.R_ic[3] * rc[0] + GEOM.R_ic[4] * rc[1] +
+                    GEOM.R_ic[5] * rc[2];
+            rb[2] = GEOM.R_ic[6] * rc[0] + GEOM.R_ic[7] * rc[1] +
+                    GEOM.R_ic[8] * rc[2];
+            Sw[n][0] = Rq[0] * rb[0] + Rq[1] * rb[1] + Rq[2] * rb[2];
+            Sw[n][1] = Rq[3] * rb[0] + Rq[4] * rb[1] + Rq[5] * rb[2];
+            Sw[n][2] = Rq[6] * rb[0] + Rq[7] * rb[1] + Rq[8] * rb[2];
+            memcpy(Pw[n], ps, sizeof ps);
+            pid[n] = id;
+            pcnt[n] = 1;
+            n++;
+        }
+    }
+    *out_n3 = n;
+    if (n < VER_MIN_PAIRS) return 0;
+
+    float Rz[9], C[3];
+    int nin = pnp2_ransac(Sw, Pw, n, Rz, C);
+    *out_nin = nin;
+    if (nin < VER_MIN_PAIRS || nin * 100 < 33 * n) return 0;
+
+    /* D (odom -> session): rotation = the yaw Rz; translation places the
+     * query body at the recovered camera centre C (minus the lever arm) */
+    R2q(Rz, Dq);
+    float qsb[4], t3[3], body_s[3];
+    qmul(Dq, w->q, qsb);                    /* body -> session */
+    qrotv(qsb, GEOM.p_ic, t3);
+    body_s[0] = C[0] - t3[0];
+    body_s[1] = C[1] - t3[1];
+    body_s[2] = C[2] - t3[2];
+    qrotv(Dq, w->p, t3);
+    Dp[0] = body_s[0] - t3[0];
+    Dp[1] = body_s[1] - t3[1];
+    Dp[2] = body_s[2] - t3[2];
+    return 1;
+}
+
 /* ---- map thread ----------------------------------------------------------------- */
 
 static void process_keyframe(void) {
@@ -871,187 +985,68 @@ static void process_keyframe(void) {
         LOOP_STATS.count++;
         LOOP_STATS.matches = best_m;
 
-        /* ---- geometric verification: PnP relocalization of the query
-         * against the STORED keyframe landmarks (map = 3D, query = 2D).
-         * A verified pose yields A = T_target o T_cur^-1 (query-odom ->
-         * kf-odom), the pose-graph constraint. */
-        int verified = 0, n3 = 0, nin = 0;
-        float qa[4], ta[3];
-        if (GEOM.have) {
-            static int prs[XR_MAP_KP_PER_KF][2];          /* map thread */
-            static float Sw[XR_MAP_KP_PER_KF][3];
-            static float Pw[XR_MAP_KP_PER_KF][3];
-            /* full query keypoint set vs the KF landmark-anchored ones:
-             * every accepted pair is (query pixel, map 3D) */
-            int nb = KF[best_i].desc_type == DESC_ORB
-                         ? anchored_count(&KF[best_i]) : KF[best_i].n_kp;
-            int np = match_pairs_lim(&work, work.n_kp, &KF[best_i], nb,
-                                     prs, XR_MAP_KP_PER_KF);
-            float Rq[9];
-            q2R(work.q, Rq);                   /* body -> current odom */
-            for (int m = 0; m < np; m++) {
-                int lk = KF[best_i].lm_of_kp[prs[m][1]];
-                if (lk < 0) continue;
-                float dk2 = 0;
-                for (int c = 0; c < 3; c++) {
-                    float d = KF[best_i].lm_xyz[lk][c] - KF[best_i].p[c];
-                    dk2 += d * d;
-                }
-                if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) continue;
-                float rc[3], rb[3];
-                if (GEOM.unproject(work.kp_uv[prs[m][0]][0],
-                                   work.kp_uv[prs[m][0]][1], rc))
-                    continue;
-                /* camera ray -> body -> current-odom world (pre-yaw) */
-                rb[0] = GEOM.R_ic[0] * rc[0] + GEOM.R_ic[1] * rc[1] +
-                        GEOM.R_ic[2] * rc[2];
-                rb[1] = GEOM.R_ic[3] * rc[0] + GEOM.R_ic[4] * rc[1] +
-                        GEOM.R_ic[5] * rc[2];
-                rb[2] = GEOM.R_ic[6] * rc[0] + GEOM.R_ic[7] * rc[1] +
-                        GEOM.R_ic[8] * rc[2];
-                Sw[n3][0] = Rq[0] * rb[0] + Rq[1] * rb[1] + Rq[2] * rb[2];
-                Sw[n3][1] = Rq[3] * rb[0] + Rq[4] * rb[1] + Rq[5] * rb[2];
-                Sw[n3][2] = Rq[6] * rb[0] + Rq[7] * rb[1] + Rq[8] * rb[2];
-                memcpy(Pw[n3], KF[best_i].lm_xyz[lk], sizeof Pw[0]);
-                n3++;
-            }
-            VER_LAST.pairs = n3;
-            VER_LAST.inliers = 0;
-            VER_LAST.outcome = VOUT_FEW_PAIRS;
-            if (n3 >= VER_MIN_PAIRS) {
-                float Rz[9], C[3];
-                nin = pnp2_ransac(Sw, Pw, n3, Rz, C);
-                VER_LAST.inliers = nin;
-                VER_LAST.outcome = VOUT_FEW_INLIERS;
-                if (nin >= VER_MIN_PAIRS && nin * 100 >= 33 * n3) {
-                    /* A = T_target o T_cur^-1: the rotation part is
-                     * exactly Rz; translation from the recovered body
-                     * position (camera center minus the lever arm) */
-                    R2q(Rz, qa);
-                    float qtb[4], pb[3], t3[3];
-                    qmul(qa, work.q, qtb);     /* target body orientation */
-                    qrotv(qtb, GEOM.p_ic, t3);
-                    pb[0] = C[0] - t3[0];
-                    pb[1] = C[1] - t3[1];
-                    pb[2] = C[2] - t3[2];
-                    qrotv(qa, work.p, t3);
-                    ta[0] = pb[0] - t3[0];
-                    ta[1] = pb[1] - t3[1];
-                    ta[2] = pb[2] - t3[2];
-                    float rv[3];
-                    rv_from_q(qa, rv);
-                    float ang = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] +
-                                      rv[2] * rv[2]);
-                    float tn2 = ta[0] * ta[0] + ta[1] * ta[1] +
-                                ta[2] * ta[2];
-                    /* overwhelming evidence -> the caps open up so a
-                     * post-shake error can snap out in one closure */
-                    int strong = best_m >= VER_STRONG_MATCHES &&
-                                 nin >= VER_STRONG_INLIERS &&
-                                 nin * 100 >= 50 * n3;
-                    float mxt = strong ? VER_JUMP_T_M : VER_MAX_T_M;
-                    float mxa = strong ? VER_JUMP_ANG_RAD : VER_MAX_ANG_RAD;
-                    if (ang < mxa && tn2 < mxt * mxt) {
-                        verified = 1;
-                        VER_LAST.outcome = VOUT_APPLIED;
-                    } else {
-                        VER_LAST.outcome = VOUT_CAPPED;
-                        LOGI("session map: kf#%d PnP GOOD (%d/%d inliers, "
-                             "%d matches) but |t|=%.2fm ang=%.0fdeg "
-                             "exceeds the snap caps",
-                             best_i, nin, n3, best_m,
-                             sqrt((double)tn2), (double)(ang * 57.3f));
-                    }
-                }
-            }
-        }
-
-        if (verified) {
-            /* D_i = C_i ∘ O_i⁻¹ (node i's point-level correction);
-             * session pose of the query: C_j = D_i ∘ A ∘ O_j */
-            float qoi[4], poi[3], qdi[4], pdi[3];
-            pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
-            pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
-            float qda[4], pda[3];                     /* D_i ∘ A */
-            pose_compose(qdi, pdi, qa, ta, qda, pda);
-            float qcj[4], pcj[3];                     /* C_j */
-            pose_compose(qda, pda, work.q, work.p, qcj, pcj);
-
-            if (mapping && KF_N > best_i + 1) {
-                /* distribute the change over the chain (i .. newest] by
-                 * cumulative odom path length — drift accrues with
-                 * distance. Node i itself is the trusted anchor. */
-                float qce[4], pce[3];                 /* current estimate */
-                pose_compose(CORR.q, CORR.p, work.q, work.p, qce, pce);
-                float qinv[4], pinv[3], qe[4], pe[3]; /* E = C_j ∘ est⁻¹ */
-                pose_invert(qce, pce, qinv, pinv);
-                pose_compose(qcj, pcj, qinv, pinv, qe, pe);
-                float rve[3];
-                rv_from_q(qe, rve);
-                float total = 0;
-                for (int k = best_i; k < KF_N - 1; k++) {
-                    float d = 0;
-                    for (int c = 0; c < 3; c++) {
-                        float x = KF[k + 1].p[c] - KF[k].p[c];
-                        d += x * x;
-                    }
-                    total += sqrtf(d);
-                }
-                float dlast = 0;
-                for (int c = 0; c < 3; c++) {
-                    float x = work.p[c] - KF[KF_N - 1].p[c];
-                    dlast += x * x;
-                }
-                total += sqrtf(dlast);
-                float cum = 0;
-                for (int k = best_i + 1; k < KF_N; k++) {
-                    float d = 0;
-                    for (int c = 0; c < 3; c++) {
-                        float x = KF[k].p[c] - KF[k - 1].p[c];
-                        d += x * x;
-                    }
-                    cum += sqrtf(d);
-                    float f = total > 0.01f
-                                  ? cum / total
-                                  : (float)(k - best_i) / (float)(KF_N - best_i);
-                    float rvf[3] = { rve[0] * f, rve[1] * f, rve[2] * f };
-                    float qef[4], pef[3] = { pe[0] * f, pe[1] * f, pe[2] * f };
-                    q_from_rv(rvf, qef);
-                    float qn[4], pn[3];               /* E^f ∘ C_k */
-                    pose_compose(qef, pef, KF[k].qc, KF[k].pc, qn, pn);
-                    memcpy(KF[k].qc, qn, sizeof qn);
-                    memcpy(KF[k].pc, pn, sizeof pn);
-                }
-            }
-            /* publish the live correction D = C_j ∘ O_j⁻¹ (in loc-only
-             * mode this IS the relocalization of the displayed pose) —
-             * unless recovery is toggled off (GNSS-fusion mode): the map
-             * stays self-consistent, the live pose stays continuous */
-            if (atomic_load(&RECOVERY)) {
-                float qoj[4], poj[3];
-                pose_invert(work.q, work.p, qoj, poj);
-                pose_compose(qcj, pcj, qoj, poj, CORR.q, CORR.p);
-                CORR.gen++;
-            }
-            memcpy(work.qc, qcj, sizeof work.qc);
-            memcpy(work.pc, pcj, sizeof work.pc);
-            j_corrected = 1;
-            LOGI("session map: LOOP VERIFIED kf#%d: %d/%d 3D inliers, "
-                 "|t|=%.2fm%s",
-                 best_i, nin, n3,
-                 sqrt((double)(ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2])),
-                 atomic_load(&RECOVERY) ? ", pose snapped"
-                                        : " (recovery off: map-only)");
-        } else {
-            LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs) "
-                 "unverified (%d 3D pairs, %d inliers)",
+        /* covisibility-pooled PnP relocalization -> D (odom -> session) */
+        int n3 = 0, nin = 0;
+        float Dq[4], Dp[3];
+        int ok = reloc_pnp(&work, best_i, Dq, Dp, &n3, &nin);
+        VER_LAST.pairs = n3;
+        VER_LAST.inliers = nin;
+        if (!ok) {
+            VER_LAST.outcome = n3 < VER_MIN_PAIRS ? VOUT_FEW_PAIRS
+                                                  : VOUT_FEW_INLIERS;
+            LOGI("session map: %s kf#%d (%d matches, %s) unverified "
+                 "(%d pooled pairs, %d inliers)",
                  mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
                  best_m, work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
-                 (double)(work.ts - KF[best_i].ts) / 1e9, n3, nin);
+                 n3, nin);
+        } else {
+            /* snap magnitude = how far D moves the CURRENT pose vs the
+             * live correction; the cap rejects wrong-place teleports */
+            float ns[3], os[3];
+            qrotv(Dq, work.p, ns);
+            qrotv(CORR.q, work.p, os);
+            float st2 = 0;
+            for (int c = 0; c < 3; c++) {
+                float d = (ns[c] + Dp[c]) - (os[c] + CORR.p[c]);
+                st2 += d * d;
+            }
+            float qci[4], qe[4], rvv[3];
+            qconj(CORR.q, qci);
+            qmul(Dq, qci, qe);
+            rv_from_q(qe, rvv);
+            float sang = sqrtf(rvv[0] * rvv[0] + rvv[1] * rvv[1] +
+                               rvv[2] * rvv[2]);
+            int strong = best_m >= VER_STRONG_MATCHES &&
+                         nin >= VER_STRONG_INLIERS && nin * 100 >= 50 * n3;
+            float mxt = strong ? VER_JUMP_T_M : VER_MAX_T_M;
+            float mxa = strong ? VER_JUMP_ANG_RAD : VER_MAX_ANG_RAD;
+            if (st2 > mxt * mxt || sang > mxa) {
+                VER_LAST.outcome = VOUT_CAPPED;
+                LOGI("session map: kf#%d PnP GOOD (%d/%d inliers, %d "
+                     "matches) but snap |t|=%.2fm ang=%.0fdeg exceeds caps",
+                     best_i, nin, n3, best_m, sqrt((double)st2),
+                     (double)(sang * 57.3f));
+            } else {
+                VER_LAST.outcome = VOUT_APPLIED;
+                /* apply only when it actually moves the pose, so repeated
+                 * searches of the same spot do not micro-jitter it */
+                if ((st2 > 0.04f * 0.04f || sang > 0.017f) &&
+                    atomic_load(&RECOVERY)) {
+                    memcpy(CORR.q, Dq, sizeof CORR.q);
+                    memcpy(CORR.p, Dp, sizeof CORR.p);
+                    CORR.gen++;
+                    pose_compose(Dq, Dp, work.q, work.p, work.qc, work.pc);
+                    j_corrected = 1;
+                    LOGI("session map: %s kf#%d POSE SNAP %.2fm %.0fdeg "
+                         "(%d/%d inliers, %d matches, corr gen %d)",
+                         mapping ? "LOOP" : "RELOC", best_i,
+                         sqrt((double)st2), (double)(sang * 57.3f),
+                         nin, n3, best_m, CORR.gen);
+                }
+            }
         }
 
-        /* AR flash + panel marker, in the SESSION frame: stored landmarks
-         * through D_i = C_i ∘ O_i⁻¹ */
+        /* AR flash + panel marker: matched kf's landmarks in session */
         {
             float qoi[4], poi[3], qdi[4], pdi[3];
             pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
