@@ -78,6 +78,11 @@ static xr_kf KF[XR_MAP_MAX_KF];        /* .bss */
 static int KF_N;
 static atomic_int KF_COUNT_PUB;
 static struct { uint64_t a, b; int matches; int have; } LAST_CAND;
+/* last verification attempt, for the on-screen panel: no more guessing
+ * which stage blocked a snap */
+enum { VOUT_NONE = 0, VOUT_BELOW_BAR = 1, VOUT_FEW_PAIRS = 2,
+       VOUT_FEW_INLIERS = 3, VOUT_CAPPED = 4, VOUT_APPLIED = 5 };
+static struct { int pairs, inliers, outcome; } VER_LAST;
 static struct {
     int count; float pos[3]; int matches;
     int n_lm;                            /* matched kf's stored landmarks — */
@@ -136,6 +141,7 @@ void xr_map_reset(void) {
     MBOX.full = 0;
     LAST_ACCEPT_NS = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
+    memset(&VER_LAST, 0, sizeof VER_LAST);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
     CORR.p[0] = CORR.p[1] = CORR.p[2] = 0;
     CORR.gen++;                    /* consumers re-sync their frame */
@@ -251,6 +257,15 @@ static void pose_invert(const float qa[4], const float pa[3],
     qconj(qa, qo);
     qrotv(qo, pa, t);
     po[0] = -t[0]; po[1] = -t[1]; po[2] = -t[2];
+}
+
+int xr_map_verify_stats(int *pairs, int *inliers) {
+    pthread_mutex_lock(&MAP_LOCK);
+    *pairs = VER_LAST.pairs;
+    *inliers = VER_LAST.inliers;
+    int out = VER_LAST.outcome;
+    pthread_mutex_unlock(&MAP_LOCK);
+    return out;
 }
 
 int xr_map_loop_stats(int *count, float pos[3], int *matches) {
@@ -432,16 +447,21 @@ static inline int dot64_i8(const int8_t *a, const int8_t *b) {
 #endif
 }
 
-/* ratio-tested matching; when pairs != NULL, the kp index pairs of up to
- * max_pairs matches are stored as well. Returns the total match count. */
-static int match_pairs(const xr_kf *a, const xr_kf *b,
-                       int (*pairs)[2], int max_pairs) {
+/* ratio-tested matching over the FIRST na/nb keypoints of each frame;
+ * when pairs != NULL, the kp index pairs of up to max_pairs matches are
+ * stored as well. Returns the total match count. Keypoints are ordered
+ * landmark-anchored first, so limiting na/nb to the anchored counts
+ * matches ONLY 3D-carrying corners — without the FAST fill-ins stealing
+ * best/second-best in the ratio test (which starved the verification of
+ * 3D pairs and silently blocked every snap). */
+static int match_pairs_lim(const xr_kf *a, int na, const xr_kf *b, int nb,
+                           int (*pairs)[2], int max_pairs) {
     if (a->desc_type != b->desc_type) return 0;
     int n = 0;
     if (a->desc_type == DESC_XFEAT) {
-        for (int i = 0; i < a->n_kp; i++) {
+        for (int i = 0; i < na; i++) {
             int best = -32768 * 64, second = best, jb = -1;
-            for (int j = 0; j < b->n_kp; j++) {
+            for (int j = 0; j < nb; j++) {
                 int d = dot64_i8(a->desc[i], b->desc[j]);
                 if (d > best) { second = best; best = d; jb = j; }
                 else if (d > second) second = d;
@@ -455,9 +475,9 @@ static int match_pairs(const xr_kf *a, const xr_kf *b,
             }
         }
     } else {
-        for (int i = 0; i < a->n_kp; i++) {
+        for (int i = 0; i < na; i++) {
             int best = 999, second = 999, jb = -1;
-            for (int j = 0; j < b->n_kp; j++) {
+            for (int j = 0; j < nb; j++) {
                 int d = hamming256(a->desc[i], b->desc[j]);
                 if (d < best) { second = best; best = d; jb = j; }
                 else if (d < second) second = d;
@@ -474,13 +494,25 @@ static int match_pairs(const xr_kf *a, const xr_kf *b,
     return n;
 }
 
+static int match_pairs(const xr_kf *a, const xr_kf *b,
+                       int (*pairs)[2], int max_pairs) {
+    return match_pairs_lim(a, a->n_kp, b, b->n_kp, pairs, max_pairs);
+}
+
 static int match_count(const xr_kf *a, const xr_kf *b) {
     return match_pairs(a, b, NULL, 0);
 }
 
+/* leading keypoints are the landmark-anchored ones (extraction order) */
+static int anchored_count(const xr_kf *k) {
+    int n = 0;
+    while (n < k->n_kp && k->lm_of_kp[n] >= 0) n++;
+    return n;
+}
+
 /* ---- loop verification: rigid 3D-3D alignment ----------------------------------- */
 
-#define VER_MIN_3D 8               /* landmark pairs needed to try */
+#define VER_MIN_3D 5               /* landmark pairs needed to try */
 #define VER_INLIER_M 0.12f
 #define VER_MAX_RANGE_M 8.0f       /* inverse-depth points are noisy far out */
 #define VER_ITERS 200
@@ -725,6 +757,9 @@ static void process_keyframe(void) {
         /* below the candidate bar: say so occasionally, so a "nothing
          * happens" report can distinguish no-match from no-verify */
         static uint64_t nolog_ts;              /* map thread only */
+        VER_LAST.pairs = 0;
+        VER_LAST.inliers = 0;
+        VER_LAST.outcome = VOUT_BELOW_BAR;
         if (work.ts - nolog_ts > 5000000000ull) {
             nolog_ts = work.ts;
             LOGI("session map: best %d matches (kf#%d, %d stored) — below "
@@ -750,7 +785,15 @@ static void process_keyframe(void) {
             static int prs[XR_MAP_KP_PER_KF][2];          /* map thread */
             static float Pq[XR_MAP_KP_PER_KF][3];
             static float Pk[XR_MAP_KP_PER_KF][3];
-            int np = match_pairs(&work, &KF[best_i], prs, XR_MAP_KP_PER_KF);
+            /* match the landmark-anchored keypoints ONLY: every pair then
+             * carries 3D on both sides, and the FAST fill-ins can't steal
+             * the ratio test (which starved n3 and blocked every snap) */
+            int na = work.desc_type == DESC_ORB
+                         ? anchored_count(&work) : work.n_kp;
+            int nb = KF[best_i].desc_type == DESC_ORB
+                         ? anchored_count(&KF[best_i]) : KF[best_i].n_kp;
+            int np = match_pairs_lim(&work, na, &KF[best_i], nb, prs,
+                                     XR_MAP_KP_PER_KF);
             for (int m = 0; m < np; m++) {
                 int lq = work.lm_of_kp[prs[m][0]];
                 int lk = KF[best_i].lm_of_kp[prs[m][1]];
@@ -769,10 +812,18 @@ static void process_keyframe(void) {
                 memcpy(Pk[n3], KF[best_i].lm_xyz[lk], sizeof Pk[0]);
                 n3++;
             }
+            VER_LAST.pairs = n3;
+            VER_LAST.inliers = 0;
+            VER_LAST.outcome = VOUT_FEW_PAIRS;
             if (n3 >= VER_MIN_3D) {
                 float Ra[9];
                 nin = align_ransac(Pq, Pk, n3, Ra, ta);
-                if (nin >= VER_MIN_3D && nin * 100 >= 35 * n3) {
+                VER_LAST.inliers = nin;
+                VER_LAST.outcome = VOUT_FEW_INLIERS;
+                /* small pair sets demand near-unanimity; larger ones the
+                 * usual 35% consensus */
+                if (nin >= VER_MIN_3D &&
+                    nin * 100 >= (n3 >= 8 ? 35 : 60) * n3) {
                     float rv[3];
                     R2q(Ra, qa);
                     rv_from_q(qa, rv);
@@ -786,14 +837,17 @@ static void process_keyframe(void) {
                                  nin * 100 >= 45 * n3;
                     float mxt = strong ? VER_JUMP_T_M : VER_MAX_T_M;
                     float mxa = strong ? VER_JUMP_ANG_RAD : VER_MAX_ANG_RAD;
-                    if (ang < mxa && tn2 < mxt * mxt)
+                    if (ang < mxa && tn2 < mxt * mxt) {
                         verified = 1;
-                    else
+                        VER_LAST.outcome = VOUT_APPLIED;
+                    } else {
+                        VER_LAST.outcome = VOUT_CAPPED;
                         LOGI("session map: kf#%d alignment GOOD (%d/%d "
                              "inliers, %d matches) but |t|=%.2fm "
                              "ang=%.0fdeg exceeds the snap caps",
                              best_i, nin, n3, best_m,
                              sqrt((double)tn2), (double)(ang * 57.3f));
+                    }
                 }
             }
         }

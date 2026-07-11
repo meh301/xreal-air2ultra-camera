@@ -120,7 +120,7 @@ class MainActivity : Activity() {
     private var alignReady = false
     private val frameBuffer: ByteBuffer = ByteBuffer.allocateDirect(1280 * 640 * 4)
     private val poseBuffer: ByteBuffer =
-        ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(72).order(ByteOrder.nativeOrder())
     private val loopPos = FloatArray(3)
     private val poseQ = FloatArray(4)
     private val poseP = FloatArray(3)
@@ -197,8 +197,12 @@ class MainActivity : Activity() {
                 val trackedR = poseBuffer.int
                 val loops = poseBuffer.int
                 for (i in 0..2) loopPos[i] = poseBuffer.float
+                val verPairs = poseBuffer.short.toInt()
+                val verInliers = poseBuffer.short.toInt()
+                val verOutcome = poseBuffer.int
                 poseMap.update(poseQ, poseP, tracked, depthMs, flags, kf,
-                               trackedR, loops, loopPos)
+                               trackedR, loops, loopPos,
+                               verPairs, verInliers, verOutcome)
             }
 
             val packed = XrealNative.nativeGrabFrame(frameBuffer)

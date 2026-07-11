@@ -67,6 +67,12 @@ int xr_map_last_candidate(uint64_t *ts_a, uint64_t *ts_b, int *matches);
  * most recent one. Returns 1 when at least one has occurred. */
 int xr_map_loop_stats(int *count, float pos[3], int *matches);
 
+/* The most recent verification attempt, for on-screen diagnosis: fills
+ * the 3D pair and inlier counts and returns the outcome — 0 none yet,
+ * 1 below the candidate bar, 2 too few 3D pairs, 3 too few inliers,
+ * 4 alignment good but beyond the snap caps, 5 applied. */
+int xr_map_verify_stats(int *pairs, int *inliers);
+
 /* The most recent match's keyframe landmarks (SESSION-frame world xyz,
  * n x 3 floats — stored coords through the matched node's correction) —
  * the AR loop/reloc flash. Returns the count copied (<= max). Their

@@ -74,11 +74,19 @@ class PoseMapView @JvmOverloads constructor(
     private val loopAt = FloatArray(3)
     private var loopFlashMs = 0L        // wall time of the latest loop event
 
+    private var verPairs = 0
+    private var verInliers = 0
+    private var verOutcome = 0
+
     /** [quat] wxyz body->world, [pos] meters. Call from the UI thread. */
     fun update(quat: FloatArray, pos: FloatArray, trackedCount: Int,
                depthMillis: Float, stateFlags: Int, keyframes: Int = 0,
                trackedRight: Int = 0, loops: Int = 0,
-               loopPosition: FloatArray? = null) {
+               loopPosition: FloatArray? = null,
+               vPairs: Int = 0, vInliers: Int = 0, vOutcome: Int = 0) {
+        verPairs = vPairs
+        verInliers = vInliers
+        verOutcome = vOutcome
         quat.copyInto(q)
         pos.copyInto(p)
         tracked = trackedCount
@@ -359,8 +367,19 @@ class PoseMapView @JvmOverloads constructor(
         val rect = if (flags and 2 != 0) "rect✓" else "rect…"
         val dep = if (flags and 1 != 0) "%.0fms".format(depthMs) else "off"
         val src = if (flags and 8 != 0) "" else "  AHRS-only"
-        canvas.drawText("trk=%d|%d  map=%d  kf=%d  loop=%d".format(
-            tracked, trackedR, cloudN, kfCount, loopCount), 12f, 30f, textPaint)
+        // last verification attempt: names the stage that blocked (or
+        // allowed) a snap, without needing adb
+        val ver = when (verOutcome) {
+            1 -> "ver=match<bar"
+            2 -> "ver=pairs:%d".format(verPairs)
+            3 -> "ver=inliers:%d/%d".format(verInliers, verPairs)
+            4 -> "ver=CAPPED %d/%d".format(verInliers, verPairs)
+            5 -> "ver=SNAP %d/%d".format(verInliers, verPairs)
+            else -> "ver=—"
+        }
+        canvas.drawText("trk=%d|%d  map=%d  kf=%d  loop=%d  %s".format(
+            tracked, trackedR, cloudN, kfCount, loopCount, ver),
+            12f, 30f, textPaint)
         canvas.drawText("p=[%+.2f %+.2f %+.2f]m  depth=%s  %s%s".format(
             p[0], p[1], p[2], dep, rect, src), 12f, 58f, textPaint)
 

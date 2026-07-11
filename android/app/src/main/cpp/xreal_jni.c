@@ -1857,6 +1857,14 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabPose(JNIEnv *env, jclass cls,
         xr_map_loop_stats(&loops, lpos, &lmatch);
         memcpy(dst + 48, &loops, 4);       /* loop/reloc candidate count */
         memcpy(dst + 52, lpos, 12);        /* matched keyframe position */
+        if ((*env)->GetDirectBufferCapacity(env, buf) >= 72) {
+            int vp = 0, vi = 0;
+            int32_t vout = xr_map_verify_stats(&vp, &vi);
+            uint16_t vp16 = (uint16_t)vp, vi16 = (uint16_t)vi;
+            memcpy(dst + 64, &vp16, 2);    /* verification: 3D pairs */
+            memcpy(dst + 66, &vi16, 2);    /* inliers */
+            memcpy(dst + 68, &vout, 4);    /* outcome enum */
+        }
     }
     return has_q ? JNI_TRUE : JNI_FALSE;
 }
