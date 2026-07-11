@@ -45,6 +45,11 @@
             android:text="@string/pts_on" />
 
         <Button
+            android:id="@+id/desc_mode"
+            style="@style/ThinButton"
+            android:text="@string/desc_orb" />
+
+        <Button
             android:id="@+id/toggle_depth"
             style="@style/ThinButton"
             android:text="@string/dep_on" />

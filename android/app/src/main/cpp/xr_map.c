@@ -124,6 +124,7 @@ static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
 static atomic_int RECOVERY = 1;        /* live-pose snap (loop closure of
                                           the MAP itself is always on) */
+static atomic_int USE_XFEAT = 0;       /* runtime descriptor selector */
 
 /* Live session correction D = C_newest ∘ O_newest⁻¹ (map -> odom pattern):
  * composes onto every odom-frame quantity leaving the SLAM worker. Updated
@@ -146,6 +147,27 @@ void xr_map_set_recovery(int on) {
          on ? "ON (verified closures snap the live pose)"
             : "OFF (map keeps closing loops internally; the live pose is "
               "odometry-continuous — the GNSS-fusion mode)");
+}
+
+/* Switch the keyframe descriptor (0 = mini-ORB, 1 = XFeat). ORB and
+ * XFeat keyframes cannot match each other, so the store is cleared on a
+ * real change — the map rebuilds with the selected descriptor. */
+void xr_map_set_use_xfeat(int on) {
+    int want = on ? 1 : 0;
+    if (atomic_exchange(&USE_XFEAT, want) == want) return;
+    pthread_mutex_lock(&MAP_LOCK);
+    KF_N = 0;
+    atomic_store(&KF_COUNT_PUB, 0);
+    LAST_STORE_NS = 0;
+    pthread_mutex_unlock(&MAP_LOCK);
+    LOGI("session map: descriptor -> %s (keyframes cleared, rebuilding)",
+         want ? "XFeat" : "mini-ORB");
+}
+
+/* Whether the XFeat model + ONNX Runtime are actually loaded (so the UI
+ * can tell "XFeat requested" from "XFeat running"). */
+int xr_map_xfeat_ready(void) {
+    return MODEL_PATH[0] != 0 && xr_xfeat_available();
 }
 
 void xr_map_reset(void) {
@@ -761,9 +783,9 @@ static void process_keyframe(void) {
         return;
     if (do_search) last_search_ns = work.ts;
 
-    /* descriptors: XFeat when available, mini-ORB otherwise */
-    if (MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);
-    if (xr_xfeat_available()) {
+    /* descriptors: XFeat when selected AND available, mini-ORB otherwise */
+    if (atomic_load(&USE_XFEAT) && MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);
+    if (atomic_load(&USE_XFEAT) && xr_xfeat_available()) {
         int n = xr_xfeat_extract(img, work.kp_uv, work.desc,
                                  XR_MAP_KP_PER_KF);
         if (n >= 0) {

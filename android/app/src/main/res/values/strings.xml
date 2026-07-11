@@ -17,6 +17,10 @@
     <!-- the points/depth buttons show the CURRENT state -->
     <string name="pts_on">Pts✓</string>
     <string name="pts_off">Pts✕</string>
+    <!-- session-map descriptor selector (shows the CURRENT descriptor) -->
+    <string name="desc_orb">ORB</string>
+    <string name="desc_xfeat">XFeat</string>
+    <string name="desc_xfeat_na">XFeat!</string>
     <string name="dep_on">Dep✓</string>
     <string name="dep_off">Dep✕</string>
     <!-- glasses eye-view mode (shows the CURRENT mode) -->

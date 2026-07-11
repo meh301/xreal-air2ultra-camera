@@ -1914,6 +1914,21 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetXfeatModel(JNIEnv *env, jclass
     if (p) (*env)->ReleaseStringUTFChars(env, path, p);
 }
 
+/* Runtime descriptor selector: mini-ORB (false) vs XFeat (true). */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetUseXfeat(JNIEnv *env, jclass cls,
+                                                           jboolean on) {
+    (void)env; (void)cls;
+    xr_map_set_use_xfeat(on);
+}
+
+/* 1 when XFeat is actually loaded (model + ONNX Runtime), else 0. */
+JNIEXPORT jboolean JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeXfeatReady(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    return xr_map_xfeat_ready() ? JNI_TRUE : JNI_FALSE;
+}
+
 /* Copy the newest pose/SLAM state into `buf` (direct ByteBuffer, >= 40 bytes,
  * native order): f32 quat_wxyz[4] | f32 pos_m[3] | i32 tracked | f32 depth_ms
  * | u32 flags (bit0 depth on, bit1 rectification ready, bit2 orientation

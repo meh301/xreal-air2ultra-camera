@@ -50,6 +50,13 @@ object XrealNative {
     /** Path of the staged XFeat ONNX model (session-map descriptors). */
     external fun nativeSetXfeatModel(path: String)
 
+    /** Runtime descriptor selector: mini-ORB (false) vs XFeat (true).
+     *  Clears the keyframe map on a real change (types can't cross-match). */
+    external fun nativeSetUseXfeat(on: Boolean)
+
+    /** True when XFeat is actually loaded (model staged + ONNX Runtime). */
+    external fun nativeXfeatReady(): Boolean
+
     /**
      * Mapping (true, default) grows the landmark cloud and keyframe store;
      * localization-only (false) freezes both — relocalization queries keep

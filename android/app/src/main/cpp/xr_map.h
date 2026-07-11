@@ -27,6 +27,14 @@ enum {
  * Without it the mini-ORB fallback is used. */
 void xr_map_set_model(const char *onnx_path);
 
+/* Runtime descriptor selector: 0 = mini-ORB (default), 1 = XFeat (needs
+ * the model staged + ONNX Runtime present). Clears the keyframe store on
+ * a real change since the two descriptor types cannot cross-match. */
+void xr_map_set_use_xfeat(int on);
+
+/* 1 when XFeat is actually loaded and usable (model + ORT), else 0. */
+int xr_map_xfeat_ready(void);
+
 /* Mapping (default) grows the session map; localization-only freezes it:
  * the current view is still matched against the stored keyframes (the
  * relocalization query) but nothing new is stored. */

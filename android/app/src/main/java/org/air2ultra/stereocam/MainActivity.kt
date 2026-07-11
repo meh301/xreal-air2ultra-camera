@@ -91,8 +91,6 @@ class MainActivity : Activity() {
         // and microphones unless the app holds these runtime permissions
         val RUNTIME_PERMS = arrayOf(Manifest.permission.CAMERA,
                                     Manifest.permission.RECORD_AUDIO)
-        // session-map descriptors: XFeat (ONNX) when true, mini-ORB when false
-        const val ENABLE_XFEAT = false
     }
 
     private lateinit var usbManager: UsbManager
@@ -112,6 +110,7 @@ class MainActivity : Activity() {
     private var mappingOn = true        // false = localization-only (frozen map)
     private var recoveryOn = true       // verified closures snap the live pose
     private var lastSlamReset = 0L      // Rst debounce
+    private var useXfeat = false        // session-map descriptor selector
     private var propOn = true           // 1 kHz AR head-pose propagator
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
@@ -327,6 +326,17 @@ class MainActivity : Activity() {
             ptsButton.text =
                 getString(if (showPoints) R.string.pts_on else R.string.pts_off)
         }
+        val descButton = findViewById<Button>(R.id.desc_mode)
+        descButton.setOnClickListener {
+            // switch the session-map descriptor; clears the keyframe map
+            useXfeat = !useXfeat
+            XrealNative.nativeSetUseXfeat(useXfeat)
+            val label = if (!useXfeat) R.string.desc_orb
+                        else if (XrealNative.nativeXfeatReady()) R.string.desc_xfeat
+                        else R.string.desc_xfeat_na
+            descButton.text = getString(label)
+            poseMap.reset()
+        }
         val depButton = findViewById<Button>(R.id.toggle_depth)
         depButton.setOnClickListener {
             depthOn = !depthOn
@@ -510,7 +520,10 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "Basalt config staging failed: $e")
         }
-        if (ENABLE_XFEAT) try {
+        // Always stage the XFeat model so the Desc button can switch to it
+        // at runtime; the descriptor actually used stays mini-ORB until the
+        // user selects XFeat (nativeSetUseXfeat).
+        try {
             val model = java.io.File(filesDir, "xfeat.onnx")
             assets.open("xfeat.onnx").use { src ->
                 model.outputStream().use { dst -> src.copyTo(dst) }
@@ -518,9 +531,7 @@ class MainActivity : Activity() {
             XrealNative.nativeSetXfeatModel(model.absolutePath)
             android.util.Log.i("xrealcam", "XFeat model staged: ${model.absolutePath}")
         } catch (e: Exception) {
-            android.util.Log.e("xrealcam", "XFeat staging failed (mini-ORB fallback): $e")
-        } else {
-            android.util.Log.i("xrealcam", "XFeat disabled — session map uses mini-ORB")
+            android.util.Log.e("xrealcam", "XFeat staging failed (mini-ORB only): $e")
         }
     }
 
