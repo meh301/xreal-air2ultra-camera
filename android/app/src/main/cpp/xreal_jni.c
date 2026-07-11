@@ -149,6 +149,11 @@ static struct {
      * the difference blended in smoothly — the AR renderer reads THIS, at
      * full IMU rate, with no feed timestamps involved. Guarded by imu_lock. */
     atomic_int prop_on;                     /* UI A/B: off -> warp fallback */
+    _Atomic uint64_t shake_until;           /* violent IMU motion: suppress
+                                               keyframe storage (a shake
+                                               otherwise spawns a junk map
+                                               the reloc snaps to) */
+    int shake_hits;                         /* imu thread only */
     atomic_int lmc_clear;                   /* SLAM reset -> flush the
                                                landmark cache (basalt's id
                                                space restarts; stale entries
@@ -938,9 +943,12 @@ static void *slam_worker(void *arg) {
                 }
 
                 /* keyframes store raw ODOM poses + landmarks — the pose
-                 * graph's measurements. Offer BEFORE the correction. */
-                xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
-                             off_id, off_xyz, off_uv, off_n);
+                 * graph's measurements. Offer BEFORE the correction, but
+                 * never during a shake (that map is garbage and would
+                 * become a false relocalization target). */
+                if (st.ts >= atomic_load(&S.shake_until))
+                    xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
+                                 off_id, off_xyz, off_uv, off_n);
 
                 /* session correction from the pose graph (identity until
                  * the first VERIFIED loop closure), applied in place: the
@@ -1515,6 +1523,27 @@ static void *imu_worker(void *arg) {
             tel_t0 = mono;
             tel_sum = tel_max = 0;
             tel_n = tel_bursts = 0;
+        }
+
+        /* shake detector: violent |a| (far from 1 g) or extreme rate; a
+         * short burst suppresses keyframe storage for 1.5 s so a shake
+         * cannot spawn a competing junk map. |a|/|w| are rotation-
+         * invariant so the factory remap is irrelevant here. */
+        {
+            float a2 = s.accel_g[0] * s.accel_g[0] +
+                       s.accel_g[1] * s.accel_g[1] +
+                       s.accel_g[2] * s.accel_g[2];
+            float w2 = s.gyro_dps[0] * s.gyro_dps[0] +
+                       s.gyro_dps[1] * s.gyro_dps[1] +
+                       s.gyro_dps[2] * s.gyro_dps[2];
+            if (a2 > 2.6f * 2.6f || a2 < 0.25f * 0.25f ||
+                w2 > 450.0f * 450.0f) {
+                if (S.shake_hits < 100) S.shake_hits++;
+                if (S.shake_hits >= 5)
+                    atomic_store(&S.shake_until, s.ts_ns + 1500000000ull);
+            } else if (S.shake_hits > 0) {
+                S.shake_hits--;
+            }
         }
 
         pthread_mutex_lock(&S.imu_lock);

@@ -54,8 +54,20 @@
  * keyframes in 16 s — junk that can never be verified against, which
  * evicted the good map at the rolling cap. A keyframe earns storage by
  * carrying geometry, at a bounded rate. */
-#define STORE_MIN_LM 10
+#define STORE_MIN_LM 20            /* a sparse frame is not worth a keyframe */
 #define STORE_MIN_INTERVAL_NS 350000000ull
+
+/* The correction is a RECOVERY from significant drift, not a continuous
+ * clamp: only snap when the VIO has strayed meaningfully from the map,
+ * and then not again for a cooldown (repeated micro-snaps read as
+ * jitter). Below the deviation gate the VIO is trusted as-is. */
+#define SNAP_MIN_M 0.30f
+#define SNAP_MIN_ANG_RAD 0.14f     /* ~8 deg */
+#define SNAP_COOLDOWN_NS 1500000000ull
+/* the matched place must be an ESTABLISHED cluster (this many covisible
+ * keyframes contributed pooled points) — a lone shake-spawned keyframe
+ * or a two-frame junk map is rejected */
+#define COVIS_MIN_KF 2
 /* loop SEARCH is the heavy work (descriptor extraction + match against
  * every keyframe + PnP RANSAC). Un-throttled it ran back-to-back on
  * every offer — 15-20x/s in a loop-rich scene — and starved Basalt's VIO
@@ -119,6 +131,7 @@ static struct {                        /* worker -> map thread mailbox */
 static struct { float q[4], p[3]; int have; } LAST_POSE;
 static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
 static uint64_t LAST_STORE_NS;         /* keyframe store rate limit */
+static uint64_t LAST_SNAP_NS;          /* correction cooldown anchor */
 static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
@@ -190,6 +203,7 @@ void xr_map_reset(void) {
     MBOX.full = 0;
     LAST_ACCEPT_NS = 0;
     LAST_STORE_NS = 0;
+    LAST_SNAP_NS = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     memset(&VER_LAST, 0, sizeof VER_LAST);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
@@ -775,9 +789,10 @@ static int pnp2_ransac(const float (*s)[3], const float (*P)[3], int n,
  * inverse-depth noise that starved the per-keyframe PnP. Fills D
  * (odom -> session) and the inlier counts; returns 1 on a solved pose. */
 static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
-                     int *out_n3, int *out_nin) {
+                     int *out_n3, int *out_nin, int *out_covis) {
     *out_n3 = 0;
     *out_nin = 0;
+    *out_covis = 0;
     if (!GEOM.have) return 0;
 
     static float Sw[COVIS_MAX_PAIRS][3];   /* query bearing, current-odom */
@@ -807,6 +822,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
                                              : KF[s].n_kp;
         int np = match_pairs_lim(w, w->n_kp, &KF[s], nb, prs,
                                  XR_MAP_KP_PER_KF);
+        int contributed = 0;
         for (int m = 0; m < np; m++) {
             int lk = KF[s].lm_of_kp[prs[m][1]];
             if (lk < 0) continue;
@@ -816,6 +832,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
                 dk2 += d * d;
             }
             if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) continue;
+            contributed = 1;
 
             float ps[3];                    /* landmark -> session */
             qrotv(qd, KF[s].lm_xyz[lk], ps);
@@ -851,6 +868,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
             pcnt[n] = 1;
             n++;
         }
+        if (contributed) (*out_covis)++;
     }
     *out_n3 = n;
     if (n < VER_MIN_PAIRS) return 0;
@@ -986,22 +1004,23 @@ static void process_keyframe(void) {
         LOOP_STATS.matches = best_m;
 
         /* covisibility-pooled PnP relocalization -> D (odom -> session) */
-        int n3 = 0, nin = 0;
+        int n3 = 0, nin = 0, covis = 0;
         float Dq[4], Dp[3];
-        int ok = reloc_pnp(&work, best_i, Dq, Dp, &n3, &nin);
+        int ok = reloc_pnp(&work, best_i, Dq, Dp, &n3, &nin, &covis);
         VER_LAST.pairs = n3;
         VER_LAST.inliers = nin;
-        if (!ok) {
-            VER_LAST.outcome = n3 < VER_MIN_PAIRS ? VOUT_FEW_PAIRS
-                                                  : VOUT_FEW_INLIERS;
+        if (!ok || covis < COVIS_MIN_KF) {
+            /* not verified, or an isolated (junk / shake-spawned) place */
+            VER_LAST.outcome = (ok || n3 >= VER_MIN_PAIRS)
+                                   ? VOUT_FEW_INLIERS : VOUT_FEW_PAIRS;
             LOGI("session map: %s kf#%d (%d matches, %s) unverified "
-                 "(%d pooled pairs, %d inliers)",
+                 "(%d pairs, %d inliers, %d covis kfs)",
                  mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
                  best_m, work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
-                 n3, nin);
+                 n3, nin, covis);
         } else {
-            /* snap magnitude = how far D moves the CURRENT pose vs the
-             * live correction; the cap rejects wrong-place teleports */
+            /* deviation = how far the VIO has strayed from the map (D vs
+             * the live correction, at the current pose) */
             float ns[3], os[3];
             qrotv(Dq, work.p, ns);
             qrotv(CORR.q, work.p, os);
@@ -1016,34 +1035,36 @@ static void process_keyframe(void) {
             rv_from_q(qe, rvv);
             float sang = sqrtf(rvv[0] * rvv[0] + rvv[1] * rvv[1] +
                                rvv[2] * rvv[2]);
+            float dev = sqrtf(st2);
             int strong = best_m >= VER_STRONG_MATCHES &&
                          nin >= VER_STRONG_INLIERS && nin * 100 >= 50 * n3;
             float mxt = strong ? VER_JUMP_T_M : VER_MAX_T_M;
             float mxa = strong ? VER_JUMP_ANG_RAD : VER_MAX_ANG_RAD;
-            if (st2 > mxt * mxt || sang > mxa) {
+            int significant = dev > SNAP_MIN_M || sang > SNAP_MIN_ANG_RAD;
+            int cooled = work.ts - LAST_SNAP_NS > SNAP_COOLDOWN_NS;
+            VER_LAST.outcome = VOUT_APPLIED;   /* verified = tracking the map */
+            if (dev > mxt || sang > mxa) {
                 VER_LAST.outcome = VOUT_CAPPED;
-                LOGI("session map: kf#%d PnP GOOD (%d/%d inliers, %d "
-                     "matches) but snap |t|=%.2fm ang=%.0fdeg exceeds caps",
-                     best_i, nin, n3, best_m, sqrt((double)st2),
+                LOGI("session map: kf#%d PnP GOOD (%d/%d inliers, %d covis) "
+                     "but |t|=%.2fm ang=%.0fdeg exceeds caps — likely a "
+                     "wrong-place match, ignored",
+                     best_i, nin, n3, covis, (double)dev,
                      (double)(sang * 57.3f));
-            } else {
-                VER_LAST.outcome = VOUT_APPLIED;
-                /* apply only when it actually moves the pose, so repeated
-                 * searches of the same spot do not micro-jitter it */
-                if ((st2 > 0.04f * 0.04f || sang > 0.017f) &&
-                    atomic_load(&RECOVERY)) {
-                    memcpy(CORR.q, Dq, sizeof CORR.q);
-                    memcpy(CORR.p, Dp, sizeof CORR.p);
-                    CORR.gen++;
-                    pose_compose(Dq, Dp, work.q, work.p, work.qc, work.pc);
-                    j_corrected = 1;
-                    LOGI("session map: %s kf#%d POSE SNAP %.2fm %.0fdeg "
-                         "(%d/%d inliers, %d matches, corr gen %d)",
-                         mapping ? "LOOP" : "RELOC", best_i,
-                         sqrt((double)st2), (double)(sang * 57.3f),
-                         nin, n3, best_m, CORR.gen);
-                }
+            } else if (significant && cooled && atomic_load(&RECOVERY)) {
+                /* genuine drift recovery: snap the pose back to the map */
+                memcpy(CORR.q, Dq, sizeof CORR.q);
+                memcpy(CORR.p, Dp, sizeof CORR.p);
+                CORR.gen++;
+                LAST_SNAP_NS = work.ts;
+                pose_compose(Dq, Dp, work.q, work.p, work.qc, work.pc);
+                j_corrected = 1;
+                LOGI("session map: %s kf#%d RECOVERY SNAP %.2fm %.0fdeg "
+                     "(%d/%d inliers, %d covis, gen %d)",
+                     mapping ? "LOOP" : "RELOC", best_i, (double)dev,
+                     (double)(sang * 57.3f), nin, n3, covis, CORR.gen);
             }
+            /* below the deviation gate: the VIO agrees with the map, do
+             * nothing (this is a return-on-drift recovery, not a clamp) */
         }
 
         /* AR flash + panel marker: matched kf's landmarks in session */
