@@ -13,6 +13,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
@@ -77,14 +78,36 @@
 /* loop SEARCH is the heavy work (descriptor extraction + match against
  * every keyframe + PnP RANSAC). Un-throttled it ran back-to-back on
  * every offer — 15-20x/s in a loop-rich scene — and starved Basalt's VIO
- * threads (IMU queue overflow -> divergence -> "flying off"). ~3 Hz is
- * ample for relocalization; storage keeps its own (faster) cadence. */
-#define LOOP_SEARCH_INTERVAL_NS 300000000ull
+ * threads (IMU queue overflow -> divergence -> "flying off"). The
+ * event-driven cadence (LOOP_SEARCH_HEALTHY_NS while tracking, every offer
+ * when LOST) lives with the recovery constants below; storage keeps its
+ * own (faster) cadence. */
 /* stationary reloc cadence: when the motion gate blocks, a query-only
  * offer still goes through this often — matching (against the SAME
  * old-keyframe set the moving queries use) but never storing. Standing
  * still and staring at a known scene must be able to heal the pose. */
 #define QUERY_INTERVAL_NS 2500000000ull
+
+/* Confirmed-recovery lifecycle. A shake/loss FREEZES keyframe storage and
+ * stays frozen until a relocalization is verified (RECOVERED) — NOT a
+ * fixed shake timer: a stable-but-WRONG post-shake odometry must never be
+ * allowed to quietly lay down keyframes in the wrong frame. If no map is
+ * ever matched (a genuinely new area), storage resumes after a give-up. */
+enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
+#define REC_MIN_MAP 12                 /* fewer keyframes than this = no map to be "lost" from (just a brief shake freeze) */
+#define REC_GIVEUP_NS 4000000000ull    /* lost this long with no reloc -> assume a new area, resume mapping */
+#define REC_STABLE_NS 1200000000ull    /* healthy this long after a recovery -> normal cadence */
+/* loop SEARCH cadence is event-driven: a slow background check while
+ * tracking is healthy (cheap — this is the SD888 compute budget), ramping
+ * to every offer the moment tracking is LOST so recovery is immediate */
+#define LOOP_SEARCH_HEALTHY_NS 700000000ull
+#define RELOC_TOPK 3                   /* candidate clusters verified when relocalizing (repetitive scenes hand raw scoring to the wrong keyframe) */
+#define CLOUD_MAX 3000                 /* displayed keyframe-derived cloud cap (SD888 thermal budget) */
+
+/* on-disk session/cloud map: the SAME anchored keyframe graph, so a saved
+ * map reloads as a cloud reference the live session relocalizes into */
+#define MAP_MAGIC 0x584d4150u          /* 'XMAP' */
+#define MAP_VERSION 1
 
 enum { DESC_ORB = 0, DESC_XFEAT = 1 };
 
@@ -140,7 +163,10 @@ static struct { float q[4], p[3]; int have; } LAST_POSE;
 static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
 static uint64_t LAST_STORE_NS;         /* keyframe store rate limit */
 static uint64_t LAST_SNAP_NS;          /* correction cooldown anchor */
-static atomic_int STORE_FROZEN;        /* shake/relocalizing: query, do NOT store */
+static atomic_int SHAKING;             /* raw shake flag from the IMU thread */
+static atomic_int REC_STATE;           /* REC_HEALTHY / REC_LOST / REC_RECOVERED */
+static uint64_t SHAKE_END_NS;          /* when the current shake subsided */
+static uint64_t RECOVERED_NS;          /* when the last recovery landed */
 static struct {                        /* correction awaiting confirmation */
     int have;
     uint64_t ts;
@@ -157,6 +183,14 @@ static atomic_int USE_XFEAT = 0;       /* runtime descriptor selector */
  * composes onto every odom-frame quantity leaving the SLAM worker. Updated
  * by verified loop closures; identity until the first one. */
 static struct { float q[4]; float p[3]; int gen; } CORR = { .q = {1, 0, 0, 0} };
+
+/* the authoritative displayed map: the session-frame point cloud DERIVED
+ * from the keyframe graph (every landmark placed through its owning
+ * keyframe's corrected pose). Rebuilt whenever the graph changes — a
+ * closure that deforms the keyframes deforms this cloud with them. */
+static struct { float xyz[CLOUD_MAX][3]; int n; } CLOUD;
+static int CLOUD_DIRTY;
+static void cloud_rebuild(void);       /* defined with the pose-graph kit */
 
 static void *xfeat_preload_thread(void *arg) {
     (void)arg;
@@ -188,11 +222,18 @@ void xr_map_set_recovery(int on) {
               "odometry-continuous — the GNSS-fusion mode)");
 }
 
-/* Freeze keyframe STORAGE (relocalization queries keep running). Set
- * while Basalt is shaken/lost so a stable-but-wrong post-shake odometry
- * cannot lay down a second map in the wrong frame. */
-void xr_map_freeze_storage(int frozen) {
-    atomic_store(&STORE_FROZEN, frozen ? 1 : 0);
+/* Note violent motion (shake/loss) from the IMU thread. This drives the
+ * confirmed-recovery lifecycle (below): storage freezes and stays frozen
+ * until a relocalization is VERIFIED, not merely until the shake stops.
+ * Relocalization queries keep running throughout. */
+void xr_map_freeze_storage(int shaking) {
+    atomic_store(&SHAKING, shaking ? 1 : 0);
+}
+
+/* Recovery lifecycle for the panel: 0 healthy, 1 lost/relocalizing,
+ * 2 recovered (map just healed, storage resuming). */
+int xr_map_recovery_state(void) {
+    return atomic_load(&REC_STATE);
 }
 
 /* Switch the keyframe descriptor (0 = mini-ORB, 1 = XFeat). ORB and
@@ -226,6 +267,12 @@ void xr_map_reset(void) {
     LAST_STORE_NS = 0;
     LAST_SNAP_NS = 0;
     PENDING_D.have = 0;
+    SHAKE_END_NS = 0;
+    RECOVERED_NS = 0;
+    atomic_store(&SHAKING, 0);
+    atomic_store(&REC_STATE, REC_HEALTHY);
+    CLOUD.n = 0;
+    CLOUD_DIRTY = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     memset(&VER_LAST, 0, sizeof VER_LAST);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
@@ -242,6 +289,69 @@ int xr_map_get_correction(float q[4], float p[3]) {
     int g = CORR.gen;
     pthread_mutex_unlock(&MAP_LOCK);
     return g;
+}
+
+/* Persist the session as a cloud map: the anchored keyframe graph itself
+ * (odom + corrected poses, descriptors, anchor-local landmarks). The same
+ * structure reloads as a reference the next session relocalizes INTO — so
+ * "session map" and "cloud map" are one format, the substrate for the fog
+ * map service and cross-session persistence. Returns keyframes written. */
+int xr_map_save(const char *path) {
+    if (!path) return 0;
+    pthread_mutex_lock(&MAP_LOCK);
+    FILE *f = fopen(path, "wb");
+    if (!f) { pthread_mutex_unlock(&MAP_LOCK); LOGI("map save: cannot open %s", path); return 0; }
+    uint32_t magic = MAP_MAGIC, ver = MAP_VERSION, n = (uint32_t)KF_N;
+    uint32_t xf = (uint32_t)atomic_load(&USE_XFEAT);
+    int ok = fwrite(&magic, 4, 1, f) == 1 && fwrite(&ver, 4, 1, f) == 1 &&
+             fwrite(&xf, 4, 1, f) == 1 && fwrite(&n, 4, 1, f) == 1;
+    for (int i = 0; ok && i < KF_N; i++)
+        ok = fwrite(&KF[i], sizeof(xr_kf), 1, f) == 1;
+    fclose(f);
+    pthread_mutex_unlock(&MAP_LOCK);
+    LOGI("map save: %s %d keyframes -> %s", ok ? "wrote" : "FAILED after",
+         (int)n, path);
+    return ok ? (int)n : 0;
+}
+
+/* Load a cloud map as the reference graph. The live odom starts in a fresh
+ * frame, so CORR resets to identity and the loaded keyframes keep their
+ * own saved session poses; the first verified relocalization REGISTERS the
+ * two (solves the transform, then the graph heals as usual). Returns
+ * keyframes loaded, 0 on a bad/absent file. */
+int xr_map_load(const char *path) {
+    if (!path) return 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) { LOGI("map load: no file at %s", path); return 0; }
+    uint32_t magic = 0, ver = 0, xf = 0, n = 0;
+    if (fread(&magic, 4, 1, f) != 1 || magic != MAP_MAGIC ||
+        fread(&ver, 4, 1, f) != 1 || ver != MAP_VERSION ||
+        fread(&xf, 4, 1, f) != 1 || fread(&n, 4, 1, f) != 1 ||
+        n > XR_MAP_MAX_KF) {
+        fclose(f);
+        LOGI("map load: bad header in %s", path);
+        return 0;
+    }
+    pthread_mutex_lock(&MAP_LOCK);
+    KF_N = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (fread(&KF[KF_N], sizeof(xr_kf), 1, f) != 1) break;
+        KF_N++;
+    }
+    atomic_store(&USE_XFEAT, (int)xf);     /* match the saved descriptor */
+    atomic_store(&KF_COUNT_PUB, KF_N);
+    CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
+    CORR.p[0] = CORR.p[1] = CORR.p[2] = 0;
+    CORR.gen++;
+    PENDING_D.have = 0;
+    LAST_STORE_NS = 0;
+    atomic_store(&REC_STATE, REC_HEALTHY);
+    cloud_rebuild();
+    pthread_mutex_unlock(&MAP_LOCK);
+    fclose(f);
+    LOGI("map load: %d keyframes from %s (%s) — relocalize to register",
+         KF_N, path, xf ? "XFeat" : "mini-ORB");
+    return KF_N;
 }
 
 /* ---- small quaternion / rotation kit (Hamilton wxyz, R row-major) ------------- */
@@ -343,6 +453,118 @@ static void pose_invert(const float qa[4], const float pa[3],
     qconj(qa, qo);
     qrotv(qo, pa, t);
     po[0] = -t[0]; po[1] = -t[1]; po[2] = -t[2];
+}
+
+/* ---- pose graph: anchor-local landmarks + 4-DoF chain deformation -------------- */
+
+/* A keyframe's own correction D_j = C_j ∘ O_j⁻¹ (odom -> session): the
+ * transform carrying its IMMUTABLE odom pose to its graph-optimized
+ * session pose. Its landmarks are stored in odom and ride on D_j, so
+ * moving C_j moves the keyframe's entire point cloud — the landmarks are
+ * anchor-local for free, no per-point rewrite. */
+static void kf_corr(const xr_kf *k, float dq[4], float dp[3]) {
+    float qoi[4], poi[3];
+    pose_invert(k->q, k->p, qoi, poi);
+    pose_compose(k->qc, k->pc, qoi, poi, dq, dp);
+}
+
+/* interpolate a correction a fraction t (0..1) from (qa,pa) to (qb,pb):
+ * SLERP the (gravity-aligned yaw) rotation, LERP the translation */
+static void corr_interp(const float qa[4], const float pa[3],
+                        const float qb[4], const float pb[3], float t,
+                        float qo[4], float po[3]) {
+    float d = qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3];
+    float b[4];
+    if (d < 0) { for (int i = 0; i < 4; i++) b[i] = -qb[i]; d = -d; }
+    else memcpy(b, qb, sizeof b);
+    if (d > 0.9995f) {
+        for (int i = 0; i < 4; i++) qo[i] = qa[i] + t * (b[i] - qa[i]);
+    } else {
+        float ang = acosf(d), s = sinf(ang);
+        float wa = sinf((1 - t) * ang) / s, wb = sinf(t * ang) / s;
+        for (int i = 0; i < 4; i++) qo[i] = wa * qa[i] + wb * b[i];
+    }
+    float n = sqrtf(qo[0] * qo[0] + qo[1] * qo[1] + qo[2] * qo[2] +
+                    qo[3] * qo[3]);
+    for (int i = 0; i < 4; i++) qo[i] /= n;
+    for (int i = 0; i < 3; i++) po[i] = pa[i] + t * (pb[i] - pa[i]);
+}
+
+/* THE closure that heals the map. A verified relocalization gives the
+ * live correction D (odom -> session) that lands the current view back on
+ * the established map. The matched anchor keyframe and everything BEFORE
+ * it are the trusted reference and hold still; the drifted tail (anchor ->
+ * newest) is pulled toward D in proportion to its odom PATH LENGTH from
+ * the anchor — near the anchor it barely moves, at the tip it takes the
+ * full correction. Each keyframe's landmarks follow its corrected pose, so
+ * the historical map DEFORMS onto the reference: real co-localization, not
+ * just a live-pose snap. O(chain), 4-DoF (gravity fixes roll/pitch).
+ * MAP_LOCK held. */
+static void graph_deform(int anchor, const float Dq[4], const float Dp[3]) {
+    if (anchor < 0 || anchor >= KF_N) return;
+    static float cum[XR_MAP_MAX_KF];       /* odom path length from anchor */
+    float total = 0;
+    cum[anchor] = 0;
+    for (int j = anchor + 1; j < KF_N; j++) {
+        float dx = KF[j].p[0] - KF[j - 1].p[0];
+        float dy = KF[j].p[1] - KF[j - 1].p[1];
+        float dz = KF[j].p[2] - KF[j - 1].p[2];
+        total += sqrtf(dx * dx + dy * dy + dz * dz);
+        cum[j] = total;
+    }
+    for (int j = anchor + 1; j < KF_N; j++) {
+        float a = total > 1e-3f ? cum[j] / total : 1.0f;
+        float dq_old[4], dp_old[3], dq_new[4], dp_new[3];
+        kf_corr(&KF[j], dq_old, dp_old);   /* this keyframe's current corr */
+        corr_interp(dq_old, dp_old, Dq, Dp, a, dq_new, dp_new);
+        pose_compose(dq_new, dp_new, KF[j].q, KF[j].p, KF[j].qc, KF[j].pc);
+    }
+}
+
+/* Rebuild the authoritative display cloud from the keyframe graph: every
+ * landmark placed through its owning keyframe's CORRECTED pose, deduped by
+ * landmark id (newest keyframe wins — freshest pose). When the graph
+ * deforms, this deforms with it. MAP_LOCK held. */
+static void cloud_rebuild(void) {
+    static int32_t seen[8192];             /* id hash set, map thread only */
+    memset(seen, 0xFF, sizeof seen);       /* -1 = empty */
+    int n = 0;
+    for (int k = KF_N - 1; k >= 0 && n < CLOUD_MAX; k--) {
+        float dq[4], dp[3];
+        kf_corr(&KF[k], dq, dp);
+        for (int i = 0; i < KF[k].n_lm && n < CLOUD_MAX; i++) {
+            int32_t id = KF[k].lm_id[i];
+            uint32_t h = ((uint32_t)id * 2654435761u) & 8191u;
+            int dup = 0;
+            for (int s = 0; s < 32; s++) {
+                uint32_t j = (h + (uint32_t)s) & 8191u;
+                if (seen[j] == id) { dup = 1; break; }
+                if (seen[j] == -1) { seen[j] = id; break; }
+            }
+            if (dup) continue;
+            float t[3];
+            qrotv(dq, KF[k].lm_xyz[i], t);
+            CLOUD.xyz[n][0] = t[0] + dp[0];
+            CLOUD.xyz[n][1] = t[1] + dp[1];
+            CLOUD.xyz[n][2] = t[2] + dp[2];
+            n++;
+        }
+    }
+    CLOUD.n = n;
+    CLOUD_DIRTY = 0;
+}
+
+/* Snapshot the keyframe-derived cloud (session frame) for the AR/3D view.
+ * This REPLACES the old flat cloud that the JNI layer rigidly shifted by
+ * the correction — that shift moved everything together and healed
+ * nothing; the map now lives in the keyframes and heals when they do. */
+int xr_map_get_cloud(float *xyz, int max) {
+    pthread_mutex_lock(&MAP_LOCK);
+    int n = CLOUD.n;
+    if (n > max) n = max;
+    if (n > 0) memcpy(xyz, CLOUD.xyz, sizeof(float) * 3u * (size_t)n);
+    pthread_mutex_unlock(&MAP_LOCK);
+    return n;
 }
 
 int xr_map_verify_stats(int *pairs, int *inliers) {
@@ -1064,14 +1286,41 @@ static void process_keyframe(void) {
     pthread_mutex_unlock(&MAP_LOCK);
 
     int mapping = atomic_load(&MAPPING);
-    /* rate gates (map-thread-only timing). When this offer will neither
-     * search for loops nor store a keyframe, skip ALL the heavy work
-     * (descriptor extraction + matching + PnP). This is what keeps the
-     * map thread from monopolising a core and starving Basalt. */
+
+    /* confirmed-recovery lifecycle. A shake marks us LOST and FREEZES
+     * storage; we stay LOST — querying every offer to relocalize — until a
+     * closure is VERIFIED (RECOVERED, storage resumes) or, if no map is
+     * ever matched, a give-up timeout assumes a genuinely new area. This
+     * replaces the old fixed 1.5 s shake timer, whose expiry could let a
+     * stable-but-WRONG post-shake odometry quietly resume laying keyframes
+     * in the wrong frame. */
+    int shaking = atomic_load(&SHAKING);
+    int rstate = atomic_load(&REC_STATE);
+    if (shaking && KF_N >= REC_MIN_MAP) {
+        rstate = REC_LOST;
+        SHAKE_END_NS = 0;
+    } else if (rstate == REC_LOST) {
+        if (shaking) SHAKE_END_NS = 0;
+        else if (SHAKE_END_NS == 0) SHAKE_END_NS = work.ts;
+        else if (work.ts - SHAKE_END_NS > REC_GIVEUP_NS) rstate = REC_HEALTHY;
+    } else if (rstate == REC_RECOVERED) {
+        if (work.ts - RECOVERED_NS > REC_STABLE_NS) rstate = REC_HEALTHY;
+    }
+    atomic_store(&REC_STATE, rstate);
+    int lost = rstate == REC_LOST;
+    /* a shake with too small a map to be "lost" from still briefly freezes */
+    int shake_freeze = shaking && KF_N < REC_MIN_MAP;
+
+    /* rate gates (map-thread-only timing). Skip ALL the heavy work when
+     * this offer will neither search nor store — what keeps the map thread
+     * from starving Basalt. Search cadence is EVENT-DRIVEN: a slow
+     * background check while healthy (the SD888 compute budget), every
+     * offer the moment we are LOST so recovery is immediate. */
     static uint64_t last_search_ns;
-    int do_search = last_search_ns == 0 ||
-                    work.ts - last_search_ns >= LOOP_SEARCH_INTERVAL_NS;
-    int may_store = mapping && !q_only && !atomic_load(&STORE_FROZEN) &&
+    uint64_t search_iv = lost ? 0 : LOOP_SEARCH_HEALTHY_NS;
+    int do_search = last_search_ns == 0 || q_only ||
+                    work.ts - last_search_ns >= search_iv;
+    int may_store = mapping && !q_only && !lost && !shake_freeze &&
                     work.n_lm >= STORE_MIN_LM &&
                     work.ts - LAST_STORE_NS >= STORE_MIN_INTERVAL_NS;
     if (!do_search && !may_store)
@@ -1119,23 +1368,41 @@ static void process_keyframe(void) {
             KF[i].last_used = work.ts;
     }
 
-    int j_corrected = 0;      /* verified closure filled work.qc/pc */
     /* loop/reloc candidates: match the CURRENT view against the store
      * (runs in both modes — in localization-only this IS the reloc query).
      * In mapping mode skip the most recent keyframes (always similar).
      * Throttled (do_search) so it can't monopolise the CPU. */
     if (do_search) {
     /* mapping skips the freshest keyframes (trivial self-matches); a
-     * relocalization query (stationary, or shaken/lost = frozen) searches
-     * EVERYTHING — the pre-loss keyframes are the best recovery anchors */
-    int relocalizing = q_only || atomic_load(&STORE_FROZEN);
+     * relocalization query (stationary, or LOST) searches EVERYTHING —
+     * the pre-loss keyframes are the best recovery anchors */
+    int relocalizing = q_only || lost;
     int lim = (mapping && !relocalizing) ? KF_N - CAND_SKIP_RECENT : KF_N;
-    int best_m = 0, best_i = -1;
+
+    /* rank the top-K matching keyframes. K is adaptive: 1 while tracking
+     * is healthy (cheap), RELOC_TOPK when relocalizing — a repetitive
+     * scene can hand raw scoring to the wrong keyframe, so several clusters
+     * each get a geometric try and the strongest wins. */
+    int K = relocalizing ? RELOC_TOPK : 1;
+    int cand_i[RELOC_TOPK], cand_m[RELOC_TOPK], ncand = 0;
+    int raw_best_m = 0, raw_best_i = -1;
     for (int i = 0; i < lim; i++) {
         int m = match_count(&work, &KF[i]);
-        if (m > best_m) { best_m = m; best_i = i; }
+        if (m > raw_best_m) { raw_best_m = m; raw_best_i = i; }
+        if (m < CAND_MIN_MATCHES) continue;
+        int pos = ncand < K ? ncand : (m > cand_m[K - 1] ? K - 1 : -1);
+        if (pos < 0) continue;
+        if (ncand < K) ncand++;
+        while (pos > 0 && cand_m[pos - 1] < m) {
+            cand_m[pos] = cand_m[pos - 1];
+            cand_i[pos] = cand_i[pos - 1];
+            pos--;
+        }
+        cand_m[pos] = m;
+        cand_i[pos] = i;
     }
-    if (best_i >= 0 && best_m < CAND_MIN_MATCHES) {
+
+    if (ncand == 0 && raw_best_i >= 0) {
         /* below the candidate bar: say so occasionally, so a "nothing
          * happens" report can distinguish no-match from no-verify */
         static uint64_t nolog_ts;              /* map thread only */
@@ -1146,33 +1413,52 @@ static void process_keyframe(void) {
             nolog_ts = work.ts;
             LOGI("session map: best %d matches (kf#%d, %d stored) — below "
                  "the %d candidate bar",
-                 best_m, best_i, KF_N, CAND_MIN_MATCHES);
+                 raw_best_m, raw_best_i, KF_N, CAND_MIN_MATCHES);
         }
-    }
-    if (best_i >= 0 && best_m >= CAND_MIN_MATCHES) {
+    } else if (ncand > 0) {
+        /* verify every candidate cluster; keep the geometrically strongest
+         * (most inliers, covisibility-backed) */
+        int best_i = -1, best_m = 0, best_n3 = 0, best_nin = 0, best_covis = 0;
+        float bDq[4], bDp[3];
+        int any_pairs = 0;
+        for (int c = 0; c < ncand; c++) {
+            int cn3 = 0, cnin = 0, ccov = 0;
+            float cDq[4], cDp[3];
+            int ok = reloc_pnp(&work, cand_i[c], cDq, cDp, &cn3, &cnin, &ccov);
+            if (cn3 > any_pairs) any_pairs = cn3;
+            if (ok && ccov >= COVIS_MIN_KF && cnin > best_nin) {
+                best_i = cand_i[c]; best_m = cand_m[c];
+                best_n3 = cn3; best_nin = cnin; best_covis = ccov;
+                memcpy(bDq, cDq, sizeof bDq);
+                memcpy(bDp, cDp, sizeof bDp);
+            }
+        }
+
         LAST_CAND.a = work.ts;
-        LAST_CAND.b = KF[best_i].ts;
-        LAST_CAND.matches = best_m;
+        LAST_CAND.b = KF[cand_i[0]].ts;
+        LAST_CAND.matches = cand_m[0];
         LAST_CAND.have = 1;
 
-        /* covisibility-pooled PnP relocalization -> D (odom -> session) */
-        int n3 = 0, nin = 0, covis = 0;
-        float Dq[4], Dp[3];
-        int ok = reloc_pnp(&work, best_i, Dq, Dp, &n3, &nin, &covis);
-        VER_LAST.pairs = n3;
-        VER_LAST.inliers = nin;
-        if (!ok || covis < COVIS_MIN_KF) {
-            /* not verified, or an isolated (junk / shake-spawned) place —
-             * an inlier-backed cluster of < COVIS_MIN_KF keyframes */
-            VER_LAST.outcome = (ok || n3 >= VER_MIN_PAIRS)
+        if (best_i < 0) {
+            /* candidates matched but none verified into an inlier-backed
+             * cluster of >= COVIS_MIN_KF keyframes — junk / shake-spawned /
+             * a repetitive wrong place */
+            VER_LAST.pairs = any_pairs;
+            VER_LAST.inliers = 0;
+            VER_LAST.outcome = any_pairs >= VER_MIN_PAIRS
                                    ? VOUT_FEW_INLIERS : VOUT_FEW_PAIRS;
             PENDING_D.have = 0;                /* break any confirmation run */
-            LOGI("session map: %s kf#%d (%d matches, %s) unverified "
-                 "(%d pairs, %d inliers, %d covis kfs)",
-                 mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
-                 best_m, work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
-                 n3, nin, covis);
+            LOGI("session map: %s %d cluster(s) best %d matches (%s) — "
+                 "unverified (%d pairs)", mapping ? "LOOP" : "RELOC", ncand,
+                 cand_m[0], work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
+                 any_pairs);
         } else {
+            int n3 = best_n3, nin = best_nin, covis = best_covis;
+            float Dq[4], Dp[3];
+            memcpy(Dq, bDq, sizeof Dq);
+            memcpy(Dp, bDp, sizeof Dp);
+            VER_LAST.pairs = n3;
+            VER_LAST.inliers = nin;
             KF[best_i].last_used = work.ts;   /* geometrically useful */
             /* deviation = how far the VIO has strayed from the map (D vs
              * the live correction, at the current pose) */
@@ -1241,38 +1527,49 @@ static void process_keyframe(void) {
                      "%d covis) — awaiting a confirming frame",
                      best_i, (double)dev, (double)(sang * 57.3f),
                      nin, n3, covis);
-            } else if (atomic_load(&RECOVERY)) {
-                /* confirmed significant drift: snap the pose back */
-                memcpy(CORR.q, Dq, sizeof CORR.q);
-                memcpy(CORR.p, Dp, sizeof CORR.p);
-                CORR.gen++;
-                LAST_SNAP_NS = work.ts;
+            } else {
+                /* CONFIRMED significant closure. DEFORM the keyframe graph
+                 * so the drifted map co-localizes with the established one
+                 * (the real loop closure), and — when recovery is enabled —
+                 * snap the live pose too. Recovery-off is the GNSS-fusion
+                 * mode: the map still heals, the live pose stays odometry-
+                 * continuous for an external reference to place. */
+                graph_deform(best_i, Dq, Dp);
+                CLOUD_DIRTY = 1;
+                int snap = atomic_load(&RECOVERY);
+                if (snap) {
+                    memcpy(CORR.q, Dq, sizeof CORR.q);
+                    memcpy(CORR.p, Dp, sizeof CORR.p);
+                    CORR.gen++;
+                    LAST_SNAP_NS = work.ts;
+                }
                 PENDING_D.have = 0;
-                pose_compose(Dq, Dp, work.q, work.p, work.qc, work.pc);
-                j_corrected = 1;
+                atomic_store(&REC_STATE, REC_RECOVERED);
+                RECOVERED_NS = work.ts;
                 LOOP_STATS.count++;
                 LOOP_STATS.matches = best_m;
                 VER_LAST.outcome = VOUT_APPLIED;
-                LOGI("session map: %s kf#%d RECOVERY SNAP %.2fm %.0fdeg "
-                     "(%d/%d inliers, %d covis, gen %d)",
+                LOGI("session map: %s kf#%d CLOSURE %.2fm %.0fdeg (%d/%d "
+                     "inliers, %d covis, gen %d) — map deformed%s",
                      mapping ? "LOOP" : "RELOC", best_i, (double)dev,
-                     (double)(sang * 57.3f), nin, n3, covis, CORR.gen);
+                     (double)(sang * 57.3f), nin, n3, covis, CORR.gen,
+                     snap ? " + pose snapped" : "");
             }
-        }
 
-        /* AR flash + panel marker: matched kf's landmarks in session */
-        {
-            float qoi[4], poi[3], qdi[4], pdi[3];
-            pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
-            pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
-            memcpy(LOOP_STATS.pos, KF[best_i].pc, sizeof LOOP_STATS.pos);
-            LOOP_STATS.n_lm = KF[best_i].n_lm;
-            for (int i = 0; i < KF[best_i].n_lm; i++) {
-                float t[3];
-                qrotv(qdi, KF[best_i].lm_xyz[i], t);
-                LOOP_STATS.lm[i][0] = t[0] + pdi[0];
-                LOOP_STATS.lm[i][1] = t[1] + pdi[1];
-                LOOP_STATS.lm[i][2] = t[2] + pdi[2];
+            /* AR flash + panel marker: the winner's landmarks in session */
+            {
+                float qoi[4], poi[3], qdi[4], pdi[3];
+                pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
+                pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
+                memcpy(LOOP_STATS.pos, KF[best_i].pc, sizeof LOOP_STATS.pos);
+                LOOP_STATS.n_lm = KF[best_i].n_lm;
+                for (int i = 0; i < KF[best_i].n_lm; i++) {
+                    float t[3];
+                    qrotv(qdi, KF[best_i].lm_xyz[i], t);
+                    LOOP_STATS.lm[i][0] = t[0] + pdi[0];
+                    LOOP_STATS.lm[i][1] = t[1] + pdi[1];
+                    LOOP_STATS.lm[i][2] = t[2] + pdi[2];
+                }
             }
         }
     }
@@ -1281,9 +1578,9 @@ static void process_keyframe(void) {
     /* store (mapping mode only; never for a stationary query — those are
      * matching-only; only frames that carry verifiable geometry, at a
      * bounded rate), rolling cap: evict least-recently-useful. Reuse the
-     * SAME may_store gate computed above — it already carries the
-     * STORE_FROZEN check, so a search-only pass during a shake/loss can
-     * never fall through and insert the contaminated frame. */
+     * SAME may_store gate computed above — it already carries the LOST
+     * check, so a search-only pass during a shake/loss can never fall
+     * through and insert the contaminated frame. */
     if (may_store) {
         LAST_STORE_NS = work.ts;
         if (KF_N == XR_MAP_MAX_KF) {
@@ -1295,14 +1592,20 @@ static void process_keyframe(void) {
             KF_N--;
         }
         work.last_used = work.ts;
-        if (!j_corrected)     /* corrected = D_cur ∘ O_j */
-            pose_compose(CORR.q, CORR.p, work.q, work.p, work.qc, work.pc);
+        /* corrected session pose = current global correction ∘ odom. A
+         * confirmed closure this same pass already deformed the tail and
+         * (if recovering) updated CORR, so the new tip lands consistent. */
+        pose_compose(CORR.q, CORR.p, work.q, work.p, work.qc, work.pc);
         KF[KF_N] = work;
         KF_N++;
         atomic_store(&KF_COUNT_PUB, KF_N);
+        CLOUD_DIRTY = 1;
         LOGI("session map: kf#%d stored (%d landmarks, %d kps)",
              KF_N - 1, work.n_lm, work.n_kp);
     }
+    /* refresh the authoritative display cloud whenever the graph changed
+     * (a store, an eviction, or a closure-driven deformation) */
+    if (CLOUD_DIRTY) cloud_rebuild();
     pthread_mutex_unlock(&MAP_LOCK);
 }
 

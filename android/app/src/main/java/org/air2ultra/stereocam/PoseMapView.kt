@@ -379,8 +379,15 @@ class PoseMapView @JvmOverloads constructor(
             7 -> "ver=confirm? %d/%d".format(verInliers, verPairs)
             else -> "ver=—"
         }
-        canvas.drawText("trk=%d|%d  map=%d  kf=%d  loop=%d  %s".format(
-            tracked, trackedR, cloudN, kfCount, loopCount, ver),
+        // recovery lifecycle (flags bits 4-5): storage stays frozen while
+        // LOST until a closure is verified — not a fixed shake timer
+        val rec = when ((flags shr 4) and 3) {
+            1 -> "  LOST"
+            2 -> "  REC↺"
+            else -> ""
+        }
+        canvas.drawText("trk=%d|%d  map=%d  kf=%d  loop=%d  %s%s".format(
+            tracked, trackedR, cloudN, kfCount, loopCount, ver, rec),
             12f, 30f, textPaint)
         canvas.drawText("p=[%+.2f %+.2f %+.2f]m  depth=%s  %s%s".format(
             p[0], p[1], p[2], dep, rect, src), 12f, 58f, textPaint)

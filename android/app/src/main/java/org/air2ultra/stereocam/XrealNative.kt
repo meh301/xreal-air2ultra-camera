@@ -64,6 +64,15 @@ object XrealNative {
      */
     external fun nativeSetMapping(on: Boolean)
 
+    /**
+     * Persist the session as a cloud map (the anchored keyframe graph) to
+     * [path], and reload one as the reference the next session relocalizes
+     * into. Same format — the session map and the cloud map are one thing.
+     * Returns the keyframe count, 0 on failure.
+     */
+    external fun nativeSaveMap(path: String): Int
+    external fun nativeLoadMap(path: String): Int
+
     /** The glasses display's refresh rate as Android reports it — drives
      *  the renderer's present pacing (the OS composites the external
      *  display at this rate regardless of the MCU-negotiated scan). */
@@ -83,8 +92,9 @@ object XrealNative {
      * Copy the newest pose/SLAM state into [buf] (direct ByteBuffer >= 40
      * bytes, native order): f32 quat_wxyz[4], f32 pos_m[3], i32 tracked
      * features, f32 depth_ms, u32 flags (bit0 depth on, bit1 rectification
-     * ready, bit2 orientation valid). Position stays zero until the Basalt
-     * backend lands. Returns false while no orientation exists yet.
+     * ready, bit2 orientation valid, bit3 Basalt live, bits4-5 recovery
+     * state 0 tracking / 1 lost / 2 recovered). Position stays zero until
+     * the Basalt backend lands. Returns false while no orientation exists.
      */
     external fun nativeGrabPose(buf: ByteBuffer): Boolean
 

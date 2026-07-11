@@ -212,7 +212,7 @@ exists and runs, with a lightweight stand-in front end where Basalt will sit:
    landmarks to `xr_gles_set_points` instead of tracker rays. The depth
    path stays as-is.
 
-### Session mapping & relocalization architecture (agreed, in progress)
+### Session mapping & relocalization architecture (implemented; fog side pending)
 
 GLIM's module split (odometry / local mapping / global mapping) transposed
 to our visual-inertial stack — three frames, three owners:
@@ -221,29 +221,50 @@ to our visual-inertial stack — three frames, three owners:
    Basalt cannot consume pose corrections and doesn't need to.
 2. **Session map — on-device (`xr_map.c`).** Motion-gated keyframes
    (≥ 0.3 m / 15°) holding the immutable odom pose, a pose-graph
-   **corrected pose**, ~200 compact ORB-style descriptors (FAST-9 +
+   **corrected pose** (`qc/pc`), and ~200 descriptors — mini-ORB (FAST-9 +
    intensity-centroid orientation + rotated 256-bit BRIEF from a fixed
-   seeded pattern — self-consistent, no OpenCV) **anchored at Basalt's
-   landmark pixels** so a descriptor match is a 3D-3D landmark
-   correspondence by construction, plus the landmark geometry.
-   **Bounded**: ≤ 200 keyframes, rolling least-recently-useful eviction
-   (spatial recency keeps the current space resident). The full loop
-   pipeline is live: brute-force descriptor candidates → **geometric
-   verification** (RANSAC over landmark-pair triads + Horn quaternion
-   refit, ≥ 8 inliers within 12 cm, sanity caps 2.5 m / 25°) → a
-   **per-keyframe pose graph**: the closure error is distributed over
-   the keyframe chain between the two nodes weighted by odom path length
-   (drift accrues with distance), and the live `T_session←odom`
-   correction (map→odom pattern) composes onto the displayed pose, the
-   accumulated cloud (retransformed on each closure), and everything
-   exported — Basalt never sees it. In localization-only mode a verified
-   match relocalizes the live pose against the frozen map the same way.
-3. **Global map — fog side.** Long-term map building from the uploaded
-   keyframes/landmarks (the WebSocket `keyframe`/`landmarks` payloads are
-   exactly the keyframe struct). The **session map is matched against the
-   entire cloud map** (fog compute), returning `T_global←session`; the
-   device just composes it. Not for immediate relocalization — that's the
-   session layer's job.
+   seeded pattern, no OpenCV) or **XFeat** (the primary; mini-ORB is too
+   weak for reliable reloc on these grainy sensors). Landmarks are stored
+   in the owning keyframe's odom frame — **anchor-local**: their session
+   position rides on `qc/pc`, so moving a keyframe moves its whole point
+   cloud for free. **Bounded**: ≤ 200 keyframes, rolling
+   least-recently-useful eviction (spatial recency keeps the current space
+   resident). The loop pipeline:
+   - **candidates** — brute-force descriptor matching (**top-K** clusters
+     when relocalizing, since a repetitive scene can hand raw scoring to
+     the wrong keyframe);
+   - **verification** — a **gravity-aligned 2D-3D PnP** relocalization (the
+     map supplies 3D, the query supplies *pixels* — the ORB-SLAM reloc
+     pattern, *not* 3D-3D; both odom worlds are z-up so the unknown reduces
+     to yaw + translation, a 2-point closed form + RANSAC + linear refine),
+     with **covisibility-pooled** one-to-one correspondences and inliers
+     that must be backed by ≥ 3 distinct observing keyframes, then a
+     **second verified frame must agree** (temporal confirmation) before
+     anything is applied;
+   - **closure** — a confirmed closure **deforms the 4-DoF keyframe pose
+     graph**: the matched anchor and everything before it hold still, the
+     drifted tail is pulled toward the correction in proportion to its odom
+     path length (drift accrues with distance), and every keyframe's
+     anchor-local landmarks follow, so the historical map co-localizes onto
+     the established one — real closure, *not* just a live-pose snap. The
+     displayed cloud is DERIVED from the keyframe graph
+     (`xr_map_get_cloud`) and deforms with it — there is no flat cloud to
+     rigidly retransform. With recovery on, the live `T_session←odom`
+     correction also snaps so the pose follows the healed map; with it off
+     the map still heals but the pose stays odometry-continuous (the
+     GNSS-fusion mode). A **confirmed-recovery lifecycle** (healthy → lost
+     on a shake → relocalizing → recovered) keeps storage frozen until a
+     closure is verified, not on a fixed timer. Basalt never sees any of it.
+3. **Global / cloud map — same format, fog side.** The anchored keyframe
+   graph *is* the cloud format: `xr_map_save`/`xr_map_load` persist and
+   restore it on-device (the substrate for cross-session persistence and
+   the fog map service; the WebSocket `keyframe`/`landmarks` payloads are
+   the same struct). A loaded map is the reference the live session
+   relocalizes INTO — the first verified closure **registers** the two
+   frames (`T_global←session`) and the graph heals as usual. Fog-side
+   long-term map building and full session↔cloud co-optimization
+   (small_gicp, MIT, the natural registration library) remain the pending
+   work package; on-device save/load/register exists now.
 
 Borrowed from GLIM/koide3's CPU playbook: the module split itself, bounded
 incremental containers instead of grow-forever structures, keyframe

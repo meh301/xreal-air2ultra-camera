@@ -2,10 +2,14 @@
  *
  * GLIM-style module split (odometry / local map / global map): Basalt is
  * the drifting odometry and is never touched; this layer keeps a bounded
- * session map — motion-gated keyframes with descriptors and the landmark
- * geometry — pruned by a history timeout so memory stays flat. Loop /
- * relocalization candidates come from descriptor matching; the geometric
- * verification and the T_session<-odom correction are the next stage.
+ * session map — motion-gated keyframes with descriptors and anchor-local
+ * landmark geometry, on a rolling cap. Loop / relocalization candidates
+ * come from descriptor matching; verification is a gravity-aligned 2D-3D
+ * PnP (top-K covisibility-pooled clusters); a confirmed closure DEFORMS
+ * the keyframe pose graph (4-DoF, error distributed by odom path length)
+ * so the drifted map co-localizes with the established one — real closure,
+ * not just a live-pose snap. The same anchored graph is the on-disk
+ * cloud-map format (save/load below).
  *
  * Descriptors: XFeat (ONNX Runtime, when the model is staged — CVPR'24
  * learned features, far more robust than ORB on these grainy sensors) or
@@ -48,9 +52,16 @@ void xr_map_set_mapping(int on);
  * continuous and an external reference owns global placement. */
 void xr_map_set_recovery(int on);
 
-/* Freeze keyframe storage while tracking is shaken/lost (queries keep
- * running so the pose can relocalize into the existing map). */
-void xr_map_freeze_storage(int frozen);
+/* Note violent motion (shake/loss) from the IMU thread. Drives the
+ * confirmed-recovery lifecycle: storage freezes and STAYS frozen until a
+ * relocalization is verified — not merely until the shake stops — so a
+ * stable-but-wrong post-shake odometry cannot lay a competing map.
+ * Relocalization queries keep running throughout. */
+void xr_map_freeze_storage(int shaking);
+
+/* Recovery lifecycle for the panel: 0 healthy, 1 lost/relocalizing,
+ * 2 recovered (map just healed, storage resuming). */
+int xr_map_recovery_state(void);
 
 /* Left-camera geometry for PnP verification (ORB-SLAM-style reloc: the
  * stored map supplies 3D, the query supplies pixels): pixel->camera-ray
@@ -99,13 +110,32 @@ int xr_map_verify_stats(int *pairs, int *inliers);
  * drift the pose graph has not yet absorbed. */
 int xr_map_loop_points(float *xyz, int max);
 
+/* The authoritative displayed map: the session-frame point cloud DERIVED
+ * from the keyframe graph (every landmark through its owning keyframe's
+ * corrected pose, deduped by id). Rebuilt whenever the graph changes, so a
+ * closure that deforms the keyframes deforms this cloud with them — the
+ * visible healing. Feed it to the AR/3D view instead of a flat cloud that
+ * would have to be rigidly shifted. Returns the count copied (<= max). */
+int xr_map_get_cloud(float *xyz, int max);
+
+/* Persist / restore the session as a cloud map — the SAME anchored
+ * keyframe graph (odom + corrected poses, descriptors, anchor-local
+ * landmarks). A loaded map is the reference the live session relocalizes
+ * INTO: CORR resets, the first verified closure registers the two frames,
+ * then the graph heals as usual. Return the keyframe count; 0 on failure /
+ * bad or absent file. This is the substrate for the fog map service and
+ * cross-session persistence. */
+int xr_map_save(const char *path);
+int xr_map_load(const char *path);
+
 /* Live session correction D (q wxyz, p): session_pose = D ∘ odom_pose,
  * session_point = R(D)·p_odom + p(D). Identity until the first VERIFIED
- * loop closure (3D-3D RANSAC over matched landmark pairs). In mapping
- * mode a closure also relaxes the keyframe chain (per-keyframe pose
- * graph, error distributed by odom path length); in localization-only
- * mode it relocalizes the live pose against the frozen map. Returns a
- * generation counter (bumps on every update; also on reset). */
+ * loop closure (gravity-aligned 2D-3D PnP: the map supplies 3D, the query
+ * supplies pixels). A confirmed closure deforms the keyframe pose graph
+ * AND, with recovery enabled, snaps this correction so the live pose
+ * follows the healed map; with recovery off the map still heals but the
+ * correction holds (odometry-continuous, for external global placement).
+ * Returns a generation counter (bumps on every update; also on reset). */
 int xr_map_get_correction(float q[4], float p[3]);
 
 #endif

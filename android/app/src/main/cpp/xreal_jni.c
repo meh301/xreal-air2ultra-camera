@@ -79,8 +79,6 @@ static struct {
     float depth_ms;
     atomic_int pane_mode;                   /* 0 = left|depth, 1 = left|right */
 
-    int map_n;
-    uint32_t map_stamp;
     atomic_int map_on;                      /* 0 = localization-only (frozen) */
     xr_slam_state vio;                      /* newest Basalt state */
     int vio_fresh;
@@ -186,20 +184,11 @@ static struct {
  * this much per ABI; a plain zero static stays in .bss. */
 static xr_stereo ST;
 
-/* rolling landmark budget: past this the map replaces its stalest points
- * instead of growing (the SD888 heats up rendering/exporting more) */
-#define XR_MAP_POINT_CAP 3000
-
-/* same .bss rule: the Basalt feed frames and the accumulated landmark map
- * (open-addressed on landmark id, stamp 0 = empty slot; guarded by S.lock) */
+/* same .bss rule: the Basalt feed frames. The displayed landmark map is no
+ * longer accumulated here — it is DERIVED from the keyframe graph in xr_map
+ * (xr_map_get_cloud) so it deforms when a closure heals the graph, instead
+ * of being a flat cloud the correction had to rigidly shift. */
 static uint8_t SLAM_FEED[2][XR_OW * XR_OH];   /* contrast-stretched frames */
-static struct {
-    int32_t id;
-    float x, y, z;
-    uint32_t stamp;
-    uint16_t seen;      /* observations: one-shot triangulations are noise */
-    uint16_t pad_;
-} MAP_PT[4096];
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -980,6 +969,12 @@ static void *slam_worker(void *arg) {
                 pthread_mutex_lock(&S.lock);
                 if (corr_changed) {
                     corr_gen = gen;
+                    /* log the correction delta vs the last one. The
+                     * displayed map is keyframe-derived now and heals via
+                     * the pose graph inside xr_map — there is NO flat-cloud
+                     * rigid shift here anymore (it moved every point
+                     * together and healed nothing, and cancelled against
+                     * the follow-centred view). */
                     float oR[9], DR2[9], dp2[3];
                     wxyz_to_rot(Dq, oR);
                     for (int r = 0; r < 3; r++)
@@ -994,32 +989,11 @@ static void *slam_worker(void *arg) {
                     float dtr = DR2[0] + DR2[4] + DR2[8];
                     float dang = acosf(fminf(1.0f, fmaxf(-1.0f,
                                                          (dtr - 1) * 0.5f)));
-                    int mapping_now = atomic_load(&S.map_on);
-                    LOGI("correction gen %d APPLIED: shift %.2f m, %.1f deg "
-                         "(%s)", gen, (double)dmag, (double)(dang * 57.3f),
-                         mapping_now ? "map healed"
-                                     : "POSE SNAP to fixed map");
-                    /* Re-transform the displayed cloud ONLY while mapping
-                     * (glue the growing map to the correction). In
-                     * localization-only the frozen cloud is the FIXED
-                     * reference the pose SNAPS TO — moving it by the same
-                     * D as the pose is a rigid co-motion, which the
-                     * follow-centred 3D view and the head-relative AR
-                     * overlay both render as NO motion. That cancellation
-                     * is why reloc looked completely dead in every test. */
-                    if (mapping_now) {
-                        for (int i = 0; i < 4096; i++) {
-                            if (!MAP_PT[i].stamp) continue;
-                            float x[3] = { MAP_PT[i].x, MAP_PT[i].y,
-                                           MAP_PT[i].z };
-                            m3v(DR2, x, t3);
-                            MAP_PT[i].x = t3[0] + dp2[0];
-                            MAP_PT[i].y = t3[1] + dp2[1];
-                            MAP_PT[i].z = t3[2] + dp2[2];
-                        }
-                        memcpy(Dq, cq, sizeof Dq);
-                        memcpy(Dp, cp, sizeof Dp);
-                    }
+                    LOGI("correction gen %d: live pose shifted %.2f m, "
+                         "%.1f deg (map healed in the keyframe graph)", gen,
+                         (double)dmag, (double)(dang * 57.3f));
+                    memcpy(Dq, cq, sizeof Dq);
+                    memcpy(Dp, cp, sizeof Dp);
                 }
                 S.vio = st;
                 S.vio_fresh = 1;
@@ -1036,64 +1010,20 @@ static void *slam_worker(void *arg) {
                     S.pts_pane_r[i][1] = st.feat_uv_r[i][1];
                 }
                 S.track_count = nr;
-                /* fold this pose's landmarks into the accumulated map
-                 * (frozen in localization-only mode) */
-                if (atomic_load(&S.map_on)) {
-                S.map_stamp++;
-                for (int i = 0; i < st.n_landmarks; i++) {
-                    uint32_t h = ((uint32_t)st.lm_id[i] * 2654435761u) & 4095u;
-                    int slot = -1, oldest = -1, was_empty = 0;
-                    uint32_t oldest_stamp = 0xFFFFFFFFu;
-                    for (int k = 0; k < 32; k++) {
-                        uint32_t j = (h + k) & 4095u;
-                        if (MAP_PT[j].stamp == 0) { slot = (int)j; was_empty = 1; break; }
-                        if (MAP_PT[j].id == st.lm_id[i]) { slot = (int)j; break; }
-                        if (MAP_PT[j].stamp < oldest_stamp) {
-                            oldest_stamp = MAP_PT[j].stamp;
-                            oldest = (int)j;
-                        }
-                    }
-                    /* at the point budget, roll: replace the stalest probed
-                     * entry instead of occupying a fresh slot */
-                    if (was_empty && S.map_n >= XR_MAP_POINT_CAP && oldest >= 0)
-                        slot = oldest;
-                    if (slot < 0) slot = oldest;   /* neighborhood full: evict */
-                    if (MAP_PT[slot].stamp != 0 &&
-                        MAP_PT[slot].id == st.lm_id[i]) {
-                        /* re-observed: blend toward the newer (better-
-                         * converged) estimate instead of keeping the first */
-                        MAP_PT[slot].x = 0.7f * MAP_PT[slot].x + 0.3f * st.lm_xyz[i][0];
-                        MAP_PT[slot].y = 0.7f * MAP_PT[slot].y + 0.3f * st.lm_xyz[i][1];
-                        MAP_PT[slot].z = 0.7f * MAP_PT[slot].z + 0.3f * st.lm_xyz[i][2];
-                        if (MAP_PT[slot].seen < 65535) MAP_PT[slot].seen++;
-                    } else {
-                        if (MAP_PT[slot].stamp == 0) S.map_n++;
-                        MAP_PT[slot].id = st.lm_id[i];
-                        MAP_PT[slot].x = st.lm_xyz[i][0];
-                        MAP_PT[slot].y = st.lm_xyz[i][1];
-                        MAP_PT[slot].z = st.lm_xyz[i][2];
-                        MAP_PT[slot].seen = 1;
-                    }
-                    MAP_PT[slot].stamp = S.map_stamp;
-                }
-                }
-                /* AR eye mode: snapshot the gated landmark map + this pose
-                 * so the renderer can draw world-anchored points */
-                static float map_snap[XR_GLES_MAX_MAP * 3]; /* worker only */
-                int mn = 0;
-                for (int i = 0; i < 4096 && mn < XR_GLES_MAX_MAP; i++) {
-                    if (!MAP_PT[i].stamp || MAP_PT[i].seen < 3) continue;
-                    map_snap[mn * 3] = MAP_PT[i].x;
-                    map_snap[mn * 3 + 1] = MAP_PT[i].y;
-                    map_snap[mn * 3 + 2] = MAP_PT[i].z;
-                    mn++;
-                }
                 pthread_mutex_unlock(&S.lock);
                 xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0,
                                    st.ts);
+                /* The displayed map is the keyframe-derived cloud (session
+                 * frame — the same frame as the corrected head pose). It is
+                 * the AUTHORITATIVE map: it deforms when a closure deforms
+                 * the keyframe graph, which is the visible healing. Fed here
+                 * with the live head pose for per-present parallax. Grows in
+                 * mapping mode, frozen (but still shown) in localization. */
                 float Rw[9];
                 wxyz_to_rot(st.q, Rw);
-                xr_gles_set_map(map_snap, mn, Rw, st.p, st.v, st.ts);
+                static float map_cloud[XR_GLES_MAX_MAP * 3]; /* worker only */
+                int mn = xr_map_get_cloud(map_cloud, XR_GLES_MAX_MAP);
+                xr_gles_set_map(map_cloud, mn, Rw, st.p, st.v, st.ts);
 
                 /* anchor the 1 kHz head-pose propagator (session frame) */
                 prop_correct(st.q, st.p, st.v, st.ts);
@@ -1803,9 +1733,6 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls
     S.pts_n_r = 0;
     S.track_count = 0;
     S.vio_fresh = 0;
-    memset(MAP_PT, 0, sizeof MAP_PT);
-    S.map_n = 0;
-    S.map_stamp = 0;
     pthread_mutex_unlock(&S.lock);
     S.slam_prev_ts = 0;
     xr_gles_set_points(NULL, 0, 0);
@@ -1823,15 +1750,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabMap(JNIEnv *env, jclass cls,
     jlong cap = (*env)->GetDirectBufferCapacity(env, buf);
     if (!dst || cap < 4) return 0;
     int max = (int)((cap - 4) / 12);
-    int n = 0;
-    pthread_mutex_lock(&S.lock);
-    for (int i = 0; i < 4096 && n < max; i++) {
-        /* one- and two-shot landmarks are mostly bad triangulations */
-        if (!MAP_PT[i].stamp || MAP_PT[i].seen < 3) continue;
-        memcpy(dst + 4 + (size_t)n * 12, &MAP_PT[i].x, 12);
-        n++;
-    }
-    pthread_mutex_unlock(&S.lock);
+    /* the keyframe-derived cloud (session frame) — same map that is drawn */
+    int n = xr_map_get_cloud((float *)(dst + 4), max);
     uint32_t un = (uint32_t)n;
     memcpy(dst, &un, 4);
     return n;
@@ -1893,6 +1813,32 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetMapping(JNIEnv *env, jclass cl
     (void)env; (void)cls;
     atomic_store(&S.map_on, on ? 1 : 0);
     xr_map_set_mapping(on);
+}
+
+/* Persist the session as a cloud map (the anchored keyframe graph) to
+ * `path`, and reload one as the reference the live session relocalizes
+ * into. Same format — session map and cloud map are one thing. Return the
+ * keyframe count, 0 on failure. */
+JNIEXPORT jint JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSaveMap(JNIEnv *env, jclass cls,
+                                                       jstring path) {
+    (void)cls;
+    if (!path) return 0;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    int n = xr_map_save(p);
+    (*env)->ReleaseStringUTFChars(env, path, p);
+    return n;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeLoadMap(JNIEnv *env, jclass cls,
+                                                       jstring path) {
+    (void)cls;
+    if (!path) return 0;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    int n = xr_map_load(p);
+    (*env)->ReleaseStringUTFChars(env, path, p);
+    return n;
 }
 
 /* The glasses display's refresh rate as ANDROID reports it. The MCU
@@ -1995,7 +1941,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabPose(JNIEnv *env, jclass cls,
     uint32_t flags = (atomic_load(&S.depth_on) ? 1u : 0u) |
                      (S.stereo_ready ? 2u : 0u) |
                      (has_q ? 4u : 0u) |
-                     (basalt ? 8u : 0u);
+                     (basalt ? 8u : 0u) |
+                     (((uint32_t)xr_map_recovery_state() & 3u) << 4); /* 0 trk, 1 lost, 2 recovered */
     memcpy(dst, q, 16);
     memcpy(dst + 16, p, 12);
     memcpy(dst + 28, &tracked, 4);

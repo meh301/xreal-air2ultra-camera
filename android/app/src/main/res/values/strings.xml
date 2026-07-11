@@ -46,6 +46,13 @@
     <string name="mode_sbs">SBS</string>
     <string name="mode_stereo">3D</string>
     <string name="snapshot">Snap</string>
+    <!-- cloud-map persistence: save/load the keyframe graph -->
+    <string name="map_save">Save</string>
+    <string name="map_load">Load</string>
+    <string name="map_saved">Cloud map saved: %1$d keyframes</string>
+    <string name="map_loaded">Cloud map loaded: %1$d keyframes — relocalize to register</string>
+    <string name="map_save_failed">Could not save the cloud map.</string>
+    <string name="map_load_failed">No cloud map to load yet.</string>
     <string name="status_reconnecting">Stream stalled — reconnecting…</string>
     <string name="snapshot_saved">Snapshot saved: %1$s</string>
     <string name="snapshot_failed">Could not create the snapshot file.</string>
