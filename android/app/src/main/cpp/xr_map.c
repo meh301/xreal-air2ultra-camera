@@ -721,6 +721,17 @@ static void process_keyframe(void) {
         if (m > best_m) { best_m = m; best_i = i; }
     }
     int j_corrected = 0;      /* verified closure filled work.qc/pc */
+    if (best_i >= 0 && best_m < CAND_MIN_MATCHES) {
+        /* below the candidate bar: say so occasionally, so a "nothing
+         * happens" report can distinguish no-match from no-verify */
+        static uint64_t nolog_ts;              /* map thread only */
+        if (work.ts - nolog_ts > 5000000000ull) {
+            nolog_ts = work.ts;
+            LOGI("session map: best %d matches (kf#%d, %d stored) — below "
+                 "the %d candidate bar",
+                 best_m, best_i, KF_N, CAND_MIN_MATCHES);
+        }
+    }
     if (best_i >= 0 && best_m >= CAND_MIN_MATCHES) {
         KF[best_i].last_used = work.ts;    /* matched = useful */
         LAST_CAND.a = work.ts;
