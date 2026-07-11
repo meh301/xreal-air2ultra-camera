@@ -83,9 +83,8 @@ void xr_gles_set_time_fn(uint64_t (*fn)(void));
  * predicting the head pose this far ahead removes the mean motion-to-
  * photon lag, which see-through AR shows as the cloud trailing head
  * rotation (camera passthrough masks it — the image moves with itself).
- * Sized for the ~120 Hz AR tick: mean redraw age ~4 ms + scanout ~4 ms +
- * panel processing. OVER-predicting oscillates with the scanout phase and
- * reads as jitter during rotation, so err low. */
+ * Sized for the ~120 Hz AR tick; over-predicting oscillates with the
+ * scanout phase and reads as jitter during rotation, so err low. */
 #define XR_GLES_PREDICT_NS 12000000u
 
 /* AR-mode pose delta: like the timewarp pose fn but sampled WITHOUT the
@@ -95,17 +94,13 @@ void xr_gles_set_time_fn(uint64_t (*fn)(void));
  * timewarp pose fn when unset. */
 void xr_gles_set_ar_pose_fn(int (*fn)(uint64_t ts_ref_ns, float dR[9]));
 
-/* Direct AR head pose: fn fills the body->world rotation (row major) and
- * position predicted predict_ns ahead of the newest IMU sample — the
- * 1 kHz dead-reckoned propagator. When it returns 0 the AR pass renders
- * from it directly, with no reference-time warp at all (the warp
- * machinery is for re-projecting video frames; a point cloud has no
- * frame to warp). The renderer supplies the horizon: fixed for the
- * front-buffer path, measured swap-to-photon for the vsync-locked AR
- * path. predict_ns 0 = use the caller's default. Nonzero return -> the
- * pose-fn fallback above. */
-void xr_gles_set_head_fn(int (*fn)(uint64_t predict_ns,
-                                   float R_body_to_world[9], float p[3]));
+/* Direct AR head pose: fn fills the CURRENT body->world rotation (row
+ * major) and position, already predicted to photon time — the 1 kHz
+ * dead-reckoned propagator. When it returns 0 the AR pass renders from
+ * it directly, with no reference-time warp at all (the warp machinery is
+ * for re-projecting video frames; a point cloud has no frame to warp).
+ * Nonzero return -> the pose-fn fallback above. */
+void xr_gles_set_head_fn(int (*fn)(float R_body_to_world[9], float p[3]));
 
 /* Loop/reloc flash for the AR eye mode: the matched keyframe's stored
  * landmarks (odom-frame world xyz, n x 3 floats), drawn magenta over the

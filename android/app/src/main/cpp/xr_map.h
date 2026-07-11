@@ -38,17 +38,6 @@ void xr_map_set_mapping(int on);
  * odometry. */
 void xr_map_set_graph(int on);
 
-/* VIO health, driven by the SLAM worker every tick. While unhealthy
- * (shake/divergence) NOTHING is verified, corrected, or stored — a
- * diverging odometry produces locally-coherent garbage that passes
- * RANSAC and poisons the correction chain. Candidates still log.
- * Relocalization needs no separate arming: every keyframe/stationary
- * query is matched in two tiers (old = loop closure, young = reloc), a
- * verified near-identity alignment is a silent no-op, and a meaningful
- * one — the snap-back after a shake — corrects immediately, with jumps
- * past the normal caps admitted only on strong geometric consensus. */
-void xr_map_set_healthy(int healthy);
-
 void xr_map_reset(void);
 
 /* Offer a keyframe from the SLAM worker (non-blocking; drops when the

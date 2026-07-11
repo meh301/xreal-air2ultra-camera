@@ -142,13 +142,6 @@ static struct {
      * the difference blended in smoothly — the AR renderer reads THIS, at
      * full IMU rate, with no feed timestamps involved. Guarded by imu_lock. */
     atomic_int prop_on;                     /* UI A/B: off -> warp fallback */
-
-    /* raw-IMU shake detector (imu_lock): mechanical violence is
-     * unambiguous in the 1 kHz stream — |a| far from 1 g or extreme
-     * rates — unlike in the VIO output, which degrades quietly */
-    uint64_t shake_until;                   /* guarded until (IMU clock) */
-    int shake_hits;
-
     struct {
         int valid;
         uint64_t ts;                /* propagated-to (IMU clock) */
@@ -651,15 +644,7 @@ static void dead_reckon(float q[4], float p[3], float v[3], const float g[3],
     }
 }
 
-#define PROP_BLEND_S 0.12f          /* position/velocity corrections */
-/* Orientation corrections blend MUCH slower: the gyro is excellent over
- * seconds, so the VIO only needs to absorb slow drift — and any small
- * time offset between the VIO stamp and the IMU replay makes the per-
- * anchor orientation error proportional to the CURRENT rotation rate
- * (err ~ ω·δt). Re-applying that at 30 Hz over 0.12 s produced a ~1°
- * sawtooth during rotation ("snapping by degrees"); over ~1.5 s the
- * ω-transient averages out while true drift still passes through. */
-#define PROP_BLEND_ROT_S 1.5f
+#define PROP_BLEND_S 0.12f          /* VIO corrections smear over this */
 
 /* per-IMU-sample propagator step (imu_lock held, called by imu_worker) */
 static void prop_step(const xr_imu_sample *s, float dt) {
@@ -670,10 +655,8 @@ static void prop_step(const xr_imu_sample *s, float dt) {
     /* blend the pending VIO correction in — 30 Hz anchors never snap */
     float k = dt / PROP_BLEND_S;
     if (k > 1) k = 1;
-    float kr = dt / PROP_BLEND_ROT_S;
-    if (kr > 1) kr = 1;
-    float erv[3] = { S.prop.err_rv[0] * kr, S.prop.err_rv[1] * kr,
-                     S.prop.err_rv[2] * kr };
+    float erv[3] = { S.prop.err_rv[0] * k, S.prop.err_rv[1] * k,
+                     S.prop.err_rv[2] * k };
     float dq[4], qn[4];
     quat_from_rotvec(erv, dq);
     quat_mul(dq, S.prop.q, qn);                /* world-side: left-mult */
@@ -681,7 +664,7 @@ static void prop_step(const xr_imu_sample *s, float dt) {
     for (int i = 0; i < 3; i++) {
         S.prop.p[i] += S.prop.err_p[i] * k;
         S.prop.v[i] += S.prop.err_v[i] * k;
-        S.prop.err_rv[i] *= 1 - kr;
+        S.prop.err_rv[i] *= 1 - k;
         S.prop.err_p[i] *= 1 - k;
         S.prop.err_v[i] *= 1 - k;
     }
@@ -769,12 +752,10 @@ static void prop_correct(const float q[4], const float p[3],
     pthread_mutex_unlock(&S.imu_lock);
 }
 
-/* AR head pose for the renderer: the propagated 6-DoF state predicted
- * predict_ns ahead (0 = the front-buffer default; the vsync-locked AR
- * path passes its measured swap-to-photon horizon). Fails (-> renderer
- * fallback) until the VIO anchors it, or when anchors stop arriving
- * (dead reckoning alone diverges in seconds). */
-static int head_pose_now(uint64_t predict_ns, float R[9], float p[3]) {
+/* AR head pose for the renderer: the propagated 6-DoF state predicted to
+ * photon time. Fails (-> renderer fallback) until the VIO anchors it, or
+ * when anchors stop arriving (dead reckoning alone diverges in seconds). */
+static int head_pose_now(float R[9], float p[3]) {
     if (!atomic_load(&S.prop_on)) return -1;
     pthread_mutex_lock(&S.imu_lock);
     if (!S.prop.valid ||
@@ -788,9 +769,7 @@ static int head_pose_now(uint64_t predict_ns, float R[9], float p[3]) {
     memcpy(v, S.prop.v, sizeof v);
     memcpy(w, S.prop.w_ema, sizeof w);
     pthread_mutex_unlock(&S.imu_lock);
-    if (!predict_ns) predict_ns = XR_GLES_PREDICT_NS;
-    if (predict_ns > 50000000ull) predict_ns = 50000000ull;   /* sanity */
-    const float tp = (float)predict_ns * 1e-9f;
+    const float tp = (float)XR_GLES_PREDICT_NS * 1e-9f;
     float rv[3] = { w[0] * tp, w[1] * tp, w[2] * tp };
     float dq[4], qp[4];
     quat_from_rotvec(rv, dq);
@@ -849,46 +828,6 @@ static void *slam_worker(void *arg) {
              * feature u,v are per-camera pixels — the panes are 1:1) */
             static xr_slam_state st;               /* worker thread only */
             if (xr_slam_poll(&st)) {
-                /* VIO health machine: disruption (shake) -> wait for a
-                 * SUSTAINED recovery -> open the snap-back window. The
-                 * gate is on recovery-complete, not disruption-start:
-                 * corrections while the estimator is degenerate corrupt
-                 * the session frame beyond repair (verified on-device). */
-                static uint64_t disrupted_at, stable_since;   /* worker */
-                static int nlm_prev;
-                float vmag = sqrtf(st.v[0] * st.v[0] + st.v[1] * st.v[1] +
-                                   st.v[2] * st.v[2]);
-                pthread_mutex_lock(&S.imu_lock);
-                uint64_t shake_until = S.shake_until;
-                pthread_mutex_unlock(&S.imu_lock);
-                /* the raw-IMU detector catches mechanical violence the
-                 * instant it happens; the VIO-side signals below catch
-                 * the quiet failures (occlusion, texture loss) */
-                int degen = st.ts < shake_until ||
-                            vmag > 6.0f ||
-                            (nlm_prev > 25 && st.n_landmarks < 5);
-                nlm_prev = st.n_landmarks;
-                if (degen) {
-                    if (!disrupted_at)
-                        LOGI("VIO disruption (|v|=%.1f m/s, lm=%d) — "
-                             "map corrections suspended", (double)vmag,
-                             st.n_landmarks);
-                    disrupted_at = st.ts;
-                    stable_since = 0;
-                } else if (disrupted_at) {
-                    int stable = vmag < 2.0f && st.n_landmarks >= 20;
-                    if (!stable) {
-                        stable_since = 0;
-                    } else if (!stable_since) {
-                        stable_since = st.ts;
-                    } else if (st.ts - stable_since > 2000000000ull) {
-                        disrupted_at = 0;
-                        stable_since = 0;
-                        LOGI("VIO recovered — map corrections re-enabled");
-                    }
-                }
-                xr_map_set_healthy(disrupted_at == 0);
-
                 /* keyframes store raw ODOM poses + landmarks — the pose
                  * graph's measurements. Offer BEFORE the correction. */
                 xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
@@ -1422,32 +1361,6 @@ static void *imu_worker(void *arg) {
 
         pthread_mutex_lock(&S.imu_lock);
         S.imu_latest = s;
-        /* shake detector: a violent sample = |a| far outside 1 g or an
-         * extreme rate; a handful within a short burst arms the guard for
-         * 1 s past the last one. Normal fast head turns (~400 dps, |a|
-         * near 1 g) stay well below both thresholds. */
-        {
-            float a2 = s.accel_g[0] * s.accel_g[0] +
-                       s.accel_g[1] * s.accel_g[1] +
-                       s.accel_g[2] * s.accel_g[2];
-            float w2 = s.gyro_dps[0] * s.gyro_dps[0] +
-                       s.gyro_dps[1] * s.gyro_dps[1] +
-                       s.gyro_dps[2] * s.gyro_dps[2];
-            int violent = a2 > 2.8f * 2.8f || a2 < 0.2f * 0.2f ||
-                          w2 > 500.0f * 500.0f;
-            if (violent) {
-                if (S.shake_hits < 100) S.shake_hits++;
-                if (S.shake_hits >= 6) {
-                    if (s.ts_ns > S.shake_until)
-                        LOGI("IMU shake detected (|a|=%.1fg |w|=%.0fdps) — "
-                             "map guarded", (double)sqrtf(a2),
-                             (double)sqrtf(w2));
-                    S.shake_until = s.ts_ns + 1000000000ull;
-                }
-            } else if (S.shake_hits > 0) {
-                S.shake_hits--;
-            }
-        }
         if (S.prop.valid) {
             float pdt = (float)(s.ts_ns - S.prop.ts) * 1e-9f;
             if (pdt > 0 && pdt < 0.05f) prop_step(&s, pdt);
@@ -1506,8 +1419,6 @@ static void imu_start(void) {
     S.ring_head = S.ring_tail = 0;
     S.qhist_n = 0;
     memset(&S.prop, 0, sizeof S.prop);
-    S.shake_until = 0;
-    S.shake_hits = 0;
     imu_enable();
     atomic_store(&S.imu_running, 1);
     pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
