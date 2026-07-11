@@ -131,9 +131,21 @@ static atomic_int USE_XFEAT = 0;       /* runtime descriptor selector */
  * by verified loop closures; identity until the first one. */
 static struct { float q[4]; float p[3]; int gen; } CORR = { .q = {1, 0, 0, 0} };
 
+static void *xfeat_preload_thread(void *arg) {
+    (void)arg;
+    if (MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);   /* dlopen ORT + load model */
+    return NULL;
+}
+
 void xr_map_set_model(const char *onnx_path) {
     if (!onnx_path) return;
     strncpy(MODEL_PATH, onnx_path, sizeof MODEL_PATH - 1);
+    /* eagerly load ORT + the model off the UI thread so xfeat_ready() is
+     * accurate the moment the user flips the descriptor toggle (the lazy
+     * map-thread init made the button label race and read "not ready") */
+    pthread_t t;
+    if (pthread_create(&t, NULL, xfeat_preload_thread, NULL) == 0)
+        pthread_detach(t);
 }
 
 void xr_map_set_mapping(int on) {

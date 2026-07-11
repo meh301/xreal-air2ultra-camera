@@ -3,6 +3,7 @@
 
 #include <dlfcn.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include <android/log.h>
@@ -35,12 +36,7 @@ static int ort_ok(OrtStatus *st, const char *what) {
     return 0;
 }
 
-int xr_xfeat_init(const char *model_path) {
-    static int attempted;
-    if (X.ready) return 1;
-    if (attempted) return 0;
-    attempted = 1;
-
+static int xfeat_try_init(const char *model_path) {
     void *dl = dlopen("libonnxruntime.so", RTLD_NOW | RTLD_LOCAL);
     if (!dl) {
         LOGI("XFeat: libonnxruntime.so not present (%s) — mini-ORB fallback",
@@ -97,6 +93,18 @@ int xr_xfeat_init(const char *model_path) {
     LOGI("XFeat ready: %s (in=%s outs=%s,%s,%s)", model_path, X.in_name,
          X.out_names[0], X.out_names[1], X.out_names[2]);
     return 1;
+}
+
+/* Thread-safe: one caller runs the slow init; others fall back to ORB
+ * until X.ready flips. A failed attempt is retryable (not a permanent
+ * one-shot — the model may simply not have been staged yet). */
+int xr_xfeat_init(const char *model_path) {
+    if (X.ready) return 1;
+    static atomic_int busy;
+    if (atomic_exchange(&busy, 1)) return 0;
+    int ok = xfeat_try_init(model_path);
+    if (!ok) atomic_store(&busy, 0);
+    return ok;
 }
 
 int xr_xfeat_available(void) {
