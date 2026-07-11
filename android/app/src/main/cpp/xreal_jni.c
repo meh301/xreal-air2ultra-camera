@@ -137,6 +137,20 @@ static struct {
     struct { uint64_t ts; float q[4]; } qhist[256];
     uint32_t qhist_n;
 
+    /* 1 kHz head-pose propagator (session frame): gyro + gravity-
+     * subtracted accel dead reckoning, re-anchored by every VIO pose with
+     * the difference blended in smoothly — the AR renderer reads THIS, at
+     * full IMU rate, with no feed timestamps involved. Guarded by imu_lock. */
+    struct {
+        int valid;
+        uint64_t ts;                /* propagated-to (IMU clock) */
+        uint64_t anchor_ts;         /* last VIO anchor (IMU clock) */
+        float q[4], p[3], v[3];
+        float g[3];                 /* what the accel reads at rest, world */
+        float w_ema[3];             /* smoothed body rate, rad/s */
+        float err_rv[3], err_p[3], err_v[3];    /* pending correction */
+    } prop;
+
     /* raw-stream (pre-remap) gyro bias capture: one log line to check the
      * channel signs against the factory calibration numbers */
     double raw_gbias[3];
@@ -581,6 +595,187 @@ static int pose_delta_ar(uint64_t ts_ref, float dR[9]) {
     return 0;
 }
 
+/* ---- head-pose propagator ----------------------------------------------------- */
+
+static void quat_from_rotvec(const float rv[3], float q[4]) {
+    float ang = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]);
+    if (ang < 1e-9f) { q[0] = 1; q[1] = q[2] = q[3] = 0; return; }
+    float s = sinf(ang * 0.5f) / ang;
+    q[0] = cosf(ang * 0.5f);
+    q[1] = rv[0] * s; q[2] = rv[1] * s; q[3] = rv[2] * s;
+}
+
+static void quat_to_rotvec(const float q[4], float rv[3]) {
+    float w = q[0] >= 0 ? q[0] : -q[0];
+    float sg = q[0] >= 0 ? 1.0f : -1.0f;
+    float vn = sqrtf(q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (vn < 1e-9f) { rv[0] = rv[1] = rv[2] = 0; return; }
+    float k = sg * 2.0f * atan2f(vn, w) / vn;
+    rv[0] = q[1] * k; rv[1] = q[2] * k; rv[2] = q[3] * k;
+}
+
+static void m3v(const float R[9], const float v[3], float o[3]) {
+    o[0] = R[0] * v[0] + R[1] * v[1] + R[2] * v[2];
+    o[1] = R[3] * v[0] + R[4] * v[1] + R[5] * v[2];
+    o[2] = R[6] * v[0] + R[7] * v[1] + R[8] * v[2];
+}
+
+/* one gyro+accel dead-reckoning step on a (q, p, v) state */
+static void dead_reckon(float q[4], float p[3], float v[3], const float g[3],
+                        const xr_imu_sample *s, float dt) {
+    const float d2r = (float)M_PI / 180.0f;
+    float rv[3] = { s->gyro_dps[0] * d2r * dt, s->gyro_dps[1] * d2r * dt,
+                    s->gyro_dps[2] * d2r * dt };
+    float dq[4], qn[4];
+    quat_from_rotvec(rv, dq);
+    quat_mul(q, dq, qn);                       /* body rates: right-mult */
+    float n = sqrtf(qn[0] * qn[0] + qn[1] * qn[1] + qn[2] * qn[2] +
+                    qn[3] * qn[3]);
+    for (int i = 0; i < 4; i++) q[i] = qn[i] / n;
+    float R[9], ab[3], aw[3];
+    wxyz_to_rot(q, R);
+    for (int i = 0; i < 3; i++) ab[i] = s->accel_g[i] * 9.80665f;
+    m3v(R, ab, aw);
+    for (int i = 0; i < 3; i++) {
+        v[i] += (aw[i] - g[i]) * dt;
+        p[i] += v[i] * dt;
+    }
+}
+
+#define PROP_BLEND_S 0.12f          /* VIO corrections smear over this */
+
+/* per-IMU-sample propagator step (imu_lock held, called by imu_worker) */
+static void prop_step(const xr_imu_sample *s, float dt) {
+    const float d2r = (float)M_PI / 180.0f;
+    for (int i = 0; i < 3; i++)
+        S.prop.w_ema[i] += 0.3f * (s->gyro_dps[i] * d2r - S.prop.w_ema[i]);
+    dead_reckon(S.prop.q, S.prop.p, S.prop.v, S.prop.g, s, dt);
+    /* blend the pending VIO correction in — 30 Hz anchors never snap */
+    float k = dt / PROP_BLEND_S;
+    if (k > 1) k = 1;
+    float erv[3] = { S.prop.err_rv[0] * k, S.prop.err_rv[1] * k,
+                     S.prop.err_rv[2] * k };
+    float dq[4], qn[4];
+    quat_from_rotvec(erv, dq);
+    quat_mul(dq, S.prop.q, qn);                /* world-side: left-mult */
+    memcpy(S.prop.q, qn, sizeof qn);
+    for (int i = 0; i < 3; i++) {
+        S.prop.p[i] += S.prop.err_p[i] * k;
+        S.prop.v[i] += S.prop.err_v[i] * k;
+        S.prop.err_rv[i] *= 1 - k;
+        S.prop.err_p[i] *= 1 - k;
+        S.prop.err_v[i] *= 1 - k;
+    }
+    /* gravity self-calibration at quasi-rest (|a| ~ 1 g, slow rotation) */
+    float an = sqrtf(s->accel_g[0] * s->accel_g[0] +
+                     s->accel_g[1] * s->accel_g[1] +
+                     s->accel_g[2] * s->accel_g[2]);
+    float wn = sqrtf(S.prop.w_ema[0] * S.prop.w_ema[0] +
+                     S.prop.w_ema[1] * S.prop.w_ema[1] +
+                     S.prop.w_ema[2] * S.prop.w_ema[2]);
+    if (an > 0.97f && an < 1.03f && wn < 0.05f) {
+        float R[9], ab[3], aw[3];
+        wxyz_to_rot(S.prop.q, R);
+        for (int i = 0; i < 3; i++) ab[i] = s->accel_g[i] * 9.80665f;
+        m3v(R, ab, aw);
+        for (int i = 0; i < 3; i++)
+            S.prop.g[i] += 0.02f * (aw[i] - S.prop.g[i]);
+    }
+}
+
+/* VIO anchor (session frame). The VIO pose is stamped at the image
+ * exposure, ~a pipeline latency in the past — replay the IMU ring from
+ * there to the propagator's clock before differencing, else motion during
+ * the latency window reads as error. */
+static void prop_correct(const float q[4], const float p[3],
+                         const float v[3], uint64_t ts) {
+    pthread_mutex_lock(&S.imu_lock);
+    if (!S.prop.valid) {
+        memcpy(S.prop.q, q, sizeof S.prop.q);
+        memcpy(S.prop.p, p, sizeof S.prop.p);
+        memcpy(S.prop.v, v, sizeof S.prop.v);
+        S.prop.ts = S.imu_latest.ts_ns ? S.imu_latest.ts_ns : ts;
+        S.prop.anchor_ts = S.prop.ts;
+        float R[9], ab[3];
+        wxyz_to_rot(q, R);
+        for (int i = 0; i < 3; i++) ab[i] = S.imu_latest.accel_g[i] * 9.80665f;
+        m3v(R, ab, S.prop.g);          /* VIO init happens at rest */
+        memset(S.prop.w_ema, 0, sizeof S.prop.w_ema);
+        memset(S.prop.err_rv, 0, sizeof S.prop.err_rv);
+        memset(S.prop.err_p, 0, sizeof S.prop.err_p);
+        memset(S.prop.err_v, 0, sizeof S.prop.err_v);
+        S.prop.valid = 1;
+        pthread_mutex_unlock(&S.imu_lock);
+        return;
+    }
+    float qv[4], pv[3], vv[3];
+    memcpy(qv, q, sizeof qv);
+    memcpy(pv, p, sizeof pv);
+    memcpy(vv, v, sizeof vv);
+    uint64_t t_prev = ts;
+    uint32_t n = S.ring_head - S.ring_tail;
+    if (n > 1024) n = 1024;
+    for (uint32_t k = S.ring_head - n; k != S.ring_head; k++) {
+        const xr_imu_sample *sp = &S.ring[k % 1024];
+        if (sp->ts_ns <= t_prev || sp->ts_ns > S.prop.ts) continue;
+        float dt = (float)(sp->ts_ns - t_prev) * 1e-9f;
+        t_prev = sp->ts_ns;
+        if (dt > 0.05f) continue;              /* gap: skip, keep time */
+        dead_reckon(qv, pv, vv, S.prop.g, sp, dt);
+    }
+    /* world-side difference vs the propagated state */
+    float qi[4] = { S.prop.q[0], -S.prop.q[1], -S.prop.q[2], -S.prop.q[3] };
+    float qe[4], rv[3], ep[3], ev[3];
+    quat_mul(qv, qi, qe);
+    quat_to_rotvec(qe, rv);
+    for (int i = 0; i < 3; i++) {
+        ep[i] = pv[i] - S.prop.p[i];
+        ev[i] = vv[i] - S.prop.v[i];
+    }
+    float pn = sqrtf(ep[0] * ep[0] + ep[1] * ep[1] + ep[2] * ep[2]);
+    float an = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]);
+    if (pn > 0.5f || an > 0.26f) {             /* reset / loop jump: snap */
+        memcpy(S.prop.q, qv, sizeof qv);
+        memcpy(S.prop.p, pv, sizeof pv);
+        memcpy(S.prop.v, vv, sizeof vv);
+        memset(S.prop.err_rv, 0, sizeof S.prop.err_rv);
+        memset(S.prop.err_p, 0, sizeof S.prop.err_p);
+        memset(S.prop.err_v, 0, sizeof S.prop.err_v);
+    } else {
+        memcpy(S.prop.err_rv, rv, sizeof rv);
+        memcpy(S.prop.err_p, ep, sizeof ep);
+        memcpy(S.prop.err_v, ev, sizeof ev);
+    }
+    S.prop.anchor_ts = S.prop.ts;
+    pthread_mutex_unlock(&S.imu_lock);
+}
+
+/* AR head pose for the renderer: the propagated 6-DoF state predicted to
+ * photon time. Fails (-> renderer fallback) until the VIO anchors it, or
+ * when anchors stop arriving (dead reckoning alone diverges in seconds). */
+static int head_pose_now(float R[9], float p[3]) {
+    pthread_mutex_lock(&S.imu_lock);
+    if (!S.prop.valid ||
+        S.prop.ts - S.prop.anchor_ts > 500000000ull) {
+        pthread_mutex_unlock(&S.imu_lock);
+        return -1;
+    }
+    float q[4], v[3], w[3];
+    memcpy(q, S.prop.q, sizeof q);
+    memcpy(p, S.prop.p, 3 * sizeof(float));
+    memcpy(v, S.prop.v, sizeof v);
+    memcpy(w, S.prop.w_ema, sizeof w);
+    pthread_mutex_unlock(&S.imu_lock);
+    const float tp = (float)XR_GLES_PREDICT_NS * 1e-9f;
+    float rv[3] = { w[0] * tp, w[1] * tp, w[2] * tp };
+    float dq[4], qp[4];
+    quat_from_rotvec(rv, dq);
+    quat_mul(q, dq, qp);
+    wxyz_to_rot(qp, R);
+    for (int i = 0; i < 3; i++) p[i] += v[i] * tp;
+    return 0;
+}
+
 /* ---- SLAM worker: rectify + track + depth at sensor rate --------------------- */
 
 static void *slam_worker(void *arg) {
@@ -630,9 +825,62 @@ static void *slam_worker(void *arg) {
              * feature u,v are per-camera pixels — the panes are 1:1) */
             static xr_slam_state st;               /* worker thread only */
             if (xr_slam_poll(&st)) {
+                /* keyframes store raw ODOM poses + landmarks — the pose
+                 * graph's measurements. Offer BEFORE the correction. */
+                xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
+                             st.lm_id, st.lm_xyz, st.lm_uv, st.n_landmarks);
+
+                /* session correction from the pose graph (identity until
+                 * the first VERIFIED loop closure), applied in place: the
+                 * displayed pose, the cloud, the AR view all live in the
+                 * session frame; Basalt itself never sees it */
+                static float Dq[4] = { 1, 0, 0, 0 }, Dp[3]; /* last applied */
+                static int corr_gen;                        /* worker only */
+                float cq[4], cp[3], CR[9], t3[3];
+                int gen = xr_map_get_correction(cq, cp);
+                wxyz_to_rot(cq, CR);
+                int corr_changed = gen != corr_gen;
+                float qs[4];
+                quat_mul(cq, st.q, qs);
+                memcpy(st.q, qs, sizeof qs);
+                m3v(CR, st.p, t3);
+                for (int i = 0; i < 3; i++) st.p[i] = t3[i] + cp[i];
+                m3v(CR, st.v, t3);
+                memcpy(st.v, t3, sizeof t3);
+                for (int i = 0; i < st.n_landmarks; i++) {
+                    m3v(CR, st.lm_xyz[i], t3);
+                    st.lm_xyz[i][0] = t3[0] + cp[0];
+                    st.lm_xyz[i][1] = t3[1] + cp[1];
+                    st.lm_xyz[i][2] = t3[2] + cp[2];
+                }
+
                 float rays[XR_SLAM_MAX_FEATURES * 3];
                 int nr = st.n_features;
                 pthread_mutex_lock(&S.lock);
+                if (corr_changed) {
+                    /* re-express the accumulated cloud in the corrected
+                     * frame: x' = ΔD·x with ΔD = D_new ∘ D_old⁻¹ */
+                    corr_gen = gen;
+                    float oR[9], DR2[9], dp2[3];
+                    wxyz_to_rot(Dq, oR);
+                    for (int r = 0; r < 3; r++)
+                        for (int c = 0; c < 3; c++)
+                            DR2[r * 3 + c] = CR[r * 3] * oR[c * 3] +
+                                             CR[r * 3 + 1] * oR[c * 3 + 1] +
+                                             CR[r * 3 + 2] * oR[c * 3 + 2];
+                    m3v(DR2, Dp, t3);
+                    for (int i = 0; i < 3; i++) dp2[i] = cp[i] - t3[i];
+                    for (int i = 0; i < 4096; i++) {
+                        if (!MAP_PT[i].stamp) continue;
+                        float x[3] = { MAP_PT[i].x, MAP_PT[i].y, MAP_PT[i].z };
+                        m3v(DR2, x, t3);
+                        MAP_PT[i].x = t3[0] + dp2[0];
+                        MAP_PT[i].y = t3[1] + dp2[1];
+                        MAP_PT[i].z = t3[2] + dp2[2];
+                    }
+                    memcpy(Dq, cq, sizeof Dq);
+                    memcpy(Dp, cp, sizeof Dp);
+                }
                 S.vio = st;
                 S.vio_fresh = 1;
                 S.pts_src = 1;
@@ -707,11 +955,8 @@ static void *slam_worker(void *arg) {
                 wxyz_to_rot(st.q, Rw);
                 xr_gles_set_map(map_snap, mn, Rw, st.p, st.v, st.ts);
 
-                /* session-map layer: motion-gated keyframes on the same
-                 * conditioned feed Basalt sees; heavy work (XFeat/ORB +
-                 * matching) runs on the dedicated map thread */
-                xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
-                             st.lm_id, st.lm_xyz, st.lm_uv, st.n_landmarks);
+                /* anchor the 1 kHz head-pose propagator (session frame) */
+                prop_correct(st.q, st.p, st.v, st.ts);
 
                 /* new loop/reloc event -> flash the matched keyframe's
                  * stored landmarks magenta in the AR view */
@@ -1098,6 +1343,11 @@ static void *imu_worker(void *arg) {
 
         pthread_mutex_lock(&S.imu_lock);
         S.imu_latest = s;
+        if (S.prop.valid) {
+            float pdt = (float)(s.ts_ns - S.prop.ts) * 1e-9f;
+            if (pdt > 0 && pdt < 0.05f) prop_step(&s, pdt);
+            S.prop.ts = s.ts_ns;
+        }
         if (has_q) {
             memcpy(S.imu_q, S.ahrs.q, sizeof S.imu_q);
             uint32_t qi = S.qhist_n % 256;
@@ -1150,6 +1400,7 @@ static void imu_start(void) {
     S.imu_count = 0; S.imu_t0 = 0; S.imu_rate = 0;
     S.ring_head = S.ring_tail = 0;
     S.qhist_n = 0;
+    memset(&S.prop, 0, sizeof S.prop);
     imu_enable();
     atomic_store(&S.imu_running, 1);
     pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
@@ -1233,6 +1484,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
     imu_start();   /* best effort — camera works without it */
     xr_gles_set_pose_fn(pose_delta);   /* timewarp pose source */
     xr_gles_set_ar_pose_fn(pose_delta_ar); /* deadband-free + predicted */
+    xr_gles_set_head_fn(head_pose_now);    /* 1 kHz propagated 6-DoF */
     xr_gles_set_time_fn(imu_now);      /* AR map position extrapolation */
     slam_start();
     return 0;
@@ -1334,6 +1586,9 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls
     (void)env; (void)cls;
     xr_slam_reset();
     xr_map_reset();
+    pthread_mutex_lock(&S.imu_lock);
+    memset(&S.prop, 0, sizeof S.prop);   /* re-anchors on the next pose */
+    pthread_mutex_unlock(&S.imu_lock);
     pthread_mutex_lock(&S.lock);
     xr_track_reset(&S.track);      /* worker touches it only between locks */
     S.pts_n = 0;

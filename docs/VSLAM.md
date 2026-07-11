@@ -220,17 +220,24 @@ to our visual-inertial stack — three frames, three owners:
 1. **Odometry — Basalt, untouched.** Drifting `odom` frame at 30 Hz.
    Basalt cannot consume pose corrections and doesn't need to.
 2. **Session map — on-device (`xr_map.c`).** Motion-gated keyframes
-   (≥ 0.3 m / 15°) holding the odom pose, ~200 compact ORB-style
-   descriptors (FAST-9 + intensity-centroid orientation + rotated
-   256-bit BRIEF from a fixed seeded pattern — self-consistent, no
-   OpenCV), and the landmark geometry (ids, world xyz, pixels) for
-   geometric verification. **Bounded**: ≤ 200 keyframes AND a history
-   timeout (10 min) — the "keep it light" requirement. Loop/reloc
-   candidates come from brute-force Hamming matching (fine at session
-   scale); status: **candidate detection live (logcat "LOOP CANDIDATE")**,
-   next: P3P/RANSAC verification against the stored landmark xyz and a
-   `T_session←odom` correction (map→odom pattern) applied to displayed
-   pose/cloud — a pose-graph-lite instead of touching the VIO.
+   (≥ 0.3 m / 15°) holding the immutable odom pose, a pose-graph
+   **corrected pose**, ~200 compact ORB-style descriptors (FAST-9 +
+   intensity-centroid orientation + rotated 256-bit BRIEF from a fixed
+   seeded pattern — self-consistent, no OpenCV) **anchored at Basalt's
+   landmark pixels** so a descriptor match is a 3D-3D landmark
+   correspondence by construction, plus the landmark geometry.
+   **Bounded**: ≤ 200 keyframes, rolling least-recently-useful eviction
+   (spatial recency keeps the current space resident). The full loop
+   pipeline is live: brute-force descriptor candidates → **geometric
+   verification** (RANSAC over landmark-pair triads + Horn quaternion
+   refit, ≥ 8 inliers within 12 cm, sanity caps 2.5 m / 25°) → a
+   **per-keyframe pose graph**: the closure error is distributed over
+   the keyframe chain between the two nodes weighted by odom path length
+   (drift accrues with distance), and the live `T_session←odom`
+   correction (map→odom pattern) composes onto the displayed pose, the
+   accumulated cloud (retransformed on each closure), and everything
+   exported — Basalt never sees it. In localization-only mode a verified
+   match relocalizes the live pose against the frozen map the same way.
 3. **Global map — fog side.** Long-term map building from the uploaded
    keyframes/landmarks (the WebSocket `keyframe`/`landmarks` payloads are
    exactly the keyframe struct). The **session map is matched against the

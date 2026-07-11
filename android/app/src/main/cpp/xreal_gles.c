@@ -70,6 +70,7 @@ static struct {
     uint64_t map_ts;
     uint64_t (*time_fn)(void);                      /* IMU-clock now */
     int (*pose_ar_fn)(uint64_t, float[9]);          /* deadband-free+predicted */
+    int (*head_fn)(float[9], float[3]);             /* 1 kHz propagated pose */
     int loop_n;                                     /* loop/reloc flash */
     uint64_t loop_ts;                               /* event time, IMU clock */
 
@@ -492,23 +493,22 @@ static void render_frame(int mode, int fresh, const float *dR,
             static float ndc[XR_GLES_MAX_MAP * 3];   /* render thread only */
             int n = 0;
             if (eye_mode == XR_EYE_AR && G.show_points && G.map_count > 0) {
-                /* dR for the map's reference time re-orients to now. The
-                 * AR pose fn is deadband-free and gyro-predicted to photon
-                 * time — see-through AR shows every millisecond of motion-
-                 * to-photon lag as the cloud trailing the head */
-                float dRm[9];
-                const float *pm = NULL;
-                int (*pfn)(uint64_t, float[9]) =
-                    G.pose_ar_fn ? G.pose_ar_fn : G.pose_fn;
-                if (G.timewarp && pfn && G.map_ts && pfn(G.map_ts, dRm) == 0)
-                    pm = dRm;
-                /* head position extrapolated by the VIO velocity to the
-                 * same predicted photon time (capped: stale poses stay put) */
-                float ph[3] = { G.map_p[0], G.map_p[1], G.map_p[2] };
-                uint64_t tn = 0;
-                if (G.time_fn && G.map_ts) {
-                    tn = G.time_fn();
-                    if (tn > G.map_ts) {
+                uint64_t tn = G.time_fn ? G.time_fn() : 0;
+                /* head pose: the 1 kHz propagator when available — fresh
+                 * 6-DoF, already predicted to photon time, no feed
+                 * timestamps involved. Fallback: warp the last VIO pose
+                 * by the AHRS delta + velocity extrapolation. */
+                float Rh[9], ph[3], dRm[9];
+                const float *R = Rh, *pm = NULL;
+                if (!(G.head_fn && G.head_fn(Rh, ph) == 0)) {
+                    R = G.map_R;
+                    int (*pfn)(uint64_t, float[9]) =
+                        G.pose_ar_fn ? G.pose_ar_fn : G.pose_fn;
+                    if (G.timewarp && pfn && G.map_ts &&
+                        pfn(G.map_ts, dRm) == 0)
+                        pm = dRm;
+                    ph[0] = G.map_p[0]; ph[1] = G.map_p[1]; ph[2] = G.map_p[2];
+                    if (tn && G.map_ts && tn > G.map_ts) {
                         float dt = (float)(tn - G.map_ts + XR_GLES_PREDICT_NS)
                                    * 1e-9f;
                         if (dt < 0.2f) {
@@ -520,7 +520,7 @@ static void render_frame(int mode, int fresh, const float *dR,
                 }
                 for (int i = 0; i < G.map_count; i++) {
                     float u, v, dist;
-                    if (map_pt_project(e, &G.map_xyz[i * 3], ph, G.map_R,
+                    if (map_pt_project(e, &G.map_xyz[i * 3], ph, R,
                                        pm, &u, &v, &dist))
                         continue;
                     float size = 9.0f / dist;
@@ -544,7 +544,7 @@ static void render_frame(int mode, int fresh, const float *dR,
                         for (int i = 0; i < G.loop_n; i++) {
                             float u, v, dist;
                             if (map_pt_project(e, &LOOP_XYZ[i * 3], ph,
-                                               G.map_R, pm, &u, &v, &dist))
+                                               R, pm, &u, &v, &dist))
                                 continue;
                             float size = 13.0f / dist;
                             if (size < 5.0f) size = 5.0f;
@@ -823,6 +823,12 @@ void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
 void xr_gles_set_ar_pose_fn(int (*fn)(uint64_t, float[9])) {
     pthread_mutex_lock(&G.lock);
     G.pose_ar_fn = fn;
+    pthread_mutex_unlock(&G.lock);
+}
+
+void xr_gles_set_head_fn(int (*fn)(float[9], float[3])) {
+    pthread_mutex_lock(&G.lock);
+    G.head_fn = fn;
     pthread_mutex_unlock(&G.lock);
 }
 

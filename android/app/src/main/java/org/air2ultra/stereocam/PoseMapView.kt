@@ -81,6 +81,7 @@ class PoseMapView @JvmOverloads constructor(
         }
         loopCount = loops
         haveState = true
+        if (follow) pos.copyInto(pivot)
         val last = trail.lastOrNull()
         val moved = last == null || run {
             val dx = pos[0] - last[0]; val dy = pos[1] - last[1]; val dz = pos[2] - last[2]
@@ -95,6 +96,7 @@ class PoseMapView @JvmOverloads constructor(
 
     fun reset() {
         trail.clear()
+        pivot.fill(0f)
         invalidate()
     }
 
@@ -107,6 +109,13 @@ class PoseMapView @JvmOverloads constructor(
     private var yawS = 0f; private var yawC = 1f
     private var elS = 0f; private var elC = 1f
 
+    // follow mode: the orbit/zoom pivot passively tracks the user's
+    // position (translation only — orbit, pan and zoom still work), so a
+    // long walk never leaves the frustum stranded far from the origin
+    private var follow = true
+    private val pivot = FloatArray(3)
+    private val btnRect = android.graphics.RectF()
+
     /** World (z up) -> screen px, orthographic. The camera sits ABOVE and
      * behind, pitched down by viewElev — same viewing hemisphere as the
      * python scope. (The first version had the y-term sign flipped, which
@@ -114,11 +123,14 @@ class PoseMapView @JvmOverloads constructor(
      * plane: with no depth cues the triad then reads left-handed — "right
      * points left".) Screen y grows downward, hence the leading minus. */
     private fun project(wx: Float, wy: Float, wz: Float, out: FloatArray) {
-        val x1 = wx * yawC - wy * yawS
-        val y1 = wx * yawS + wy * yawC
+        val dx = wx - pivot[0]
+        val dy = wy - pivot[1]
+        val dz = wz - pivot[2]
+        val x1 = dx * yawC - dy * yawS
+        val y1 = dx * yawS + dy * yawC
         val s = height / 9f * viewZoom             // ~9 m of world at zoom 1
         out[0] = width / 2f + panX + x1 * s
-        out[1] = height * 0.55f + panY - (y1 * elS + wz * elC) * s
+        out[1] = height * 0.55f + panY - (y1 * elS + dz * elC) * s
     }
 
     // touch state
@@ -174,7 +186,16 @@ class PoseMapView @JvmOverloads constructor(
             MotionEvent.ACTION_UP -> {
                 if (!twoFinger && event.eventTime - event.downTime < 200 &&
                     hypot(event.x - lastX, event.y - lastY) < 8f) {
-                    performClick()
+                    if (btnRect.contains(event.x, event.y)) {
+                        follow = !follow
+                        if (follow) {
+                            p.copyInto(pivot)
+                            panX = 0f; panY = 0f
+                        }
+                        invalidate()
+                    } else {
+                        performClick()
+                    }
                 }
                 twoFinger = false
             }
@@ -221,6 +242,8 @@ class PoseMapView @JvmOverloads constructor(
     private val dimTextPaint = Paint(textPaint).apply {
         color = Color.rgb(110, 110, 110)
     }
+    private val btnPaint = Paint().apply { isAntiAlias = true }
+    private val btnTextPaint = Paint(textPaint).apply { textSize = 22f }
 
     private val pa = FloatArray(2)
     private val pb = FloatArray(2)
@@ -234,11 +257,14 @@ class PoseMapView @JvmOverloads constructor(
         elC = cos(Math.toRadians(viewElev)).toFloat()
         canvas.drawColor(Color.rgb(8, 10, 8))
 
-        // ground grid, 1 m cells on the world horizontal plane
+        // ground grid, 1 m cells on the world horizontal plane, centered
+        // near the pivot (snapped to whole meters so lines never swim)
+        val gcx = kotlin.math.floor(pivot[0])
+        val gcy = kotlin.math.floor(pivot[1])
         for (i in -4..4) {
-            project(i.toFloat(), -4f, 0f, pa); project(i.toFloat(), 4f, 0f, pb)
+            project(gcx + i, gcy - 4f, 0f, pa); project(gcx + i, gcy + 4f, 0f, pb)
             canvas.drawLine(pa[0], pa[1], pb[0], pb[1], gridPaint)
-            project(-4f, i.toFloat(), 0f, pa); project(4f, i.toFloat(), 0f, pb)
+            project(gcx - 4f, gcy + i, 0f, pa); project(gcx + 4f, gcy + i, 0f, pb)
             canvas.drawLine(pa[0], pa[1], pb[0], pb[1], gridPaint)
         }
         // world axes at the origin (x red, y green, z blue), 0.5 m
@@ -341,6 +367,15 @@ class PoseMapView @JvmOverloads constructor(
         else
             "pose: AHRS — Basalt not active"
         canvas.drawText(backend, 12f, 58f, dimTextPaint)
+
+        // follow toggle, top right
+        btnRect.set(width - 128f, 8f, width - 8f, 48f)
+        btnPaint.color = if (follow) Color.rgb(22, 66, 38) else Color.rgb(30, 34, 30)
+        canvas.drawRoundRect(btnRect, 9f, 9f, btnPaint)
+        btnTextPaint.color =
+            if (follow) Color.rgb(0, 255, 102) else Color.rgb(150, 150, 150)
+        canvas.drawText(if (follow) "Follow✓" else "Follow✗",
+                        btnRect.left + 12f, btnRect.centerY() + 8f, btnTextPaint)
         if (haveImu) {
             canvas.drawText(
                 "a=(%+.2f %+.2f %+.2f)g".format(imuA[0], imuA[1], imuA[2]),

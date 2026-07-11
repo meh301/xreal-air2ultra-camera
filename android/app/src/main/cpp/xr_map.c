@@ -55,11 +55,14 @@ typedef struct {
     uint64_t ts;
     uint64_t last_used;            /* rolling eviction: refreshed by loop
                                       matches and spatial proximity */
-    float q[4], p[3];              /* odom pose at capture */
+    float q[4], p[3];              /* ODOM pose at capture (immutable — the
+                                      graph's odometry measurements) */
+    float qc[4], pc[3];            /* pose-graph CORRECTED pose (session) */
     int desc_type;
     int n_kp;
     float kp_uv[XR_MAP_KP_PER_KF][2];
     int8_t desc[XR_MAP_KP_PER_KF][64];   /* ORB uses the first 32 bytes */
+    int lm_of_kp[XR_MAP_KP_PER_KF];      /* kp -> landmark index, or -1 */
     int n_lm;
     int32_t lm_id[XR_MAP_KP_PER_KF];
     float lm_xyz[XR_MAP_KP_PER_KF][3];
@@ -93,6 +96,11 @@ static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
 
+/* Live session correction D = C_newest ∘ O_newest⁻¹ (map -> odom pattern):
+ * composes onto every odom-frame quantity leaving the SLAM worker. Updated
+ * by verified loop closures; identity until the first one. */
+static struct { float q[4]; float p[3]; int gen; } CORR = { .q = {1, 0, 0, 0} };
+
 void xr_map_set_model(const char *onnx_path) {
     if (!onnx_path) return;
     strncpy(MODEL_PATH, onnx_path, sizeof MODEL_PATH - 1);
@@ -110,8 +118,121 @@ void xr_map_reset(void) {
     LAST_POSE.have = 0;
     MBOX.full = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
+    CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
+    CORR.p[0] = CORR.p[1] = CORR.p[2] = 0;
+    CORR.gen++;                    /* consumers re-sync their frame */
     atomic_store(&KF_COUNT_PUB, 0);
     pthread_mutex_unlock(&MAP_LOCK);
+}
+
+int xr_map_get_correction(float q[4], float p[3]) {
+    pthread_mutex_lock(&MAP_LOCK);
+    memcpy(q, CORR.q, sizeof CORR.q);
+    memcpy(p, CORR.p, sizeof CORR.p);
+    int g = CORR.gen;
+    pthread_mutex_unlock(&MAP_LOCK);
+    return g;
+}
+
+/* ---- small quaternion / rotation kit (Hamilton wxyz, R row-major) ------------- */
+
+static void qmul(const float a[4], const float b[4], float o[4]) {
+    o[0] = a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3];
+    o[1] = a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2];
+    o[2] = a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1];
+    o[3] = a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0];
+}
+
+static void qconj(const float a[4], float o[4]) {
+    o[0] = a[0]; o[1] = -a[1]; o[2] = -a[2]; o[3] = -a[3];
+}
+
+static void q2R(const float q[4], float R[9]) {
+    float w = q[0], x = q[1], y = q[2], z = q[3];
+    R[0] = 1 - 2 * (y * y + z * z); R[1] = 2 * (x * y - w * z);
+    R[2] = 2 * (x * z + w * y);
+    R[3] = 2 * (x * y + w * z);     R[4] = 1 - 2 * (x * x + z * z);
+    R[5] = 2 * (y * z - w * x);
+    R[6] = 2 * (x * z - w * y);     R[7] = 2 * (y * z + w * x);
+    R[8] = 1 - 2 * (x * x + y * y);
+}
+
+static void R2q(const float R[9], float q[4]) {
+    float tr = R[0] + R[4] + R[8];
+    if (tr > 0) {
+        float s = sqrtf(tr + 1.0f) * 2;
+        q[0] = 0.25f * s;
+        q[1] = (R[7] - R[5]) / s;
+        q[2] = (R[2] - R[6]) / s;
+        q[3] = (R[3] - R[1]) / s;
+    } else if (R[0] > R[4] && R[0] > R[8]) {
+        float s = sqrtf(1.0f + R[0] - R[4] - R[8]) * 2;
+        q[0] = (R[7] - R[5]) / s;
+        q[1] = 0.25f * s;
+        q[2] = (R[1] + R[3]) / s;
+        q[3] = (R[2] + R[6]) / s;
+    } else if (R[4] > R[8]) {
+        float s = sqrtf(1.0f + R[4] - R[0] - R[8]) * 2;
+        q[0] = (R[2] - R[6]) / s;
+        q[1] = (R[1] + R[3]) / s;
+        q[2] = 0.25f * s;
+        q[3] = (R[5] + R[7]) / s;
+    } else {
+        float s = sqrtf(1.0f + R[8] - R[0] - R[4]) * 2;
+        q[0] = (R[3] - R[1]) / s;
+        q[1] = (R[2] + R[6]) / s;
+        q[2] = (R[5] + R[7]) / s;
+        q[3] = 0.25f * s;
+    }
+    float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    for (int i = 0; i < 4; i++) q[i] /= n;
+}
+
+static void qrotv(const float q[4], const float v[3], float o[3]) {
+    float R[9];
+    q2R(q, R);
+    o[0] = R[0] * v[0] + R[1] * v[1] + R[2] * v[2];
+    o[1] = R[3] * v[0] + R[4] * v[1] + R[5] * v[2];
+    o[2] = R[6] * v[0] + R[7] * v[1] + R[8] * v[2];
+}
+
+/* rotation vector (axis*angle) <-> quaternion */
+static void rv_from_q(const float q[4], float rv[3]) {
+    float w = q[0] >= 0 ? q[0] : -q[0];
+    float s = q[0] >= 0 ? 1.0f : -1.0f;
+    float vn = sqrtf(q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (vn < 1e-9f) { rv[0] = rv[1] = rv[2] = 0; return; }
+    float ang = 2.0f * atan2f(vn, w);
+    float k = s * ang / vn;
+    rv[0] = q[1] * k; rv[1] = q[2] * k; rv[2] = q[3] * k;
+}
+
+static void q_from_rv(const float rv[3], float q[4]) {
+    float ang = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]);
+    if (ang < 1e-9f) { q[0] = 1; q[1] = q[2] = q[3] = 0; return; }
+    float s = sinf(ang * 0.5f) / ang;
+    q[0] = cosf(ang * 0.5f);
+    q[1] = rv[0] * s; q[2] = rv[1] * s; q[3] = rv[2] * s;
+}
+
+/* pose composition o = a ∘ b on (q, p) pairs: R_o = R_a R_b,
+ * p_o = R_a p_b + p_a */
+static void pose_compose(const float qa[4], const float pa[3],
+                         const float qb[4], const float pb[3],
+                         float qo[4], float po[3]) {
+    float t[3];
+    qrotv(qa, pb, t);
+    qmul(qa, qb, qo);
+    po[0] = t[0] + pa[0]; po[1] = t[1] + pa[1]; po[2] = t[2] + pa[2];
+}
+
+/* o = a⁻¹ */
+static void pose_invert(const float qa[4], const float pa[3],
+                        float qo[4], float po[3]) {
+    float t[3];
+    qconj(qa, qo);
+    qrotv(qo, pa, t);
+    po[0] = -t[0]; po[1] = -t[1]; po[2] = -t[2];
 }
 
 int xr_map_loop_stats(int *count, float pos[3], int *matches) {
@@ -196,12 +317,54 @@ static int fast_score(const uint8_t *img, int x, int y) {
     return best;
 }
 
+/* rotated-BRIEF descriptor with centroid orientation, at (bx, by) */
+static void orb_describe(const uint8_t *img, int bx, int by, int8_t *desc) {
+    int m10 = 0, m01 = 0;
+    for (int dy = -7; dy <= 7; dy++)
+        for (int dx = -7; dx <= 7; dx++) {
+            int v = img[(by + dy) * XR_OW + bx + dx];
+            m10 += dx * v;
+            m01 += dy * v;
+        }
+    float ang = atan2f((float)m01, (float)m10);
+    float ca = cosf(ang), sa = sinf(ang);
+    uint64_t d[4] = { 0, 0, 0, 0 };
+    for (int b = 0; b < 256; b++) {
+        int ax = (int)lroundf(ca * PAT[b][0] - sa * PAT[b][1]);
+        int ay = (int)lroundf(sa * PAT[b][0] + ca * PAT[b][1]);
+        int bx2 = (int)lroundf(ca * PAT[b][2] - sa * PAT[b][3]);
+        int by2 = (int)lroundf(sa * PAT[b][2] + ca * PAT[b][3]);
+        if (img[(by + ay) * XR_OW + bx + ax] <
+            img[(by + by2) * XR_OW + bx + bx2])
+            d[b >> 6] |= 1ull << (b & 63);
+    }
+    memcpy(desc, d, sizeof d);
+}
+
 static void orb_extract(const uint8_t *img, xr_kf *kf) {
     pat_init();
     kf->n_kp = 0;
     kf->desc_type = DESC_ORB;
+    /* descriptors anchored AT the VIO landmarks first: a descriptor match
+     * then IS a 3D-3D landmark correspondence — what the loop verification
+     * and pose graph consume. Basalt picks corners, so the patches are
+     * descriptor-worthy by construction. */
+    for (int i = 0; i < kf->n_lm && kf->n_kp < XR_MAP_KP_PER_KF; i++) {
+        int x = (int)lroundf(kf->lm_uv[i][0]);
+        int y = (int)lroundf(kf->lm_uv[i][1]);
+        if (x < MARGIN || x >= XR_OW - MARGIN ||
+            y < MARGIN || y >= XR_OH - MARGIN)
+            continue;
+        int j = kf->n_kp++;
+        kf->kp_uv[j][0] = (float)x;
+        kf->kp_uv[j][1] = (float)y;
+        kf->lm_of_kp[j] = i;
+        orb_describe(img, x, y, kf->desc[j]);
+    }
+    /* then FAST-grid corners for place-recognition coverage (no 3D) */
     enum { GX = (XR_OW - 2 * MARGIN) / NMS_GRID,
            GY = (XR_OH - 2 * MARGIN) / NMS_GRID };
+    int n_anchored = kf->n_kp;
     for (int gy = 0; gy < GY && kf->n_kp < XR_MAP_KP_PER_KF; gy++)
         for (int gx = 0; gx < GX && kf->n_kp < XR_MAP_KP_PER_KF; gx++) {
             int bs = 0, bx = -1, by = -1;
@@ -213,29 +376,18 @@ static void orb_extract(const uint8_t *img, xr_kf *kf) {
                     if (s > bs) { bs = s; bx = x; by = y; }
                 }
             if (bs <= 0) continue;
-            int m10 = 0, m01 = 0;
-            for (int dy = -7; dy <= 7; dy++)
-                for (int dx = -7; dx <= 7; dx++) {
-                    int v = img[(by + dy) * XR_OW + bx + dx];
-                    m10 += dx * v;
-                    m01 += dy * v;
-                }
-            float ang = atan2f((float)m01, (float)m10);
-            float ca = cosf(ang), sa = sinf(ang);
+            int dup = 0;                   /* skip near a landmark anchor */
+            for (int k = 0; k < n_anchored; k++) {
+                float du = kf->kp_uv[k][0] - (float)bx;
+                float dv = kf->kp_uv[k][1] - (float)by;
+                if (du * du + dv * dv < 36.0f) { dup = 1; break; }
+            }
+            if (dup) continue;
             int i = kf->n_kp++;
             kf->kp_uv[i][0] = (float)bx;
             kf->kp_uv[i][1] = (float)by;
-            uint64_t d[4] = { 0, 0, 0, 0 };
-            for (int b = 0; b < 256; b++) {
-                int ax = (int)lroundf(ca * PAT[b][0] - sa * PAT[b][1]);
-                int ay = (int)lroundf(sa * PAT[b][0] + ca * PAT[b][1]);
-                int bx2 = (int)lroundf(ca * PAT[b][2] - sa * PAT[b][3]);
-                int by2 = (int)lroundf(sa * PAT[b][2] + ca * PAT[b][3]);
-                if (img[(by + ay) * XR_OW + bx + ax] <
-                    img[(by + by2) * XR_OW + bx + bx2])
-                    d[b >> 6] |= 1ull << (b & 63);
-            }
-            memcpy(kf->desc[i], d, sizeof d);
+            kf->lm_of_kp[i] = -1;
+            orb_describe(img, bx, by, kf->desc[i]);
         }
 }
 
@@ -262,31 +414,213 @@ static inline int dot64_i8(const int8_t *a, const int8_t *b) {
 #endif
 }
 
-static int match_count(const xr_kf *a, const xr_kf *b) {
+/* ratio-tested matching; when pairs != NULL, the kp index pairs of up to
+ * max_pairs matches are stored as well. Returns the total match count. */
+static int match_pairs(const xr_kf *a, const xr_kf *b,
+                       int (*pairs)[2], int max_pairs) {
     if (a->desc_type != b->desc_type) return 0;
     int n = 0;
     if (a->desc_type == DESC_XFEAT) {
         for (int i = 0; i < a->n_kp; i++) {
-            int best = -32768 * 64, second = best;
+            int best = -32768 * 64, second = best, jb = -1;
             for (int j = 0; j < b->n_kp; j++) {
                 int d = dot64_i8(a->desc[i], b->desc[j]);
-                if (d > best) { second = best; best = d; }
+                if (d > best) { second = best; best = d; jb = j; }
                 else if (d > second) second = d;
             }
-            if (best >= XF_MIN_DOT && best - XF_MARGIN >= second) n++;
+            if (best >= XF_MIN_DOT && best - XF_MARGIN >= second) {
+                if (pairs && n < max_pairs) {
+                    pairs[n][0] = i;
+                    pairs[n][1] = jb;
+                }
+                n++;
+            }
         }
     } else {
         for (int i = 0; i < a->n_kp; i++) {
-            int best = 999, second = 999;
+            int best = 999, second = 999, jb = -1;
             for (int j = 0; j < b->n_kp; j++) {
                 int d = hamming256(a->desc[i], b->desc[j]);
-                if (d < best) { second = best; best = d; }
+                if (d < best) { second = best; best = d; jb = j; }
                 else if (d < second) second = d;
             }
-            if (best <= ORB_MAX_DIST && best + ORB_MARGIN <= second) n++;
+            if (best <= ORB_MAX_DIST && best + ORB_MARGIN <= second) {
+                if (pairs && n < max_pairs) {
+                    pairs[n][0] = i;
+                    pairs[n][1] = jb;
+                }
+                n++;
+            }
         }
     }
     return n;
+}
+
+static int match_count(const xr_kf *a, const xr_kf *b) {
+    return match_pairs(a, b, NULL, 0);
+}
+
+/* ---- loop verification: rigid 3D-3D alignment ----------------------------------- */
+
+#define VER_MIN_3D 8               /* landmark pairs needed to try */
+#define VER_INLIER_M 0.12f
+#define VER_MAX_RANGE_M 8.0f       /* inverse-depth points are noisy far out */
+#define VER_ITERS 200
+#define VER_MAX_T_M 2.5f           /* wilder alignment = wrong place */
+#define VER_MAX_ANG_RAD 0.44f      /* ~25 deg */
+
+/* alignment A = (R, t) with pk ≈ R*pq + t: RANSAC over point triads, then
+ * a Horn (quaternion) refit on the inliers via power iteration. Returns
+ * the inlier count (0 = no acceptable model). */
+static int align_ransac(const float (*pq)[3], const float (*pk)[3], int n,
+                        float R_out[9], float t_out[3]) {
+    if (n < 3) return 0;
+    int best_in = 0;
+    float bR[9], bt[3];
+    uint32_t seed = 0x9E3779B9u ^ (uint32_t)n;
+    for (int it = 0; it < VER_ITERS; it++) {
+        seed = seed * 1664525u + 1013904223u;
+        int i0 = (int)(seed % (uint32_t)n);
+        seed = seed * 1664525u + 1013904223u;
+        int i1 = (int)(seed % (uint32_t)n);
+        seed = seed * 1664525u + 1013904223u;
+        int i2 = (int)(seed % (uint32_t)n);
+        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+        /* orthonormal triads over both triangles -> closed-form R */
+        float Bq[9], Bk[9];
+        const float (*P)[3];
+        float *B;
+        int deg = 0;
+        for (int s = 0; s < 2; s++) {
+            P = s ? pk : pq;
+            B = s ? Bk : Bq;
+            float e1[3] = { P[i1][0] - P[i0][0], P[i1][1] - P[i0][1],
+                            P[i1][2] - P[i0][2] };
+            float e2[3] = { P[i2][0] - P[i0][0], P[i2][1] - P[i0][1],
+                            P[i2][2] - P[i0][2] };
+            float l1 = sqrtf(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+            if (l1 < 0.05f) { deg = 1; break; }
+            e1[0] /= l1; e1[1] /= l1; e1[2] /= l1;
+            float nx = e1[1] * e2[2] - e1[2] * e2[1];
+            float ny = e1[2] * e2[0] - e1[0] * e2[2];
+            float nz = e1[0] * e2[1] - e1[1] * e2[0];
+            float ln = sqrtf(nx * nx + ny * ny + nz * nz);
+            if (ln < 0.02f) { deg = 1; break; }   /* collinear */
+            nx /= ln; ny /= ln; nz /= ln;
+            float u2x = ny * e1[2] - nz * e1[1];
+            float u2y = nz * e1[0] - nx * e1[2];
+            float u2z = nx * e1[1] - ny * e1[0];
+            B[0] = e1[0]; B[3] = e1[1]; B[6] = e1[2];   /* columns */
+            B[1] = u2x;   B[4] = u2y;   B[7] = u2z;
+            B[2] = nx;    B[5] = ny;    B[8] = nz;
+        }
+        if (deg) continue;
+        float R[9];                                   /* R = Bk * Bq^T */
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                R[r * 3 + c] = Bk[r * 3] * Bq[c * 3] +
+                               Bk[r * 3 + 1] * Bq[c * 3 + 1] +
+                               Bk[r * 3 + 2] * Bq[c * 3 + 2];
+        float t[3];
+        for (int c = 0; c < 3; c++)
+            t[c] = pk[i0][c] - (R[c * 3] * pq[i0][0] +
+                                R[c * 3 + 1] * pq[i0][1] +
+                                R[c * 3 + 2] * pq[i0][2]);
+        int in = 0;
+        for (int m = 0; m < n; m++) {
+            float e = 0;
+            for (int c = 0; c < 3; c++) {
+                float d = pk[m][c] - (R[c * 3] * pq[m][0] +
+                                      R[c * 3 + 1] * pq[m][1] +
+                                      R[c * 3 + 2] * pq[m][2] + t[c]);
+                e += d * d;
+            }
+            if (e < VER_INLIER_M * VER_INLIER_M) in++;
+        }
+        if (in > best_in) {
+            best_in = in;
+            memcpy(bR, R, sizeof bR);
+            memcpy(bt, t, sizeof bt);
+        }
+    }
+    if (best_in < 3) return 0;
+
+    /* Horn refit on the inliers of the best model */
+    float cq[3] = { 0, 0, 0 }, ck[3] = { 0, 0, 0 };
+    int in = 0;
+    static int keep[XR_MAP_KP_PER_KF];               /* map thread only */
+    for (int m = 0; m < n; m++) {
+        float e = 0;
+        for (int c = 0; c < 3; c++) {
+            float d = pk[m][c] - (bR[c * 3] * pq[m][0] +
+                                  bR[c * 3 + 1] * pq[m][1] +
+                                  bR[c * 3 + 2] * pq[m][2] + bt[c]);
+            e += d * d;
+        }
+        if (e < VER_INLIER_M * VER_INLIER_M) {
+            keep[in++] = m;
+            for (int c = 0; c < 3; c++) {
+                cq[c] += pq[m][c];
+                ck[c] += pk[m][c];
+            }
+        }
+    }
+    for (int c = 0; c < 3; c++) { cq[c] /= (float)in; ck[c] /= (float)in; }
+    float S[9] = { 0 };                               /* Σ q_c k_c^T */
+    for (int m = 0; m < in; m++) {
+        float aq[3], ak[3];
+        for (int c = 0; c < 3; c++) {
+            aq[c] = pq[keep[m]][c] - cq[c];
+            ak[c] = pk[keep[m]][c] - ck[c];
+        }
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                S[r * 3 + c] += aq[r] * ak[c];
+    }
+    float N[16] = {
+        S[0] + S[4] + S[8], S[5] - S[7],        S[6] - S[2],        S[1] - S[3],
+        S[5] - S[7],        S[0] - S[4] - S[8], S[1] + S[3],        S[2] + S[6],
+        S[6] - S[2],        S[1] + S[3],       -S[0] + S[4] - S[8], S[5] + S[7],
+        S[1] - S[3],        S[2] + S[6],        S[5] + S[7],       -S[0] - S[4] + S[8]
+    };
+    float fro = 0;
+    for (int i = 0; i < 16; i++) fro += N[i] * N[i];
+    float shift = sqrtf(fro) + 1e-6f;                 /* all eigenvalues > 0 */
+    N[0] += shift; N[5] += shift; N[10] += shift; N[15] += shift;
+    /* skewed start: a u-turn alignment (w = 0) is orthogonal to (1,0,0,0)
+     * and pure power iteration would never leave that subspace */
+    float v[4] = { 1, 0.02f, 0.017f, 0.013f };
+    for (int it = 0; it < 80; it++) {
+        float u[4];
+        for (int r = 0; r < 4; r++)
+            u[r] = N[r * 4] * v[0] + N[r * 4 + 1] * v[1] +
+                   N[r * 4 + 2] * v[2] + N[r * 4 + 3] * v[3];
+        float l = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2] + u[3] * u[3]);
+        if (l < 1e-12f) break;
+        for (int r = 0; r < 4; r++) v[r] = u[r] / l;
+    }
+    q2R(v, R_out);                                    /* q rotates q -> k */
+    for (int c = 0; c < 3; c++)
+        t_out[c] = ck[c] - (R_out[c * 3] * cq[0] + R_out[c * 3 + 1] * cq[1] +
+                            R_out[c * 3 + 2] * cq[2]);
+    /* recount with the refined model */
+    int in2 = 0;
+    for (int m = 0; m < n; m++) {
+        float e = 0;
+        for (int c = 0; c < 3; c++) {
+            float d = pk[m][c] - (R_out[c * 3] * pq[m][0] +
+                                  R_out[c * 3 + 1] * pq[m][1] +
+                                  R_out[c * 3 + 2] * pq[m][2] + t_out[c]);
+            e += d * d;
+        }
+        if (e < VER_INLIER_M * VER_INLIER_M) in2++;
+    }
+    if (in2 < in) {                                   /* refit made it worse */
+        memcpy(R_out, bR, sizeof bR);
+        memcpy(t_out, bt, sizeof bt);
+        return in;
+    }
+    return in2;
 }
 
 /* ---- map thread ----------------------------------------------------------------- */
@@ -315,6 +649,18 @@ static void process_keyframe(void) {
         if (n >= 0) {
             work.n_kp = n;
             work.desc_type = DESC_XFEAT;
+            /* associate XFeat keypoints to landmarks by proximity (the
+             * ORB path anchors descriptors AT the landmarks instead) */
+            for (int j = 0; j < work.n_kp; j++) {
+                work.lm_of_kp[j] = -1;
+                float bd = 16.0f;              /* 4 px */
+                for (int i = 0; i < work.n_lm; i++) {
+                    float du = work.lm_uv[i][0] - work.kp_uv[j][0];
+                    float dv = work.lm_uv[i][1] - work.kp_uv[j][1];
+                    float d = du * du + dv * dv;
+                    if (d < bd) { bd = d; work.lm_of_kp[j] = i; }
+                }
+            }
         } else {
             orb_extract(img, &work);
         }
@@ -346,6 +692,7 @@ static void process_keyframe(void) {
         int m = match_count(&work, &KF[i]);
         if (m > best_m) { best_m = m; best_i = i; }
     }
+    int j_corrected = 0;      /* verified closure filled work.qc/pc */
     if (best_i >= 0 && best_m >= CAND_MIN_MATCHES) {
         KF[best_i].last_used = work.ts;    /* matched = useful */
         LAST_CAND.a = work.ts;
@@ -353,15 +700,148 @@ static void process_keyframe(void) {
         LAST_CAND.matches = best_m;
         LAST_CAND.have = 1;
         LOOP_STATS.count++;
-        memcpy(LOOP_STATS.pos, KF[best_i].p, sizeof LOOP_STATS.pos);
         LOOP_STATS.matches = best_m;
-        LOOP_STATS.n_lm = KF[best_i].n_lm;
-        memcpy(LOOP_STATS.lm, KF[best_i].lm_xyz,
-               sizeof(float) * 3u * (size_t)KF[best_i].n_lm);
-        LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs)",
-             mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
-             best_m, work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
-             (double)(work.ts - KF[best_i].ts) / 1e9);
+
+        /* ---- geometric verification: rigid 3D-3D alignment over the
+         * matched landmark pairs. A verified alignment A (query-odom ->
+         * kf-capture-odom coords) becomes a pose-graph constraint. */
+        int verified = 0, n3 = 0, nin = 0;
+        float qa[4], ta[3];
+        {
+            static int prs[XR_MAP_KP_PER_KF][2];          /* map thread */
+            static float Pq[XR_MAP_KP_PER_KF][3];
+            static float Pk[XR_MAP_KP_PER_KF][3];
+            int np = match_pairs(&work, &KF[best_i], prs, XR_MAP_KP_PER_KF);
+            for (int m = 0; m < np; m++) {
+                int lq = work.lm_of_kp[prs[m][0]];
+                int lk = KF[best_i].lm_of_kp[prs[m][1]];
+                if (lq < 0 || lk < 0) continue;
+                float dq2 = 0, dk2 = 0;
+                for (int c = 0; c < 3; c++) {
+                    float a = work.lm_xyz[lq][c] - work.p[c];
+                    float b = KF[best_i].lm_xyz[lk][c] - KF[best_i].p[c];
+                    dq2 += a * a;
+                    dk2 += b * b;
+                }
+                if (dq2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M ||
+                    dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M)
+                    continue;
+                memcpy(Pq[n3], work.lm_xyz[lq], sizeof Pq[0]);
+                memcpy(Pk[n3], KF[best_i].lm_xyz[lk], sizeof Pk[0]);
+                n3++;
+            }
+            if (n3 >= VER_MIN_3D) {
+                float Ra[9];
+                nin = align_ransac(Pq, Pk, n3, Ra, ta);
+                if (nin >= VER_MIN_3D && nin * 100 >= 35 * n3) {
+                    float rv[3];
+                    R2q(Ra, qa);
+                    rv_from_q(qa, rv);
+                    float ang = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] +
+                                      rv[2] * rv[2]);
+                    float tn2 = ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2];
+                    if (ang < VER_MAX_ANG_RAD &&
+                        tn2 < VER_MAX_T_M * VER_MAX_T_M)
+                        verified = 1;
+                }
+            }
+        }
+
+        if (verified) {
+            /* D_i = C_i ∘ O_i⁻¹ (node i's point-level correction);
+             * session pose of the query: C_j = D_i ∘ A ∘ O_j */
+            float qoi[4], poi[3], qdi[4], pdi[3];
+            pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
+            pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
+            float qda[4], pda[3];                     /* D_i ∘ A */
+            pose_compose(qdi, pdi, qa, ta, qda, pda);
+            float qcj[4], pcj[3];                     /* C_j */
+            pose_compose(qda, pda, work.q, work.p, qcj, pcj);
+
+            if (mapping && KF_N > best_i + 1) {
+                /* distribute the change over the chain (i .. newest] by
+                 * cumulative odom path length — drift accrues with
+                 * distance. Node i itself is the trusted anchor. */
+                float qce[4], pce[3];                 /* current estimate */
+                pose_compose(CORR.q, CORR.p, work.q, work.p, qce, pce);
+                float qinv[4], pinv[3], qe[4], pe[3]; /* E = C_j ∘ est⁻¹ */
+                pose_invert(qce, pce, qinv, pinv);
+                pose_compose(qcj, pcj, qinv, pinv, qe, pe);
+                float rve[3];
+                rv_from_q(qe, rve);
+                float total = 0;
+                for (int k = best_i; k < KF_N - 1; k++) {
+                    float d = 0;
+                    for (int c = 0; c < 3; c++) {
+                        float x = KF[k + 1].p[c] - KF[k].p[c];
+                        d += x * x;
+                    }
+                    total += sqrtf(d);
+                }
+                float dlast = 0;
+                for (int c = 0; c < 3; c++) {
+                    float x = work.p[c] - KF[KF_N - 1].p[c];
+                    dlast += x * x;
+                }
+                total += sqrtf(dlast);
+                float cum = 0;
+                for (int k = best_i + 1; k < KF_N; k++) {
+                    float d = 0;
+                    for (int c = 0; c < 3; c++) {
+                        float x = KF[k].p[c] - KF[k - 1].p[c];
+                        d += x * x;
+                    }
+                    cum += sqrtf(d);
+                    float f = total > 0.01f
+                                  ? cum / total
+                                  : (float)(k - best_i) / (float)(KF_N - best_i);
+                    float rvf[3] = { rve[0] * f, rve[1] * f, rve[2] * f };
+                    float qef[4], pef[3] = { pe[0] * f, pe[1] * f, pe[2] * f };
+                    q_from_rv(rvf, qef);
+                    float qn[4], pn[3];               /* E^f ∘ C_k */
+                    pose_compose(qef, pef, KF[k].qc, KF[k].pc, qn, pn);
+                    memcpy(KF[k].qc, qn, sizeof qn);
+                    memcpy(KF[k].pc, pn, sizeof pn);
+                }
+            }
+            /* publish the live correction D = C_j ∘ O_j⁻¹ (in loc-only
+             * mode this IS the relocalization of the displayed pose) */
+            float qoj[4], poj[3];
+            pose_invert(work.q, work.p, qoj, poj);
+            pose_compose(qcj, pcj, qoj, poj, CORR.q, CORR.p);
+            CORR.gen++;
+            memcpy(work.qc, qcj, sizeof work.qc);
+            memcpy(work.pc, pcj, sizeof work.pc);
+            j_corrected = 1;
+            LOGI("session map: LOOP VERIFIED kf#%d: %d/%d 3D inliers, "
+                 "|t|=%.2fm, corr gen %d",
+                 best_i, nin, n3,
+                 sqrt((double)(ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2])),
+                 CORR.gen);
+        } else {
+            LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs) "
+                 "unverified (%d 3D pairs, %d inliers)",
+                 mapping ? "LOOP CANDIDATE vs" : "RELOC MATCH vs", best_i,
+                 best_m, work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
+                 (double)(work.ts - KF[best_i].ts) / 1e9, n3, nin);
+        }
+
+        /* AR flash + panel marker, in the SESSION frame: stored landmarks
+         * through D_i = C_i ∘ O_i⁻¹ */
+        {
+            float qoi[4], poi[3], qdi[4], pdi[3];
+            pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
+            pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
+            memcpy(LOOP_STATS.pos, KF[best_i].pc, sizeof LOOP_STATS.pos);
+            LOOP_STATS.n_lm = KF[best_i].n_lm;
+            for (int i = 0; i < KF[best_i].n_lm; i++) {
+                float t[3];
+                qrotv(qdi, KF[best_i].lm_xyz[i], t);
+                LOOP_STATS.lm[i][0] = t[0] + pdi[0];
+                LOOP_STATS.lm[i][1] = t[1] + pdi[1];
+                LOOP_STATS.lm[i][2] = t[2] + pdi[2];
+            }
+        }
     }
 
     /* store (mapping mode only), rolling cap: evict least-recently-useful */
@@ -375,6 +855,8 @@ static void process_keyframe(void) {
             KF_N--;
         }
         work.last_used = work.ts;
+        if (!j_corrected)     /* corrected = D_cur ∘ O_j */
+            pose_compose(CORR.q, CORR.p, work.q, work.p, work.qc, work.pc);
         KF[KF_N] = work;
         KF_N++;
         atomic_store(&KF_COUNT_PUB, KF_N);
