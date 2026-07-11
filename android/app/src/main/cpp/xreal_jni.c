@@ -769,10 +769,12 @@ static void prop_correct(const float q[4], const float p[3],
     pthread_mutex_unlock(&S.imu_lock);
 }
 
-/* AR head pose for the renderer: the propagated 6-DoF state predicted to
- * photon time. Fails (-> renderer fallback) until the VIO anchors it, or
- * when anchors stop arriving (dead reckoning alone diverges in seconds). */
-static int head_pose_now(float R[9], float p[3]) {
+/* AR head pose for the renderer: the propagated 6-DoF state predicted
+ * predict_ns ahead (0 = the front-buffer default; the vsync-locked AR
+ * path passes its measured swap-to-photon horizon). Fails (-> renderer
+ * fallback) until the VIO anchors it, or when anchors stop arriving
+ * (dead reckoning alone diverges in seconds). */
+static int head_pose_now(uint64_t predict_ns, float R[9], float p[3]) {
     if (!atomic_load(&S.prop_on)) return -1;
     pthread_mutex_lock(&S.imu_lock);
     if (!S.prop.valid ||
@@ -786,7 +788,9 @@ static int head_pose_now(float R[9], float p[3]) {
     memcpy(v, S.prop.v, sizeof v);
     memcpy(w, S.prop.w_ema, sizeof w);
     pthread_mutex_unlock(&S.imu_lock);
-    const float tp = (float)XR_GLES_PREDICT_NS * 1e-9f;
+    if (!predict_ns) predict_ns = XR_GLES_PREDICT_NS;
+    if (predict_ns > 50000000ull) predict_ns = 50000000ull;   /* sanity */
+    const float tp = (float)predict_ns * 1e-9f;
     float rv[3] = { w[0] * tp, w[1] * tp, w[2] * tp };
     float dq[4], qp[4];
     quat_from_rotvec(rv, dq);

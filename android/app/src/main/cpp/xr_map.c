@@ -64,6 +64,14 @@
 #define VER_JUMP_T_M 5.0f
 #define VER_JUMP_ANG_RAD 0.79f      /* ~45 deg */
 
+/* one observation is never enough: a correction applies only when TWO
+ * meaningful alignments within this window agree on where the user is
+ * (a single ill-conditioned fit that slipped through the split-half
+ * check can still be a meter off) */
+#define CONFIRM_WINDOW_NS 6000000000ull
+#define CONFIRM_DP_M 0.25f
+#define CONFIRM_DA_RAD 0.12f        /* ~7 deg */
+
 enum { DESC_ORB = 0, DESC_XFEAT = 1 };
 
 typedef struct {
@@ -114,6 +122,11 @@ static atomic_int MAPPING = 1;
 static atomic_int GRAPH_ON = 1;
 static atomic_int HEALTHY = 1;         /* driven by the SLAM worker */
 static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
+static struct {                        /* correction awaiting confirmation */
+    int have;
+    uint64_t ts;
+    float q[4], p[3];                  /* candidate D = C_j ∘ O_j⁻¹ */
+} PENDING;
 
 /* Live session correction D = C_newest ∘ O_newest⁻¹ (map -> odom pattern):
  * composes onto every odom-frame quantity leaving the SLAM worker. Updated
@@ -147,6 +160,7 @@ void xr_map_reset(void) {
     LAST_POSE.have = 0;
     MBOX.full = 0;
     LAST_ACCEPT_NS = 0;
+    PENDING.have = 0;
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
     CORR.p[0] = CORR.p[1] = CORR.p[2] = 0;
@@ -499,6 +513,57 @@ static int match_count(const xr_kf *a, const xr_kf *b) {
 #define VER_MAX_T_M 2.5f           /* wilder alignment = wrong place */
 #define VER_MAX_ANG_RAD 0.44f      /* ~25 deg */
 
+/* Horn quaternion fit pk ≈ R*pq + t over the pairs listed in keep[],
+ * largest eigenvector by shifted power iteration. */
+static void horn_fit(const float (*pq)[3], const float (*pk)[3],
+                     const int *keep, int in, float R_out[9],
+                     float t_out[3]) {
+    float cq[3] = { 0, 0, 0 }, ck[3] = { 0, 0, 0 };
+    for (int m = 0; m < in; m++)
+        for (int c = 0; c < 3; c++) {
+            cq[c] += pq[keep[m]][c];
+            ck[c] += pk[keep[m]][c];
+        }
+    for (int c = 0; c < 3; c++) { cq[c] /= (float)in; ck[c] /= (float)in; }
+    float S[9] = { 0 };                               /* Σ q_c k_c^T */
+    for (int m = 0; m < in; m++) {
+        float aq[3], ak[3];
+        for (int c = 0; c < 3; c++) {
+            aq[c] = pq[keep[m]][c] - cq[c];
+            ak[c] = pk[keep[m]][c] - ck[c];
+        }
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                S[r * 3 + c] += aq[r] * ak[c];
+    }
+    float N[16] = {
+        S[0] + S[4] + S[8], S[5] - S[7],        S[6] - S[2],        S[1] - S[3],
+        S[5] - S[7],        S[0] - S[4] - S[8], S[1] + S[3],        S[2] + S[6],
+        S[6] - S[2],        S[1] + S[3],       -S[0] + S[4] - S[8], S[5] + S[7],
+        S[1] - S[3],        S[2] + S[6],        S[5] + S[7],       -S[0] - S[4] + S[8]
+    };
+    float fro = 0;
+    for (int i = 0; i < 16; i++) fro += N[i] * N[i];
+    float shift = sqrtf(fro) + 1e-6f;                 /* all eigenvalues > 0 */
+    N[0] += shift; N[5] += shift; N[10] += shift; N[15] += shift;
+    /* skewed start: a u-turn alignment (w = 0) is orthogonal to (1,0,0,0)
+     * and pure power iteration would never leave that subspace */
+    float v[4] = { 1, 0.02f, 0.017f, 0.013f };
+    for (int it = 0; it < 80; it++) {
+        float u[4];
+        for (int r = 0; r < 4; r++)
+            u[r] = N[r * 4] * v[0] + N[r * 4 + 1] * v[1] +
+                   N[r * 4 + 2] * v[2] + N[r * 4 + 3] * v[3];
+        float l = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2] + u[3] * u[3]);
+        if (l < 1e-12f) break;
+        for (int r = 0; r < 4; r++) v[r] = u[r] / l;
+    }
+    q2R(v, R_out);                                    /* q rotates q -> k */
+    for (int c = 0; c < 3; c++)
+        t_out[c] = ck[c] - (R_out[c * 3] * cq[0] + R_out[c * 3 + 1] * cq[1] +
+                            R_out[c * 3 + 2] * cq[2]);
+}
+
 /* alignment A = (R, t) with pk ≈ R*pq + t: RANSAC over point triads, then
  * a Horn (quaternion) refit on the inliers via power iteration. Returns
  * the inlier count (0 = no acceptable model). */
@@ -576,7 +641,6 @@ static int align_ransac(const float (*pq)[3], const float (*pk)[3], int n,
     if (best_in < 3) return 0;
 
     /* Horn refit on the inliers of the best model */
-    float cq[3] = { 0, 0, 0 }, ck[3] = { 0, 0, 0 };
     int in = 0;
     static int keep[XR_MAP_KP_PER_KF];               /* map thread only */
     for (int m = 0; m < n; m++) {
@@ -587,52 +651,44 @@ static int align_ransac(const float (*pq)[3], const float (*pk)[3], int n,
                                   bR[c * 3 + 2] * pq[m][2] + bt[c]);
             e += d * d;
         }
-        if (e < VER_INLIER_M * VER_INLIER_M) {
+        if (e < VER_INLIER_M * VER_INLIER_M)
             keep[in++] = m;
-            for (int c = 0; c < 3; c++) {
-                cq[c] += pq[m][c];
-                ck[c] += pk[m][c];
-            }
-        }
     }
-    for (int c = 0; c < 3; c++) { cq[c] /= (float)in; ck[c] /= (float)in; }
-    float S[9] = { 0 };                               /* Σ q_c k_c^T */
-    for (int m = 0; m < in; m++) {
-        float aq[3], ak[3];
+    horn_fit(pq, pk, keep, in, R_out, t_out);
+
+    /* conditioning: refit each HALF of the inliers separately. When the
+     * geometry only weakly constrains the transform (shallow scene, one
+     * viewing direction, correlated inverse-depth errors) the halves
+     * disagree and the "alignment" is noise no matter how many inliers
+     * it collected — this is what let spurious meter-scale corrections
+     * through after a shake. */
+    if (in >= 8) {
+        static int ka[XR_MAP_KP_PER_KF], kb[XR_MAP_KP_PER_KF];
+        int na = 0, nb = 0;
+        for (int m = 0; m < in; m++) {
+            if (m & 1) kb[nb++] = keep[m];
+            else ka[na++] = keep[m];
+        }
+        float Rha[9], tha[3], Rhb[9], thb[3];
+        horn_fit(pq, pk, ka, na, Rha, tha);
+        horn_fit(pq, pk, kb, nb, Rhb, thb);
+        float dt2 = 0;
         for (int c = 0; c < 3; c++) {
-            aq[c] = pq[keep[m]][c] - cq[c];
-            ak[c] = pk[keep[m]][c] - ck[c];
+            float d = tha[c] - thb[c];
+            dt2 += d * d;
         }
-        for (int r = 0; r < 3; r++)
-            for (int c = 0; c < 3; c++)
-                S[r * 3 + c] += aq[r] * ak[c];
+        float qha[4], qhb[4], qhi[4], qhe[4], rvh[3];
+        R2q(Rha, qha);
+        R2q(Rhb, qhb);
+        qconj(qha, qhi);
+        qmul(qhb, qhi, qhe);
+        rv_from_q(qhe, rvh);
+        float dah = sqrtf(rvh[0] * rvh[0] + rvh[1] * rvh[1] +
+                          rvh[2] * rvh[2]);
+        if (dt2 > 0.20f * 0.20f || dah > 0.10f)
+            return 0;                        /* ill-conditioned: reject */
     }
-    float N[16] = {
-        S[0] + S[4] + S[8], S[5] - S[7],        S[6] - S[2],        S[1] - S[3],
-        S[5] - S[7],        S[0] - S[4] - S[8], S[1] + S[3],        S[2] + S[6],
-        S[6] - S[2],        S[1] + S[3],       -S[0] + S[4] - S[8], S[5] + S[7],
-        S[1] - S[3],        S[2] + S[6],        S[5] + S[7],       -S[0] - S[4] + S[8]
-    };
-    float fro = 0;
-    for (int i = 0; i < 16; i++) fro += N[i] * N[i];
-    float shift = sqrtf(fro) + 1e-6f;                 /* all eigenvalues > 0 */
-    N[0] += shift; N[5] += shift; N[10] += shift; N[15] += shift;
-    /* skewed start: a u-turn alignment (w = 0) is orthogonal to (1,0,0,0)
-     * and pure power iteration would never leave that subspace */
-    float v[4] = { 1, 0.02f, 0.017f, 0.013f };
-    for (int it = 0; it < 80; it++) {
-        float u[4];
-        for (int r = 0; r < 4; r++)
-            u[r] = N[r * 4] * v[0] + N[r * 4 + 1] * v[1] +
-                   N[r * 4 + 2] * v[2] + N[r * 4 + 3] * v[3];
-        float l = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2] + u[3] * u[3]);
-        if (l < 1e-12f) break;
-        for (int r = 0; r < 4; r++) v[r] = u[r] / l;
-    }
-    q2R(v, R_out);                                    /* q rotates q -> k */
-    for (int c = 0; c < 3; c++)
-        t_out[c] = ck[c] - (R_out[c * 3] * cq[0] + R_out[c * 3 + 1] * cq[1] +
-                            R_out[c * 3 + 2] * cq[2]);
+
     /* recount with the refined model */
     int in2 = 0;
     for (int m = 0; m < n; m++) {
@@ -746,11 +802,16 @@ static void consider_candidate(xr_kf *w, int best_i, int best_m,
                 } else {
                     int strong = nin >= VER_STRONG_INLIERS &&
                                  nin * 2 >= n3;
-                    float mxt = strong ? VER_JUMP_T_M : VER_MAX_T_M;
-                    float mxa = strong ? VER_JUMP_ANG_RAD : VER_MAX_ANG_RAD;
-                    if (tn < mxt && ang < mxa) {
-                        verified = 1;
-                        meaningful = 1;
+                    /* a meaningful correction from a YOUNG keyframe is
+                     * the post-shake snap — demand strong consensus; a
+                     * weak young alignment is landmark noise */
+                    if (!young || strong) {
+                        float mxt = strong ? VER_JUMP_T_M : VER_MAX_T_M;
+                        float mxa = strong ? VER_JUMP_ANG_RAD : VER_MAX_ANG_RAD;
+                        if (tn < mxt && ang < mxa) {
+                            verified = 1;
+                            meaningful = 1;
+                        }
                     }
                 }
             }
@@ -788,6 +849,45 @@ static void consider_candidate(xr_kf *w, int best_i, int best_m,
     pose_compose(qdi, pdi, qa, ta, qda, pda);
     float qcj[4], pcj[3];                     /* C_j */
     pose_compose(qda, pda, w->q, w->p, qcj, pcj);
+
+    /* confirmation: hold the candidate correction until a SECOND
+     * meaningful alignment agrees on where the user is */
+    float qoj0[4], poj0[3], qdn[4], pdn[3];   /* candidate D = C_j ∘ O_j⁻¹ */
+    pose_invert(w->q, w->p, qoj0, poj0);
+    pose_compose(qcj, pcj, qoj0, poj0, qdn, pdn);
+    int confirmed = 0;
+    if (PENDING.have && w->ts > PENDING.ts &&
+        w->ts - PENDING.ts < CONFIRM_WINDOW_NS) {
+        float u1[3], u2[3];                   /* the user under each D */
+        qrotv(qdn, w->p, u1);
+        qrotv(PENDING.q, w->p, u2);
+        float dp2 = 0;
+        for (int c = 0; c < 3; c++) {
+            float d = (u1[c] + pdn[c]) - (u2[c] + PENDING.p[c]);
+            dp2 += d * d;
+        }
+        float qpi[4], qpe[4], rvp[3];
+        qconj(PENDING.q, qpi);
+        qmul(qdn, qpi, qpe);
+        rv_from_q(qpe, rvp);
+        float dap = sqrtf(rvp[0] * rvp[0] + rvp[1] * rvp[1] +
+                          rvp[2] * rvp[2]);
+        if (dp2 < CONFIRM_DP_M * CONFIRM_DP_M && dap < CONFIRM_DA_RAD)
+            confirmed = 1;
+    }
+    if (!confirmed) {
+        PENDING.have = 1;
+        PENDING.ts = w->ts;
+        memcpy(PENDING.q, qdn, sizeof PENDING.q);
+        memcpy(PENDING.p, pdn, sizeof PENDING.p);
+        LOGI("session map: %s kf#%d |t|=%.2fm (%d/%d inliers) — awaiting "
+             "confirmation",
+             young ? "reloc" : "loop", best_i,
+             sqrt((double)(ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2])),
+             nin, n3);
+        return;
+    }
+    PENDING.have = 0;
 
     if (mapping && KF_N > best_i + 1) {
         /* distribute the change over the chain (i .. newest] by

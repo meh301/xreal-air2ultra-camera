@@ -70,8 +70,21 @@ static struct {
     uint64_t map_ts;
     uint64_t (*time_fn)(void);                      /* IMU-clock now */
     int (*pose_ar_fn)(uint64_t, float[9]);          /* deadband-free+predicted */
-    int (*head_fn)(float[9], float[3]);             /* 1 kHz propagated pose */
+    int (*head_fn)(uint64_t, float[9], float[3]);   /* 1 kHz propagated pose */
     int refresh_hz;                                 /* panel rate (0 = 60) */
+
+    /* vsync-locked AR presents (render thread only). A randomly-phased
+     * front buffer puts ±(phase × ω) of pose error on the photons —
+     * degree-scale noise during rotation, mm-scale for translation. In
+     * AR mode the surface flips to back-buffer with interval-1 swaps:
+     * the blocking swap pins the photon time to a fixed offset that the
+     * predictor removes exactly. */
+    int front_capable;                              /* bind-time ext check */
+    int ar_vsync;                                   /* AR swap-paced now */
+    int buffer_latch_pending;                       /* next swap re-latches */
+    int64_t swap_prev_ns;                           /* last swap return */
+    float vsync_period_ns;                          /* measured cadence */
+    uint64_t ar_predict_ns;                         /* AR photon horizon */
     int loop_n;                                     /* loop/reloc flash */
     uint64_t loop_ts;                               /* event time, IMU clock */
 
@@ -369,6 +382,11 @@ static int egl_bind_window(ANativeWindow *win) {
     LOGI("glasses renderer: GLES2, %s", G.single_buffer
          ? "FRONT-buffer (minimum latency, tearing possible)"
          : "double-buffered (front-buffer mode unavailable)");
+    G.front_capable = G.single_buffer;
+    G.ar_vsync = 0;
+    G.buffer_latch_pending = 0;
+    G.swap_prev_ns = 0;
+    G.ar_predict_ns = 0;
 
     if (!G.prog && gl_objects_init() != 0) return -1;
     G.win = win;
@@ -455,7 +473,8 @@ static void render_frame(int mode, int fresh, const float *dR,
         uint64_t ar_tn = 0;
         if (eye_mode == XR_EYE_AR && G.show_points && G.map_count > 0) {
             ar_tn = G.time_fn ? G.time_fn() : 0;
-            if (G.head_fn && G.head_fn(ar_R, ar_ph) == 0) {
+            uint64_t pred = G.ar_vsync ? G.ar_predict_ns : 0;
+            if (G.head_fn && G.head_fn(pred, ar_R, ar_ph) == 0) {
                 ar_ready = 1;          /* 1 kHz propagator, photon-time */
             } else {
                 /* fallback: last VIO pose warped by the AHRS delta plus
@@ -620,8 +639,31 @@ static void render_frame(int mode, int fresh, const float *dR,
         glEnableVertexAttribArray((GLuint)G.loc_uv);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
-    if (G.single_buffer) glFlush();          /* front buffer: no swap needed */
-    else eglSwapBuffers(G.dpy, G.surf);
+    if (G.single_buffer) {
+        glFlush();                           /* front buffer: no swap needed */
+    } else {
+        eglSwapBuffers(G.dpy, G.surf);
+        if (G.buffer_latch_pending) {
+            /* that swap re-latched front-buffer mode */
+            G.buffer_latch_pending = 0;
+            if (G.front_capable && !G.ar_vsync)
+                G.single_buffer = 1;
+        } else if (G.ar_vsync) {
+            /* the swap return rides the panel vsync: measure the true
+             * scanout period, predict to the middle of the NEXT frame */
+            struct timespec tsp;
+            clock_gettime(CLOCK_MONOTONIC, &tsp);
+            int64_t t = (int64_t)tsp.tv_sec * 1000000000LL + tsp.tv_nsec;
+            if (G.swap_prev_ns) {
+                float d = (float)(t - G.swap_prev_ns);
+                if (d > 4e6f && d < 40e6f)
+                    G.vsync_period_ns += 0.1f * (d - G.vsync_period_ns);
+            }
+            G.swap_prev_ns = t;
+            G.ar_predict_ns =
+                (uint64_t)(G.vsync_period_ns * 1.5f) + 5000000u;
+        }
+    }
 }
 
 static void *render_thread(void *arg) {
@@ -658,9 +700,14 @@ static void *render_thread(void *arg) {
                 next_tick_ns = now_ns + tick;          /* resync */
             until.tv_sec = next_tick_ns / 1000000000LL;
             until.tv_nsec = (long)(next_tick_ns % 1000000000LL);
-            while (!G.win_changed && G.frame_seq == done_seq && !G.calib_staged)
-                if (pthread_cond_timedwait(&G.cond, &G.lock, &until) == ETIMEDOUT)
-                    break;
+            if (!G.ar_vsync) {
+                while (!G.win_changed && G.frame_seq == done_seq &&
+                       !G.calib_staged)
+                    if (pthread_cond_timedwait(&G.cond, &G.lock, &until) ==
+                        ETIMEDOUT)
+                        break;
+            }
+            /* ar_vsync: no sleep — the blocking interval-1 swap paces */
         } else {
             while (!G.win_changed && G.frame_seq == done_seq && !G.calib_staged)
                 pthread_cond_wait(&G.cond, &G.lock);
@@ -679,6 +726,7 @@ static void *render_thread(void *arg) {
             G.mesh_ready = 0;                 /* (re)build below */
         }
         int mode = G.frame_mode;
+        int eyem = G.eye_mode;
         uint32_t seq = G.frame_seq;
         int64_t submitted = G.submit_ms;
         uint64_t frame_ts = G.frame_ts;
@@ -698,6 +746,35 @@ static void *render_thread(void *arg) {
          * either order (the 3D-mode switch creates the display late) */
         if (G.surf != EGL_NO_SURFACE && G.calib_valid && !G.mesh_ready)
             build_meshes();
+
+        /* enter/leave the vsync-locked AR present mode */
+        int want_vsync = mode == MODE_EYES && eyem == XR_EYE_AR;
+        if (G.surf != EGL_NO_SURFACE && want_vsync != G.ar_vsync) {
+            if (want_vsync) {
+                if (G.front_capable)
+                    eglSurfaceAttrib(G.dpy, G.surf, EGL_RENDER_BUFFER,
+                                     EGL_BACK_BUFFER);
+                eglSwapInterval(G.dpy, 1);
+                G.single_buffer = 0;          /* swap every present */
+                G.swap_prev_ns = 0;
+                G.vsync_period_ns = 16666667.0f;
+                G.ar_predict_ns = 0;
+            } else {
+                if (G.front_capable) {
+                    eglSurfaceAttrib(G.dpy, G.surf, EGL_RENDER_BUFFER,
+                                     EGL_SINGLE_BUFFER);
+                    eglSurfaceAttrib(G.dpy, G.surf,
+                                     EGL_FRONT_BUFFER_AUTO_REFRESH_ANDROID,
+                                     EGL_TRUE);
+                }
+                eglSwapInterval(G.dpy, 0);
+                G.buffer_latch_pending = 1;   /* one swap re-latches front */
+            }
+            G.ar_vsync = want_vsync;
+            LOGI("AR presents: %s", want_vsync
+                 ? "vsync-locked (swap-paced, predicted to scanout)"
+                 : "front-buffer");
+        }
 
         int fresh = seq != done_seq;
         int drawable = G.surf != EGL_NO_SURFACE && mode != MODE_NONE &&
@@ -844,7 +921,7 @@ void xr_gles_set_ar_pose_fn(int (*fn)(uint64_t, float[9])) {
     pthread_mutex_unlock(&G.lock);
 }
 
-void xr_gles_set_head_fn(int (*fn)(float[9], float[3])) {
+void xr_gles_set_head_fn(int (*fn)(uint64_t, float[9], float[3])) {
     pthread_mutex_lock(&G.lock);
     G.head_fn = fn;
     pthread_mutex_unlock(&G.lock);
