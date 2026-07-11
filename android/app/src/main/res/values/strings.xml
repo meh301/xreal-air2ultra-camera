@@ -33,9 +33,10 @@
     <!-- advanced loop closure: verification + pose-graph correction -->
     <string name="graph_on">LC✓</string>
     <string name="graph_off">LC✕</string>
-    <!-- AR head pose: 1 kHz propagator vs legacy warp (A/B) -->
-    <string name="prop_on">Prop✓</string>
-    <string name="prop_off">Prop✕</string>
+    <!-- AR head-pose source (shows the CURRENT source): 1 kHz dead
+         reckoning propagator vs the legacy timewarp path (A/B) -->
+    <string name="prop_on">Pose:1k</string>
+    <string name="prop_off">Pose:TW</string>
     <!-- the mode button shows the mode you switch TO -->
     <string name="mode_sbs">SBS</string>
     <string name="mode_stereo">3D</string>
