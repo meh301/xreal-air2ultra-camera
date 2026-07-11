@@ -57,6 +57,11 @@ object XrealNative {
      */
     external fun nativeSetMapping(on: Boolean)
 
+    /** The glasses display's refresh rate as Android reports it — drives
+     *  the renderer's present pacing (the OS composites the external
+     *  display at this rate regardless of the MCU-negotiated scan). */
+    external fun nativeSetPanelHz(hz: Float)
+
     /** Loop recovery: verified closures snap the live pose to the
      *  established map. Loop closure of the map itself always runs;
      *  off = the future GNSS-fusion mode (map self-heals, displayed

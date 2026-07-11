@@ -255,6 +255,9 @@ class MainActivity : Activity() {
         if (presentation?.display?.displayId == display.displayId) return
         presentation?.dismiss()
         presentation = GlassesPresentation(this, display).also { it.show() }
+        // the OS composites the glasses at ITS reported rate (seen: 90 Hz),
+        // not the MCU-negotiated scan — pace presents to match
+        XrealNative.nativeSetPanelHz(display.refreshRate)
     }
 
     private val usbReceiver = object : BroadcastReceiver() {

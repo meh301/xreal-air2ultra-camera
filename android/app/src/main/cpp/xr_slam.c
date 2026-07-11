@@ -406,6 +406,7 @@ int xr_slam_poll(xr_slam_state *out) {
             float invd = feats.features[i].depth;      /* INVERSE distance */
             out->feat_uv[i][0] = u;
             out->feat_uv[i][1] = v;
+            out->feat_id[i] = (int32_t)feats.features[i].id;
             float rc[3];
             kb4_unproject(B.kb4[0], u, v, rc);         /* unit ray, camera */
             const float *R = B.R_ic[0];

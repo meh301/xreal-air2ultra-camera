@@ -971,6 +971,8 @@ static void process_keyframe(void) {
         KF[KF_N] = work;
         KF_N++;
         atomic_store(&KF_COUNT_PUB, KF_N);
+        LOGI("session map: kf#%d stored (%d landmarks, %d kps)",
+             KF_N - 1, work.n_lm, work.n_kp);
     }
     pthread_mutex_unlock(&MAP_LOCK);
 }

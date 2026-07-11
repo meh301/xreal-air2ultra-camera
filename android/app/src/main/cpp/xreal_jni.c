@@ -851,10 +851,63 @@ static void *slam_worker(void *arg) {
              * feature u,v are per-camera pixels — the panes are 1:1) */
             static xr_slam_state st;               /* worker thread only */
             if (xr_slam_poll(&st)) {
+                /* Landmark-ID cache (worker only, ODOM frame). Keyframes
+                 * are captured at MOTION-gate moments — exactly when the
+                 * per-tick landmark export collapses (fresh re-tracks have
+                 * unconverged inverse depths and get range-filtered), so
+                 * keyframes stored 0-10 landmarks and verification starved
+                 * ("52 matches, 0 3D pairs"). The cache keeps every id's
+                 * last converged 3D for a few seconds; the offer joins it
+                 * with the CURRENT frame's feature pixels. */
+                static struct {
+                    int32_t id;
+                    float xyz[3];
+                    uint64_t ts;
+                } LMC[1024];
+                for (int i = 0; i < st.n_landmarks; i++) {
+                    uint32_t h = ((uint32_t)st.lm_id[i] * 2654435761u) & 1023u;
+                    int slot = (int)h, oldest = (int)h;
+                    for (int k = 0; k < 16; k++) {
+                        uint32_t j = (h + k) & 1023u;
+                        if (!LMC[j].ts || LMC[j].id == st.lm_id[i]) {
+                            slot = (int)j;
+                            break;
+                        }
+                        if (LMC[j].ts < LMC[oldest].ts) oldest = (int)j;
+                        slot = oldest;
+                    }
+                    LMC[slot].id = st.lm_id[i];
+                    memcpy(LMC[slot].xyz, st.lm_xyz[i], sizeof LMC[slot].xyz);
+                    LMC[slot].ts = st.ts;
+                }
+                static int32_t off_id[XR_SLAM_MAX_FEATURES];
+                static float off_xyz[XR_SLAM_MAX_FEATURES][3];
+                static float off_uv[XR_SLAM_MAX_FEATURES][2];
+                int off_n = 0;
+                for (int i = 0; i < st.n_features; i++) {
+                    uint32_t h =
+                        ((uint32_t)st.feat_id[i] * 2654435761u) & 1023u;
+                    for (int k = 0; k < 16; k++) {
+                        uint32_t j = (h + k) & 1023u;
+                        if (!LMC[j].ts) break;
+                        if (LMC[j].id == st.feat_id[i]) {
+                            if (st.ts - LMC[j].ts < 3000000000ull) {
+                                off_id[off_n] = st.feat_id[i];
+                                memcpy(off_xyz[off_n], LMC[j].xyz,
+                                       sizeof off_xyz[0]);
+                                off_uv[off_n][0] = st.feat_uv[i][0];
+                                off_uv[off_n][1] = st.feat_uv[i][1];
+                                off_n++;
+                            }
+                            break;
+                        }
+                    }
+                }
+
                 /* keyframes store raw ODOM poses + landmarks — the pose
                  * graph's measurements. Offer BEFORE the correction. */
                 xr_map_offer(st.q, st.p, st.ts, SLAM_FEED[1],
-                             st.lm_id, st.lm_xyz, st.lm_uv, st.n_landmarks);
+                             off_id, off_xyz, off_uv, off_n);
 
                 /* session correction from the pose graph (identity until
                  * the first VERIFIED loop closure), applied in place: the
@@ -1774,6 +1827,25 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetMapping(JNIEnv *env, jclass cl
     (void)env; (void)cls;
     atomic_store(&S.map_on, on ? 1 : 0);
     xr_map_set_mapping(on);
+}
+
+/* The glasses display's refresh rate as ANDROID reports it. The MCU
+ * negotiation said SBS 60, but the OS composites the external display at
+ * its own rate (observed: 90 Hz) — pacing presents at 60 against a 90 Hz
+ * compositor makes a perfectly regular 30 Hz beat of stale frames, which
+ * reads as robotic stepping under rotation. Presents must run at or
+ * above the compositor's rate. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetPanelHz(JNIEnv *env,
+                                                          jclass cls,
+                                                          jfloat hz) {
+    (void)env; (void)cls;
+    int h = (int)(hz + 0.5f);
+    if (h >= 50 && h <= 240) {
+        xr_gles_set_refresh(h);
+        LOGI("glasses compositor rate (Android): %d Hz -> present pacing",
+             h);
+    }
 }
 
 /* Loop recovery: verified closures snap the live pose (loop closure of

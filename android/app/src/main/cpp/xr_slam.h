@@ -28,6 +28,7 @@ typedef struct {
     int n_features;         /* landmarks projected into cam0 (left) */
     float feat_uv[XR_SLAM_MAX_FEATURES][2];   /* left-camera pixels */
     float feat_ray[XR_SLAM_MAX_FEATURES][3];  /* IMU-frame rays */
+    int32_t feat_id[XR_SLAM_MAX_FEATURES];    /* stable feature ids */
     int n_features_r;       /* landmarks projected into cam1 (right) */
     float feat_uv_r[XR_SLAM_MAX_FEATURES][2]; /* right-camera pixels */
     /* triangulated landmarks in WORLD coordinates (from the estimator's
