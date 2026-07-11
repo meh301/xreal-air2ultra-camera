@@ -241,20 +241,30 @@ to our visual-inertial stack — three frames, three owners:
      that must be backed by ≥ 3 distinct observing keyframes, then a
      **second verified frame must agree** (temporal confirmation) before
      anything is applied;
-   - **closure** — a confirmed closure **deforms the 4-DoF keyframe pose
-     graph**: the matched anchor and everything before it hold still, the
-     drifted tail is pulled toward the correction in proportion to its odom
-     path length (drift accrues with distance), and every keyframe's
-     anchor-local landmarks follow, so the historical map co-localizes onto
-     the established one — real closure, *not* just a live-pose snap. The
-     displayed cloud is DERIVED from the keyframe graph
-     (`xr_map_get_cloud`) and deforms with it — there is no flat cloud to
-     rigidly retransform. With recovery on, the live `T_session←odom`
-     correction also snaps so the pose follows the healed map; with it off
-     the map still heals but the pose stays odometry-continuous (the
-     GNSS-fusion mode). A **confirmed-recovery lifecycle** (healthy → lost
-     on a shake → relocalizing → recovered) keeps storage frozen until a
-     closure is verified, not on a fixed timer. Basalt never sees any of it.
+   - **closure** — TWO cases, and they are NOT the same operation. A
+     **healthy accumulated-drift loop closure** (state HEALTHY) **deforms
+     the 4-DoF keyframe graph**: the matched anchor and everything before it
+     hold still, the drifted tail is pulled toward the correction in
+     proportion to its odom path length (including the gap to the live
+     query, so the newest keyframe isn't over-corrected), and every
+     keyframe's anchor-local landmarks follow — the historical map
+     co-localizes onto the established one. A **post-loss relocalization**
+     (state LOST) does the OPPOSITE: storage was frozen through the
+     discontinuity so the stored map is already correct — it is held
+     **completely fixed** and only the live odom frame is REGISTERED back to
+     it (`CORR = D`, no deformation). Deforming a correct map would corrupt
+     it; the LOST/HEALTHY split is the same-session submap boundary. Either
+     way the displayed cloud is DERIVED from the keyframe graph
+     (`xr_map_get_cloud`) so it heals when the graph does — no flat cloud to
+     rigidly retransform. Two corrections: the MAP correction always
+     advances (new keyframes attach in the healed frame); the DISPLAY
+     correction (`LIVE`) snaps only when recovery is on, else stays
+     odometry-continuous for the GNSS-fusion mode. The **lifecycle**
+     (healthy → lost on a shake → relocalizing → recovered) keeps storage
+     frozen while LOST until a closure is verified — with NO time-based
+     give-up (a stable-but-wrong post-shake odometry must never resume
+     mapping in an unregistered frame; a genuinely new area needs a reset
+     until proper new-submap handling lands). Basalt never sees any of it.
 3. **Global / cloud map — same format, fog side (NEXT PHASE, not built).**
    The anchored keyframe graph is intended to *be* the cloud format (the
    WebSocket `keyframe`/`landmarks` payloads are the same struct). But

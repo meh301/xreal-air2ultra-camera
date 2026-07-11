@@ -94,7 +94,6 @@
  * ever matched (a genuinely new area), storage resumes after a give-up. */
 enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
 #define REC_MIN_MAP 12                 /* fewer keyframes than this = no map to be "lost" from (just a brief shake freeze) */
-#define REC_GIVEUP_NS 4000000000ull    /* lost this long with no reloc -> assume a new area, resume mapping */
 #define REC_STABLE_NS 1200000000ull    /* healthy this long after a recovery -> normal cadence */
 /* loop SEARCH cadence is event-driven: a slow background check while
  * tracking is healthy (cheap — the SD888 compute budget), FASTER when LOST
@@ -163,7 +162,6 @@ static uint64_t LAST_STORE_NS;         /* keyframe store rate limit */
 static uint64_t LAST_SNAP_NS;          /* correction cooldown anchor */
 static atomic_int SHAKING;             /* raw shake flag from the IMU thread */
 static atomic_int REC_STATE;           /* REC_HEALTHY / REC_LOST / REC_RECOVERED */
-static uint64_t SHAKE_END_NS;          /* when the current shake subsided */
 static uint64_t RECOVERED_NS;          /* when the last recovery landed */
 static struct {                        /* correction awaiting confirmation */
     int have;
@@ -222,6 +220,16 @@ void xr_map_set_mapping(int on) {
 
 void xr_map_set_recovery(int on) {
     atomic_store(&RECOVERY, on ? 1 : 0);
+    if (on) {
+        /* catch the display frame up to the map frame immediately, so
+         * closures that landed while recovery was OFF are reflected at
+         * once instead of waiting for the next one */
+        pthread_mutex_lock(&MAP_LOCK);
+        memcpy(LIVE.q, CORR.q, sizeof LIVE.q);
+        memcpy(LIVE.p, CORR.p, sizeof LIVE.p);
+        LIVE.gen++;
+        pthread_mutex_unlock(&MAP_LOCK);
+    }
     LOGI("session map: loop recovery %s",
          on ? "ON (verified closures snap the live pose)"
             : "OFF (map keeps closing loops internally; the live pose is "
@@ -273,7 +281,6 @@ void xr_map_reset(void) {
     LAST_STORE_NS = 0;
     LAST_SNAP_NS = 0;
     PENDING_D.have = 0;
-    SHAKE_END_NS = 0;
     RECOVERED_NS = 0;
     atomic_store(&SHAKING, 0);
     atomic_store(&REC_STATE, REC_HEALTHY);
@@ -436,17 +443,20 @@ static void corr_interp(const float qa[4], const float pa[3],
     for (int i = 0; i < 3; i++) po[i] = pa[i] + t * (pb[i] - pa[i]);
 }
 
-/* THE closure that heals the map. A verified relocalization gives the
- * live correction D (odom -> session) that lands the current view back on
- * the established map. The matched anchor keyframe and everything BEFORE
- * it are the trusted reference and hold still; the drifted tail (anchor ->
- * newest) is pulled toward D in proportion to its odom PATH LENGTH from
- * the anchor — near the anchor it barely moves, at the tip it takes the
- * full correction. Each keyframe's landmarks follow its corrected pose, so
- * the historical map DEFORMS onto the reference: real co-localization, not
- * just a live-pose snap. O(chain), 4-DoF (gravity fixes roll/pitch).
- * MAP_LOCK held. */
-static void graph_deform(int anchor, const float Dq[4], const float Dp[3]) {
+/* Heal ACCUMULATED DRIFT (a healthy loop closure only — NOT post-loss
+ * recovery). When the recent stored trajectory drifted and then closed a
+ * loop, the matched anchor and everything BEFORE it are trusted and hold
+ * still; the drifted tail (anchor -> newest) is pulled toward D in
+ * proportion to its odom PATH LENGTH from the anchor. Each keyframe's
+ * landmarks follow, so the tail DEFORMS onto the reference. O(chain),
+ * 4-DoF (gravity fixes roll/pitch). MAP_LOCK held.
+ *
+ * This must NOT run for post-shake relocalization: storage is frozen
+ * through a discontinuity, so the stored map is already correct and only
+ * the live odom frame needs registering — deforming a correct map corrupts
+ * it. The caller gates on REC_HEALTHY. */
+static void graph_deform(int anchor, const float qp[3],
+                         const float Dq[4], const float Dp[3]) {
     if (anchor < 0 || anchor >= KF_N) return;
     static float cum[XR_MAP_MAX_KF];       /* odom path length from anchor */
     float total = 0;
@@ -457,6 +467,17 @@ static void graph_deform(int anchor, const float Dq[4], const float Dp[3]) {
         float dz = KF[j].p[2] - KF[j - 1].p[2];
         total += sqrtf(dx * dx + dy * dy + dz * dz);
         cum[j] = total;
+    }
+    /* the correction D was estimated for the CURRENT query, not the newest
+     * stored keyframe. Extend the path to the query so the newest keyframe
+     * gets a fraction < 1 (the drift between it and the query rides on the
+     * live pose via CORR); otherwise the newest stored portion is
+     * over-deformed. */
+    if (KF_N > anchor + 1) {
+        float dx = qp[0] - KF[KF_N - 1].p[0];
+        float dy = qp[1] - KF[KF_N - 1].p[1];
+        float dz = qp[2] - KF[KF_N - 1].p[2];
+        total += sqrtf(dx * dx + dy * dy + dz * dz);
     }
     for (int j = anchor + 1; j < KF_N; j++) {
         float a = total > 1e-3f ? cum[j] / total : 1.0f;
@@ -1238,24 +1259,21 @@ static void process_keyframe(void) {
     int mapping = atomic_load(&MAPPING);
 
     /* confirmed-recovery lifecycle. A shake marks us LOST and FREEZES
-     * storage; we stay LOST — querying every offer to relocalize — until a
-     * closure is VERIFIED (RECOVERED, storage resumes) or, if no map is
-     * ever matched, a give-up timeout assumes a genuinely new area. This
-     * replaces the old fixed 1.5 s shake timer, whose expiry could let a
-     * stable-but-WRONG post-shake odometry quietly resume laying keyframes
-     * in the wrong frame. */
+     * storage. We stay LOST — relocalizing against the (now frozen,
+     * still-correct) map — until a closure is VERIFIED (RECOVERED, storage
+     * resumes). There is deliberately NO time-based give-up: a stable-but-
+     * WRONG post-shake odometry must never quietly resume laying keyframes
+     * in an unregistered frame. Mapping a genuinely NEW area after an
+     * unrecoverable loss needs a reset for now (proper new-submap handling
+     * is the pending same-session-submap work). */
     int shaking = atomic_load(&SHAKING);
     int rstate = atomic_load(&REC_STATE);
     if (shaking && KF_N >= REC_MIN_MAP) {
         rstate = REC_LOST;
-        SHAKE_END_NS = 0;
-    } else if (rstate == REC_LOST) {
-        if (shaking) SHAKE_END_NS = 0;
-        else if (SHAKE_END_NS == 0) SHAKE_END_NS = work.ts;
-        else if (work.ts - SHAKE_END_NS > REC_GIVEUP_NS) rstate = REC_HEALTHY;
     } else if (rstate == REC_RECOVERED) {
         if (work.ts - RECOVERED_NS > REC_STABLE_NS) rstate = REC_HEALTHY;
     }
+    /* REC_LOST is left ONLY by a confirmed recovery (in the apply branch) */
     atomic_store(&REC_STATE, rstate);
     int lost = rstate == REC_LOST;
     /* a shake with too small a map to be "lost" from still briefly freezes */
@@ -1476,6 +1494,13 @@ static void process_keyframe(void) {
                             da < CONFIRM_DA_RAD;
             }
 
+            /* A verified alignment is worth pursuing when: we are LOST (ANY
+             * alignment is a recovery candidate — even a small deviation,
+             * from a shake that didn't actually disturb Basalt), OR we are
+             * healthy and the VIO has drifted SIGNIFICANTLY from the map and
+             * the cooldown has passed. Otherwise the VIO already agrees. */
+            int worth = lost || (significant && cooled);
+
             if (dev > mxt || sang > mxa) {
                 VER_LAST.outcome = VOUT_CAPPED;
                 PENDING_D.have = 0;
@@ -1483,9 +1508,9 @@ static void process_keyframe(void) {
                      "but |t|=%.2fm ang=%.0fdeg exceeds caps — wrong-place "
                      "match, ignored", best_i, nin, n3, covis, (double)dev,
                      (double)(sang * 57.3f));
-            } else if (!significant || !cooled) {
-                /* the VIO agrees with the map (or we just snapped): do
-                 * nothing — a recovery, not a continuous clamp */
+            } else if (!worth) {
+                /* healthy and the VIO agrees with the map (or we just
+                 * snapped): do nothing — a recovery, not a continuous clamp */
                 VER_LAST.outcome = VOUT_GATED;
                 PENDING_D.have = 0;
             } else if (!confirmed) {
@@ -1495,43 +1520,51 @@ static void process_keyframe(void) {
                 PENDING_D.ts = work.ts;
                 memcpy(PENDING_D.q, Dq, sizeof PENDING_D.q);
                 memcpy(PENDING_D.p, Dp, sizeof PENDING_D.p);
-                LOGI("session map: kf#%d reloc %.2fm %.0fdeg (%d/%d inliers, "
+                LOGI("session map: kf#%d %s %.2fm %.0fdeg (%d/%d inliers, "
                      "%d covis) — awaiting a confirming frame",
-                     best_i, (double)dev, (double)(sang * 57.3f),
-                     nin, n3, covis);
+                     best_i, lost ? "reloc" : "loop", (double)dev,
+                     (double)(sang * 57.3f), nin, n3, covis);
             } else {
-                /* CONFIRMED significant closure. DEFORM the keyframe graph
-                 * so the drifted map co-localizes with the established one
-                 * (the real loop closure), and — when recovery is enabled —
-                 * snap the live pose too. Recovery-off is the GNSS-fusion
-                 * mode: the map still heals, the live pose stays odometry-
-                 * continuous for an external reference to place. */
-                graph_deform(best_i, Dq, Dp);
-                CLOUD_DIRTY = 1;
-                /* the MAP correction ALWAYS heals so new keyframes attach in
-                 * the healed frame (the review's finding 5); the DISPLAY
-                 * correction only snaps when recovery is on */
+                /* CONFIRMED. The MAP correction ALWAYS advances so new
+                 * keyframes attach in the healed frame; the DISPLAY
+                 * correction only snaps when recovery is on. */
+                int snap = atomic_load(&RECOVERY);
+                if (lost) {
+                    /* POST-LOSS RECOVERY. Storage was frozen through the
+                     * discontinuity, so the stored map is already correct —
+                     * only REGISTER the new live odom frame back to it. Do
+                     * NOT deform the reference (that would corrupt a correct
+                     * map — the review's critical finding). */
+                    atomic_store(&REC_STATE, REC_RECOVERED);
+                    RECOVERED_NS = work.ts;
+                    LOGI("session map: kf#%d RELOC RECOVERED %.2fm %.0fdeg "
+                         "(%d/%d inliers, %d covis) — live frame registered, "
+                         "stored map held fixed%s", best_i, (double)dev,
+                         (double)(sang * 57.3f), nin, n3, covis,
+                         snap ? " + pose snapped" : "");
+                } else {
+                    /* HEALTHY accumulated-drift closure: DEFORM the drifted
+                     * tail onto the reference (real co-localization). */
+                    graph_deform(best_i, work.p, Dq, Dp);
+                    CLOUD_DIRTY = 1;
+                    LOGI("session map: LOOP kf#%d CLOSURE %.2fm %.0fdeg "
+                         "(%d/%d inliers, %d covis) — map deformed%s", best_i,
+                         (double)dev, (double)(sang * 57.3f), nin, n3, covis,
+                         snap ? " + pose snapped" : "");
+                }
                 memcpy(CORR.q, Dq, sizeof CORR.q);
                 memcpy(CORR.p, Dp, sizeof CORR.p);
                 CORR.gen++;
                 LAST_SNAP_NS = work.ts;
-                int snap = atomic_load(&RECOVERY);
                 if (snap) {
                     memcpy(LIVE.q, Dq, sizeof LIVE.q);
                     memcpy(LIVE.p, Dp, sizeof LIVE.p);
                     LIVE.gen++;
                 }
                 PENDING_D.have = 0;
-                atomic_store(&REC_STATE, REC_RECOVERED);
-                RECOVERED_NS = work.ts;
                 LOOP_STATS.count++;
                 LOOP_STATS.matches = best_m;
                 VER_LAST.outcome = VOUT_APPLIED;
-                LOGI("session map: %s kf#%d CLOSURE %.2fm %.0fdeg (%d/%d "
-                     "inliers, %d covis, gen %d) — map deformed%s",
-                     mapping ? "LOOP" : "RELOC", best_i, (double)dev,
-                     (double)(sang * 57.3f), nin, n3, covis, CORR.gen,
-                     snap ? " + pose snapped" : "");
             }
 
             /* AR flash + panel marker: the winner's landmarks in session */
