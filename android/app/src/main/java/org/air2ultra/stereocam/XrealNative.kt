@@ -57,9 +57,11 @@ object XrealNative {
      */
     external fun nativeSetMapping(on: Boolean)
 
-    /** Advanced loop closure: geometric verification + pose-graph
-     *  correction (off = descriptor candidates only, no correction). */
-    external fun nativeSetGraph(on: Boolean)
+    /** Loop recovery: verified closures snap the live pose to the
+     *  established map. Loop closure of the map itself always runs;
+     *  off = the future GNSS-fusion mode (map self-heals, displayed
+     *  pose stays odometry-continuous). */
+    external fun nativeSetRecovery(on: Boolean)
 
     /** 1 kHz head-pose propagator for the AR eye mode (off = legacy
      *  VIO-pose + AHRS-delta warp path, for A/B comparison). */

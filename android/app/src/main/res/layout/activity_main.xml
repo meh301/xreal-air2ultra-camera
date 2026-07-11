@@ -75,9 +75,9 @@
             android:text="@string/map_on" />
 
         <Button
-            android:id="@+id/graph_mode"
+            android:id="@+id/recovery_mode"
             style="@style/ThinButton"
-            android:text="@string/graph_on" />
+            android:text="@string/recov_on" />
 
         <Button
             android:id="@+id/prop_mode"

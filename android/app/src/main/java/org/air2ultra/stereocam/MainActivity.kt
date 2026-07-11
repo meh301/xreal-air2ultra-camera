@@ -110,7 +110,7 @@ class MainActivity : Activity() {
     private var eyeMode = 0             // glasses: 0 cam, 1 depth, 2 AR, 3 off
     private var paneMode = 0            // phone: 0 = L|depth, 1 = L|R
     private var mappingOn = true        // false = localization-only (frozen map)
-    private var graphOn = true          // verified loop closure + correction
+    private var recoveryOn = true       // verified closures snap the live pose
     private var propOn = true           // 1 kHz AR head-pose propagator
     private var bitmap: Bitmap? = null
     private var presentation: GlassesPresentation? = null
@@ -325,14 +325,15 @@ class MainActivity : Activity() {
             mapButton.text =
                 getString(if (mappingOn) R.string.map_on else R.string.map_loc)
         }
-        val graphButton = findViewById<Button>(R.id.graph_mode)
-        graphButton.setOnClickListener {
-            // advanced loop closure: geometric verification + pose-graph
-            // correction. Off = descriptor candidates only, no correction.
-            graphOn = !graphOn
-            XrealNative.nativeSetGraph(graphOn)
-            graphButton.text =
-                getString(if (graphOn) R.string.graph_on else R.string.graph_off)
+        val recovButton = findViewById<Button>(R.id.recovery_mode)
+        recovButton.setOnClickListener {
+            // loop recovery: verified closures snap the live pose to the
+            // map. Loop closure itself always runs; off = GNSS-fusion
+            // mode later (map self-heals, pose stays continuous).
+            recoveryOn = !recoveryOn
+            XrealNative.nativeSetRecovery(recoveryOn)
+            recovButton.text = getString(
+                if (recoveryOn) R.string.recov_on else R.string.recov_off)
         }
         val propButton = findViewById<Button>(R.id.prop_mode)
         propButton.setOnClickListener {

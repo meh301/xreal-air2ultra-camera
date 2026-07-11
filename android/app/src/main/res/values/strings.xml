@@ -30,9 +30,10 @@
     <!-- session map mode (shows the CURRENT mode) -->
     <string name="map_on">Map✓</string>
     <string name="map_loc">Loc</string>
-    <!-- advanced loop closure: verification + pose-graph correction -->
-    <string name="graph_on">LC✓</string>
-    <string name="graph_off">LC✕</string>
+    <!-- loop recovery: verified closures snap the live pose to the map
+         (loop closure itself always runs; off = future GNSS-fusion mode) -->
+    <string name="recov_on">Recov✓</string>
+    <string name="recov_off">Recov✕</string>
     <!-- AR head-pose source (shows the CURRENT source): 1 kHz dead
          reckoning propagator vs the legacy timewarp path (A/B) -->
     <string name="prop_on">Pose:1k</string>

@@ -102,7 +102,8 @@ static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
 static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
-static atomic_int GRAPH_ON = 1;
+static atomic_int RECOVERY = 1;        /* live-pose snap (loop closure of
+                                          the MAP itself is always on) */
 
 /* Live session correction D = C_newest ∘ O_newest⁻¹ (map -> odom pattern):
  * composes onto every odom-frame quantity leaving the SLAM worker. Updated
@@ -119,10 +120,12 @@ void xr_map_set_mapping(int on) {
     LOGI("session map: %s", on ? "MAPPING" : "LOCALIZATION-ONLY (frozen)");
 }
 
-void xr_map_set_graph(int on) {
-    atomic_store(&GRAPH_ON, on ? 1 : 0);
-    LOGI("session map: pose graph %s",
-         on ? "ON" : "OFF (descriptor candidates only, no correction)");
+void xr_map_set_recovery(int on) {
+    atomic_store(&RECOVERY, on ? 1 : 0);
+    LOGI("session map: loop recovery %s",
+         on ? "ON (verified closures snap the live pose)"
+            : "OFF (map keeps closing loops internally; the live pose is "
+              "odometry-continuous — the GNSS-fusion mode)");
 }
 
 void xr_map_reset(void) {
@@ -484,6 +487,15 @@ static int match_count(const xr_kf *a, const xr_kf *b) {
 #define VER_MAX_T_M 2.5f           /* wilder alignment = wrong place */
 #define VER_MAX_ANG_RAD 0.44f      /* ~25 deg */
 
+/* overwhelming place-recognition evidence permits a bigger snap: after a
+ * violent shake the pose error can exceed the normal caps (especially in
+ * yaw), while the map is CERTAIN it is the same scene — the post-shake
+ * "it knows where it is but does not snap" failure */
+#define VER_STRONG_MATCHES 33      /* ~1.5x the candidate threshold */
+#define VER_STRONG_INLIERS 12
+#define VER_JUMP_T_M 6.0f
+#define VER_JUMP_ANG_RAD 1.05f     /* ~60 deg */
+
 /* alignment A = (R, t) with pk ≈ R*pq + t: RANSAC over point triads, then
  * a Horn (quaternion) refit on the inliers via power iteration. Returns
  * the inlier count (0 = no acceptable model). */
@@ -723,7 +735,7 @@ static void process_keyframe(void) {
          * kf-capture-odom coords) becomes a pose-graph constraint. */
         int verified = 0, n3 = 0, nin = 0;
         float qa[4], ta[3];
-        if (atomic_load(&GRAPH_ON)) {
+        {
             static int prs[XR_MAP_KP_PER_KF][2];          /* map thread */
             static float Pq[XR_MAP_KP_PER_KF][3];
             static float Pk[XR_MAP_KP_PER_KF][3];
@@ -756,9 +768,21 @@ static void process_keyframe(void) {
                     float ang = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] +
                                       rv[2] * rv[2]);
                     float tn2 = ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2];
-                    if (ang < VER_MAX_ANG_RAD &&
-                        tn2 < VER_MAX_T_M * VER_MAX_T_M)
+                    /* overwhelming evidence -> the caps open up so a
+                     * post-shake error can snap out in one closure */
+                    int strong = best_m >= VER_STRONG_MATCHES &&
+                                 nin >= VER_STRONG_INLIERS &&
+                                 nin * 100 >= 45 * n3;
+                    float mxt = strong ? VER_JUMP_T_M : VER_MAX_T_M;
+                    float mxa = strong ? VER_JUMP_ANG_RAD : VER_MAX_ANG_RAD;
+                    if (ang < mxa && tn2 < mxt * mxt)
                         verified = 1;
+                    else
+                        LOGI("session map: kf#%d alignment GOOD (%d/%d "
+                             "inliers, %d matches) but |t|=%.2fm "
+                             "ang=%.0fdeg exceeds the snap caps",
+                             best_i, nin, n3, best_m,
+                             sqrt((double)tn2), (double)(ang * 57.3f));
                 }
             }
         }
@@ -821,19 +845,24 @@ static void process_keyframe(void) {
                 }
             }
             /* publish the live correction D = C_j ∘ O_j⁻¹ (in loc-only
-             * mode this IS the relocalization of the displayed pose) */
-            float qoj[4], poj[3];
-            pose_invert(work.q, work.p, qoj, poj);
-            pose_compose(qcj, pcj, qoj, poj, CORR.q, CORR.p);
-            CORR.gen++;
+             * mode this IS the relocalization of the displayed pose) —
+             * unless recovery is toggled off (GNSS-fusion mode): the map
+             * stays self-consistent, the live pose stays continuous */
+            if (atomic_load(&RECOVERY)) {
+                float qoj[4], poj[3];
+                pose_invert(work.q, work.p, qoj, poj);
+                pose_compose(qcj, pcj, qoj, poj, CORR.q, CORR.p);
+                CORR.gen++;
+            }
             memcpy(work.qc, qcj, sizeof work.qc);
             memcpy(work.pc, pcj, sizeof work.pc);
             j_corrected = 1;
             LOGI("session map: LOOP VERIFIED kf#%d: %d/%d 3D inliers, "
-                 "|t|=%.2fm, corr gen %d",
+                 "|t|=%.2fm%s",
                  best_i, nin, n3,
                  sqrt((double)(ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2])),
-                 CORR.gen);
+                 atomic_load(&RECOVERY) ? ", pose snapped"
+                                        : " (recovery off: map-only)");
         } else {
             LOGI("session map: %s kf#%d (%d matches, %s, dt=%.1fs) "
                  "unverified (%d 3D pairs, %d inliers)",

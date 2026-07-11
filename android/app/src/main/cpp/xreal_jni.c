@@ -1705,13 +1705,14 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetMapping(JNIEnv *env, jclass cl
     xr_map_set_mapping(on);
 }
 
-/* Advanced loop closure: geometric verification + pose-graph correction. */
+/* Loop recovery: verified closures snap the live pose (loop closure of
+ * the map itself always runs). Off = the future GNSS-fusion mode. */
 JNIEXPORT void JNICALL
-Java_org_air2ultra_stereocam_XrealNative_nativeSetGraph(JNIEnv *env,
-                                                        jclass cls,
-                                                        jboolean on) {
+Java_org_air2ultra_stereocam_XrealNative_nativeSetRecovery(JNIEnv *env,
+                                                           jclass cls,
+                                                           jboolean on) {
     (void)env; (void)cls;
-    xr_map_set_graph(on);
+    xr_map_set_recovery(on);
 }
 
 /* 1 kHz head-pose propagator for the AR eye mode (off = legacy warp). */

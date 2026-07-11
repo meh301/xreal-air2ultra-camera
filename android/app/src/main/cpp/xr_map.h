@@ -32,11 +32,13 @@ void xr_map_set_model(const char *onnx_path);
  * relocalization query) but nothing new is stored. */
 void xr_map_set_mapping(int on);
 
-/* Pose graph on (default) / off. Off = descriptor candidates only: no
- * geometric verification, no chain relaxation, and the live correction
- * stays wherever it was — pure passive place recognition over stock
- * odometry. */
-void xr_map_set_graph(int on);
+/* Loop RECOVERY on (default) / off. Loop closure itself — candidate
+ * detection, geometric verification, keyframe-chain relaxation — always
+ * runs; this only gates whether a verified closure SNAPS the live pose
+ * (the T_session<-odom update). Off = the future GNSS-fusion mode: the
+ * map keeps healing itself, the displayed pose stays odometry-
+ * continuous and an external reference owns global placement. */
+void xr_map_set_recovery(int on);
 
 void xr_map_reset(void);
 
