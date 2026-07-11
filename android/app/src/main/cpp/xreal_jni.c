@@ -1815,32 +1815,6 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetMapping(JNIEnv *env, jclass cl
     xr_map_set_mapping(on);
 }
 
-/* Persist the session as a cloud map (the anchored keyframe graph) to
- * `path`, and reload one as the reference the live session relocalizes
- * into. Same format — session map and cloud map are one thing. Return the
- * keyframe count, 0 on failure. */
-JNIEXPORT jint JNICALL
-Java_org_air2ultra_stereocam_XrealNative_nativeSaveMap(JNIEnv *env, jclass cls,
-                                                       jstring path) {
-    (void)cls;
-    if (!path) return 0;
-    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
-    int n = xr_map_save(p);
-    (*env)->ReleaseStringUTFChars(env, path, p);
-    return n;
-}
-
-JNIEXPORT jint JNICALL
-Java_org_air2ultra_stereocam_XrealNative_nativeLoadMap(JNIEnv *env, jclass cls,
-                                                       jstring path) {
-    (void)cls;
-    if (!path) return 0;
-    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
-    int n = xr_map_load(p);
-    (*env)->ReleaseStringUTFChars(env, path, p);
-    return n;
-}
-
 /* The glasses display's refresh rate as ANDROID reports it. The MCU
  * negotiation said SBS 60, but the OS composites the external display at
  * its own rate (observed: 90 Hz) — pacing presents at 60 against a 90 Hz

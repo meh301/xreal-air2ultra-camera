@@ -64,15 +64,6 @@ object XrealNative {
      */
     external fun nativeSetMapping(on: Boolean)
 
-    /**
-     * Persist the session as a cloud map (the anchored keyframe graph) to
-     * [path], and reload one as the reference the next session relocalizes
-     * into. Same format — the session map and the cloud map are one thing.
-     * Returns the keyframe count, 0 on failure.
-     */
-    external fun nativeSaveMap(path: String): Int
-    external fun nativeLoadMap(path: String): Int
-
     /** The glasses display's refresh rate as Android reports it — drives
      *  the renderer's present pacing (the OS composites the external
      *  display at this rate regardless of the MCU-negotiated scan). */

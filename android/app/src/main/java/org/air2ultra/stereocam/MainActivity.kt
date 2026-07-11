@@ -384,21 +384,6 @@ class MainActivity : Activity() {
             propButton.text =
                 getString(if (propOn) R.string.prop_on else R.string.prop_off)
         }
-        // cloud-map persistence: the keyframe graph IS the cloud format, so
-        // save writes it out and load brings it back as the reference the
-        // live session relocalizes into (the first closure registers them)
-        val mapFile = java.io.File(filesDir, "session_map.bin").absolutePath
-        findViewById<Button>(R.id.map_save).setOnClickListener {
-            val n = XrealNative.nativeSaveMap(mapFile)
-            setStatus(if (n > 0) getString(R.string.map_saved, n)
-                      else getString(R.string.map_save_failed))
-        }
-        findViewById<Button>(R.id.map_load).setOnClickListener {
-            val n = XrealNative.nativeLoadMap(mapFile)
-            setStatus(if (n > 0) getString(R.string.map_loaded, n)
-                      else getString(R.string.map_load_failed))
-            poseMap.reset()      // resync the 3D view to the loaded map
-        }
         val paneButton = findViewById<Button>(R.id.pane_mode)
         paneButton.setOnClickListener {
             paneMode = 1 - paneMode

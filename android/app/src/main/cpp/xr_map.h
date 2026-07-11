@@ -118,15 +118,13 @@ int xr_map_loop_points(float *xyz, int max);
  * would have to be rigidly shifted. Returns the count copied (<= max). */
 int xr_map_get_cloud(float *xyz, int max);
 
-/* Persist / restore the session as a cloud map — the SAME anchored
- * keyframe graph (odom + corrected poses, descriptors, anchor-local
- * landmarks). A loaded map is the reference the live session relocalizes
- * INTO: CORR resets, the first verified closure registers the two frames,
- * then the graph heals as usual. Return the keyframe count; 0 on failure /
- * bad or absent file. This is the substrate for the fog map service and
- * cross-session persistence. */
-int xr_map_save(const char *path);
-int xr_map_load(const char *path);
+/* NOTE — cloud-map persistence (save/load of the anchored graph) is the
+ * NEXT phase, not here yet. Doing it safely needs SUBMAPS: a loaded map
+ * must be an immutable reference; landmark ids namespaced per session
+ * (Basalt's ids restart and would collide); the live session kept in its
+ * own submap and only REGISTERED against the reference (a single
+ * T_ref<-live transform), never chain-deformed into it. Building it before
+ * that corrupts the reference on the first cross-session match. */
 
 /* Live session correction D (q wxyz, p): session_pose = D ∘ odom_pose,
  * session_point = R(D)·p_odom + p(D). Identity until the first VERIFIED

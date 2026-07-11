@@ -255,16 +255,30 @@ to our visual-inertial stack — three frames, three owners:
      GNSS-fusion mode). A **confirmed-recovery lifecycle** (healthy → lost
      on a shake → relocalizing → recovered) keeps storage frozen until a
      closure is verified, not on a fixed timer. Basalt never sees any of it.
-3. **Global / cloud map — same format, fog side.** The anchored keyframe
-   graph *is* the cloud format: `xr_map_save`/`xr_map_load` persist and
-   restore it on-device (the substrate for cross-session persistence and
-   the fog map service; the WebSocket `keyframe`/`landmarks` payloads are
-   the same struct). A loaded map is the reference the live session
-   relocalizes INTO — the first verified closure **registers** the two
-   frames (`T_global←session`) and the graph heals as usual. Fog-side
-   long-term map building and full session↔cloud co-optimization
-   (small_gicp, MIT, the natural registration library) remain the pending
-   work package; on-device save/load/register exists now.
+3. **Global / cloud map — same format, fog side (NEXT PHASE, not built).**
+   The anchored keyframe graph is intended to *be* the cloud format (the
+   WebSocket `keyframe`/`landmarks` payloads are the same struct). But
+   persistence and cross-session localization require **submaps** first,
+   and doing it naively corrupts the reference map — so it is deliberately
+   deferred until the same-session loop closure is proven. The required
+   design:
+   - a **loaded map is an immutable reference submap**; the live session is
+     its own submap with its own Basalt odom frame and **namespaced
+     landmark ids** (Basalt restarts its id counter each session — raw ids
+     collide);
+   - the two are joined by a single **registration edge**
+     `T_reference←live` from a verified match, *not* by chain-deforming the
+     reference (which the same-session `graph_deform` would otherwise do —
+     wrong across frames);
+   - a recovery **give-up** starts a *new* submap rather than extending the
+     established one, so an unregistered odom frame never contaminates it;
+   - the on-disk format needs explicit field encoding, a calib/model/version
+     hash, a session/submap UUID, the odometry + loop edges (the current
+     chain-warp stores no reusable graph), and a checksum — raw `fwrite` of
+     the struct is not portable or safe for cloud-provided data.
+   Fog-side long-term map building and session↔cloud co-optimization
+   (small_gicp, MIT) sit on top of that. None of it exists yet; the
+   same-session layer above is what is implemented.
 
 Borrowed from GLIM/koide3's CPU playbook: the module split itself, bounded
 incremental containers instead of grow-forever structures, keyframe
