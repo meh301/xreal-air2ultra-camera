@@ -875,15 +875,20 @@ void xr_map_set_geom(int (*unproject)(float, float, float[3]),
 static int pnp2_inliers(const float (*s)[3], const float (*P)[3], int n,
                         float yaw, const float C[3]) {
     float cy = cosf(yaw), sy = sinf(yaw);
+    /* squared bearing test: dot/|q| > TOL  <=>  dot>0 && dot^2 > TOL^2*|q|^2
+     * (|r|=1). Exact same result as the divide, minus a sqrt + a division
+     * per point — this is the RANSAC inner loop, called VER_ITERS x n. */
+    const float tol2 = VER_COS_TOL * VER_COS_TOL;
+    const float minr2 = VER_MIN_RANGE_M * VER_MIN_RANGE_M;
     int cnt = 0;
     for (int m = 0; m < n; m++) {
         float qx = P[m][0] - C[0], qy = P[m][1] - C[1], qz = P[m][2] - C[2];
-        float nq = sqrtf(qx * qx + qy * qy + qz * qz);
-        if (nq < VER_MIN_RANGE_M) continue;
+        float nq2 = qx * qx + qy * qy + qz * qz;
+        if (nq2 < minr2) continue;
         float rx = cy * s[m][0] - sy * s[m][1];
         float ry = sy * s[m][0] + cy * s[m][1];
-        float dot = (qx * rx + qy * ry + qz * s[m][2]) / nq;
-        if (dot > VER_COS_TOL) cnt++;
+        float raw = qx * rx + qy * ry + qz * s[m][2];
+        if (raw > 0 && raw * raw > tol2 * nq2) cnt++;
     }
     return cnt;
 }
