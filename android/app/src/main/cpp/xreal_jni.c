@@ -471,6 +471,13 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
         S.pair_ts = t_exp;
         pthread_cond_signal(&S.slam_cond);
         pthread_mutex_unlock(&S.slam_lock);
+
+        /* consume the pair: require one FRESH frame from EACH camera before
+         * the next submission. Without this the flags stay set and every
+         * subsequent single frame re-emits a pair — 60/s instead of 30, half
+         * of them pairing a new image with a 33 ms-stale partner, which
+         * corrupts Basalt's stereo and doubles all downstream work. */
+        S.have[0] = S.have[1] = 0;
     }
 }
 
