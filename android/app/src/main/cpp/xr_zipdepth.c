@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/system_properties.h>
 
@@ -61,25 +62,40 @@ static void zd_append_ep(OrtSessionOptions *opts) {
 
     OrtStatus *st = NULL;
     if (qcom) {
-        /* Point backend_path at OUR bundled libQnnHtp.so via its ABSOLUTE path
-         * (the app's native-lib dir, found by dladdr on our own code). The bare
-         * name let the device's VENDOR QNN libs load instead, whose version
-         * mismatches ORT's QNN EP -> QnnDevice_create fails INVALID_CONFIG. The
-         * whole matched QNN 2.33 set (system/prepare/skels) lives in that dir. */
-        char backend[512] = "libQnnHtp.so";
+        /* Our native-lib dir (dladdr on our own code) -- the extracted
+         * /data/app/.../lib/arm64 that holds libQnnHtp + the V*Skel libs. */
+        char libdir[512] = {0};
         Dl_info info;
         if (dladdr((void *)zd_append_ep, &info) && info.dli_fname) {
             const char *slash = strrchr(info.dli_fname, '/');
-            if (slash)
-                snprintf(backend, sizeof backend, "%.*s/libQnnHtp.so",
-                         (int)(slash - info.dli_fname), info.dli_fname);
+            if (slash) snprintf(libdir, sizeof libdir, "%.*s",
+                                (int)(slash - info.dli_fname), info.dli_fname);
         }
-        /* skip_qnn_version_check: tolerate a minor QNN API delta between ORT's
-         * EP and the loaded backend. The soc/board is logged so we can see the
-         * exact Hexagon arch if device creation still rejects the config. */
-        const char *k[] = { "backend_path", "skip_qnn_version_check" };
-        const char *v[] = { backend, "1" };
-        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 2);
+        /* THE fix for QnnDevice_create INVALID_CONFIG: FastRPC loads the HTP
+         * skel (libQnnHtpV68Skel.so) onto the Hexagon by searching
+         * ADSP_LIBRARY_PATH, whose default (/vendor/lib/rfsa/adsp, /dsp) does
+         * NOT include the app dir -- so the skel is never found and device
+         * creation fails. Prepend our lib dir (Qualcomm's ';' separator) before
+         * CreateSession, which is when the stub asks FastRPC for the skel. */
+        if (libdir[0]) {
+            const char *existing = getenv("ADSP_LIBRARY_PATH");
+            char adsp[1024];
+            if (existing && existing[0])
+                snprintf(adsp, sizeof adsp, "%s;%s", libdir, existing);
+            else
+                snprintf(adsp, sizeof adsp, "%s", libdir);
+            setenv("ADSP_LIBRARY_PATH", adsp, 1);
+            LOGI("ZipDepth: ADSP_LIBRARY_PATH=%s", adsp);
+        }
+        /* Absolute backend path (our bundled matched-2.33 libQnnHtp.so). Keep
+         * the provider options MINIMAL -- skip_qnn_version_check isn't in ORT
+         * 1.22's QNN provider and can fail registration. */
+        char backend[560];
+        if (libdir[0]) snprintf(backend, sizeof backend, "%s/libQnnHtp.so", libdir);
+        else snprintf(backend, sizeof backend, "libQnnHtp.so");
+        const char *k[] = { "backend_path" };
+        const char *v[] = { backend };
+        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 1);
         if (!st) {
             LOGI("ZipDepth: QNN (Hexagon HTP) EP [soc='%s' board='%s'] %s",
                  soc, board, backend);
