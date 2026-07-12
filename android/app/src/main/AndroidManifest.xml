@@ -44,6 +44,19 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </activity>
+
+        <!-- QNN NPU/GPU access (Snapdragon). API 31+ hides vendor native libs
+             from apps unless explicitly requested; these are listed in the
+             device's /vendor/etc/public.libraries.txt, so this loads the REAL
+             /vendor/lib64 copies (with their Binder/DSP-service and SELinux
+             access intact) when QNN's libQnnHtp/libQnnGpu dlopen them. The
+             correct, portable path instead of bundling the firmware libs into
+             the APK. Ignored on API below 31 and on non-Qualcomm devices
+             (required=false). libcdsprpc = FastRPC client for the Hexagon HTP;
+             libOpenCL = the Adreno GPU backend. -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+        <uses-native-library android:name="libadsprpc.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
     </application>
 
 </manifest>
