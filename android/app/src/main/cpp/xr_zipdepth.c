@@ -178,13 +178,20 @@ static int zd_try_init(const char *model_path) {
          * NPU or fail -> the honest "it's on the NPU" signal), (2) HTP allowing a
          * few boundary quantize/dequantize nodes on the CPU (heavy compute still
          * on the NPU), (3) the Adreno GPU as a last resort. */
+        /* offload_graph_io_quantization=0: keep the input Quantize / output
+         * Dequantize on the NPU too (QNN's default offloads them to the CPU),
+         * so the WHOLE graph is on the Hexagon -> the strict attempt can pass. */
+        const char *kf[] = { "backend_path", "soc_model", "htp_arch",
+                             "htp_graph_finalization_optimization_mode",
+                             "offload_graph_io_quantization" };
+        const char *vf[] = { htp, "30", "68", "3", "0" };
         const char *kh[] = { "backend_path", "soc_model", "htp_arch",
                              "htp_graph_finalization_optimization_mode" };
         const char *vh[] = { htp, "30", "68", "3" };
         const char *kg[] = { "backend_path" };
         const char *vg[] = { gpu };
         LOGI("ZipDepth: QNN init [board='%s'] htp=%s gpu=%s", board, htp, gpu);
-        ok = zd_open(model_path, "QNN", kh, vh, 4, 1, "QNN HTP full (INT8)")
+        ok = zd_open(model_path, "QNN", kf, vf, 5, 1, "QNN HTP full (INT8)")
           || zd_open(model_path, "QNN", kh, vh, 4, 0, "QNN HTP +cpu-boundary (INT8)")
           || zd_open(model_path, "QNN", kg, vg, 1, 1, "QNN GPU (Adreno)");
         if (!ok)
