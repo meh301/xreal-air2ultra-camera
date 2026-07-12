@@ -110,6 +110,14 @@ enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
 #define LOOP_SEARCH_LOST_BAD_NS      150000000ull
 #define LOOP_SEARCH_LOST_XFEAT_NS    250000000ull
 #define RELOC_TOPK 3                   /* candidate clusters verified when relocalizing (repetitive scenes hand raw scoring to the wrong keyframe) */
+/* HEALTHY loop-detection coarse gate: only full-match keyframes whose
+ * SESSION position is within this radius of the corrected pose (a revisit
+ * is where you physically are). A FULL sweep every Nth healthy search
+ * still catches a large-residual-drift loop the gate would miss. LOST
+ * recovery ignores the gate (recall must not regress). This cuts the
+ * dominant per-search matching from O(all keyframes) toward O(local). */
+#define SHORTLIST_R_M 10.0f
+#define FULL_SWEEP_EVERY 8
 /* displayed keyframe-derived cloud cap — a generous safety ceiling, not a
  * budget: the map is really bounded by the 200-keyframe rolling cap, and
  * drawing points is cheap (GL_POINTS, ~linear). This shows essentially the
@@ -1405,7 +1413,30 @@ static void process_keyframe(void) {
      * scene can hand raw scoring to the wrong keyframe, so several clusters
      * each get a geometric try and the strongest wins. */
     int K = relocalizing ? RELOC_TOPK : 1;
+    /* coarse spatial gate for HEALTHY loop-detection (skipped when
+     * relocalizing — LOST always full-scans). Every FULL_SWEEP_EVERY-th
+     * healthy search is a full sweep so a large-drift loop outside the gate
+     * is still caught within ~a couple seconds. CORR is the map frame and
+     * is written only by this (map) thread, so reading it lock-free here is
+     * safe. */
+    static int healthy_search_n;
+    int gate = 0;
+    float wsp[3] = { 0, 0, 0 };
+    if (!relocalizing) {
+        int sweep = (++healthy_search_n % FULL_SWEEP_EVERY) == 0;
+        gate = !sweep;
+        if (gate) {
+            qrotv(CORR.q, work.p, wsp);
+            wsp[0] += CORR.p[0]; wsp[1] += CORR.p[1]; wsp[2] += CORR.p[2];
+        }
+    }
     for (int i = 0; i < lim; i++) {
+        if (gate) {
+            float gx = wsp[0] - KF[i].pc[0], gy = wsp[1] - KF[i].pc[1],
+                  gz = wsp[2] - KF[i].pc[2];
+            if (gx * gx + gy * gy + gz * gz > SHORTLIST_R_M * SHORTLIST_R_M)
+                continue;
+        }
         int m = match_count(&work, &KF[i]);
         if (m > raw_best_m) { raw_best_m = m; raw_best_i = i; }
         if (m < CAND_MIN_MATCHES) continue;
