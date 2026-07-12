@@ -46,6 +46,18 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            // QNN's HTP loads its DSP skel (libQnnHtpV*Skel.so) onto the
+            // Hexagon via FastRPC, which needs a REAL filesystem path. With the
+            // modern default (extractNativeLibs=false) the libs are page-mapped
+            // inside base.apk and the DSP can't read `base.apk!/...`, so
+            // QnnDevice_create fails INVALID_CONFIG. Extract them for the qnn
+            // build so libQnnHtp + the skels land at /data/app/.../lib/arm64/.
+            useLegacyPackaging = qnnBuild
+        }
+    }
+
     // The 2.7 MB XFeat model lives outside main/ so the lean build (no ONNX
     // Runtime to run it) doesn't ship it; the full build pulls it back in.
     // Kotlin already treats a missing model as "BAD/TEBLID only".
