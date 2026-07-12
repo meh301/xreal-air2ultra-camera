@@ -57,7 +57,13 @@ static struct {
     pthread_cond_t cond;
     uint8_t in[2][XR_OW * XR_OH];    /* newest cleaned raw pair, left then right */
     int full;                        /* a new pair is waiting */
+    unsigned gen;                    /* DEPTH_GEN stamp of this pair */
 } DEPTH_BOX;
+/* Bumped whenever depth is toggled; each queued pair is stamped with it, and a
+ * finished SGM job is only published if the stamp is still current (and depth
+ * still on) — so an in-flight job started before a disable can't repaint the
+ * depth output after it. */
+static atomic_uint DEPTH_GEN;
 
 /* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS). The IMU
  * pose was signed off on-device with the ground-truth remap; Basalt now
@@ -88,7 +94,9 @@ static struct {
     uint32_t pair_seq;
     uint64_t pair_ts, slam_prev_ts;
     xr_track track;
-    int stereo_ready;
+    /* release-published by the SLAM thread once ST + eye_calib are built;
+     * acquire-loaded by the depth worker (so it also sees eye_calib) and JNI */
+    atomic_int stereo_ready;
     atomic_int depth_on;
     atomic_int show_pts;
     uint8_t slam_in[2][XR_OW * XR_OH];      /* worker's copy of clean_raw */
@@ -877,7 +885,7 @@ static void *slam_worker(void *arg) {
         uint64_t ts = S.pair_ts;
         pthread_mutex_unlock(&S.slam_lock);
 
-        if (!S.stereo_ready) {
+        if (!atomic_load_explicit(&S.stereo_ready, memory_order_acquire)) {
             if (!atomic_load(&S.align_have)) continue;
             float bx = S.eye_calib[1].p_cam[0] - S.eye_calib[0].p_cam[0];
             float by = S.eye_calib[1].p_cam[1] - S.eye_calib[0].p_cam[1];
@@ -887,7 +895,8 @@ static void *slam_worker(void *arg) {
                            S.eye_calib[0].p_cam, S.eye_calib[1].p_cam,
                            atomic_load(&S.align_variant));
             xr_track_reset(&S.track);
-            S.stereo_ready = 1;
+            /* release: publishes ST + eye_calib to the depth worker + JNI */
+            atomic_store_explicit(&S.stereo_ready, 1, memory_order_release);
             xr_gles_set_rect(ST.R_rect_imu, ST.f_rect,
                              (XS_W - 1) * 0.5f, (XS_H - 1) * 0.5f);
             LOGI("stereo rectification ready: baseline %.1f cm, f_rect %.0f px",
@@ -1185,6 +1194,7 @@ static void *slam_worker(void *arg) {
             pthread_mutex_lock(&DEPTH_BOX.lock);
             memcpy(DEPTH_BOX.in[0], S.slam_in[0], sizeof DEPTH_BOX.in[0]);
             memcpy(DEPTH_BOX.in[1], S.slam_in[1], sizeof DEPTH_BOX.in[1]);
+            DEPTH_BOX.gen = atomic_load(&DEPTH_GEN);
             DEPTH_BOX.full = 1;
             pthread_cond_signal(&DEPTH_BOX.cond);
             pthread_mutex_unlock(&DEPTH_BOX.lock);
@@ -1220,10 +1230,12 @@ static void *depth_worker(void *arg) {
         }
         memcpy(in0, DEPTH_BOX.in[0], sizeof in0);    /* take the latest pair */
         memcpy(in1, DEPTH_BOX.in[1], sizeof in1);
+        unsigned job_gen = DEPTH_BOX.gen;            /* stamp of this job */
         DEPTH_BOX.full = 0;
         pthread_mutex_unlock(&DEPTH_BOX.lock);
 
-        if (!S.stereo_ready) continue;               /* calib not built yet */
+        if (!atomic_load_explicit(&S.stereo_ready, memory_order_acquire))
+            continue;                                /* calib not built yet */
         if (!st) {
             st = malloc(sizeof *st);
             if (!st) { LOGE("depth: out of memory — depth disabled"); continue; }
@@ -1237,6 +1249,10 @@ static void *depth_worker(void *arg) {
         xr_stereo_depth(st, disp_local);
         float depth_ms = (float)(now_ms() - t0);
         atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
+        /* a disable (or re-enable) during this SGM pass cancels it: don't
+         * repaint the depth output with a now-stale frame */
+        if (job_gen != atomic_load(&DEPTH_GEN) || !atomic_load(&S.depth_on))
+            continue;
         pthread_mutex_lock(&S.lock);
         memcpy(S.disp, disp_local, sizeof S.disp);
         S.depth_ms = depth_ms;
@@ -1265,7 +1281,7 @@ static void slam_start(void) {
     if (atomic_load(&S.slam_running)) return;
     S.pair_seq = 0;
     S.slam_prev_ts = 0;
-    S.stereo_ready = 0;              /* rebuild with whatever calib arrives */
+    atomic_store(&S.stereo_ready, 0);  /* rebuild with whatever calib arrives */
     S.pts_n = 0;
     S.track_count = 0;
     S.depth_ms = 0;
@@ -1935,7 +1951,18 @@ JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetDepth(JNIEnv *env, jclass cls,
                                                         jboolean on) {
     (void)env; (void)cls;
-    atomic_store(&S.depth_on, on ? 1 : 0);
+    int en = on ? 1 : 0;
+    atomic_store(&S.depth_on, en);
+    atomic_fetch_add(&DEPTH_GEN, 1);       /* cancel any in-flight / queued job */
+    if (!en) {
+        pthread_mutex_lock(&DEPTH_BOX.lock);
+        DEPTH_BOX.full = 0;                 /* drop the pending pair */
+        pthread_mutex_unlock(&DEPTH_BOX.lock);
+        pthread_mutex_lock(&S.lock);
+        memset(S.disp, 0, sizeof S.disp);   /* blank the depth output now */
+        S.depth_ms = 0;
+        pthread_mutex_unlock(&S.lock);
+    }
 }
 
 /* Glasses eye-view mode: 0 = camera passthrough, 1 = depth passthrough
@@ -2079,7 +2106,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabPose(JNIEnv *env, jclass cls,
         pthread_mutex_unlock(&S.imu_lock);
     }
     uint32_t flags = (atomic_load(&S.depth_on) ? 1u : 0u) |
-                     (S.stereo_ready ? 2u : 0u) |
+                     (atomic_load_explicit(&S.stereo_ready,
+                                           memory_order_acquire) ? 2u : 0u) |
                      (has_q ? 4u : 0u) |
                      (basalt ? 8u : 0u) |
                      (((uint32_t)xr_map_recovery_state() & 3u) << 4); /* 0 trk, 1 lost, 2 recovered */

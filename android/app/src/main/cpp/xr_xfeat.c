@@ -25,7 +25,9 @@ static struct {
     OrtMemoryInfo *meminfo;
     char in_name[64];
     char out_names[3][64];   /* keypoints, descriptors, scores */
-    int ready;
+    atomic_int ready;        /* release-published once the session is usable;
+                              * acquire-loaded by availability/extraction (UI +
+                              * map threads) so they see the whole session */
     float input[3 * IMG_H * IMG_W];
 } X;
 
@@ -89,7 +91,7 @@ static int xfeat_try_init(const char *model_path) {
         strncpy(X.out_names[i], name, sizeof X.out_names[i] - 1);
         alloc->Free(alloc, name);
     }
-    X.ready = 1;
+    atomic_store_explicit(&X.ready, 1, memory_order_release);
     LOGI("XFeat ready: %s (in=%s outs=%s,%s,%s)", model_path, X.in_name,
          X.out_names[0], X.out_names[1], X.out_names[2]);
     return 1;
@@ -99,7 +101,7 @@ static int xfeat_try_init(const char *model_path) {
  * until X.ready flips. A failed attempt is retryable (not a permanent
  * one-shot — the model may simply not have been staged yet). */
 int xr_xfeat_init(const char *model_path) {
-    if (X.ready) return 1;
+    if (atomic_load_explicit(&X.ready, memory_order_acquire)) return 1;
     static atomic_int busy;
     if (atomic_exchange(&busy, 1)) return 0;
     int ok = xfeat_try_init(model_path);
@@ -108,12 +110,12 @@ int xr_xfeat_init(const char *model_path) {
 }
 
 int xr_xfeat_available(void) {
-    return X.ready;
+    return atomic_load_explicit(&X.ready, memory_order_acquire);
 }
 
 int xr_xfeat_extract(const uint8_t *img, float (*uv)[2],
                      int8_t (*desc)[64], int max) {
-    if (!X.ready) return -1;
+    if (!atomic_load_explicit(&X.ready, memory_order_acquire)) return -1;
 
     /* gray u8 -> float, replicated to 3 channels (raw 0..255 range) */
     const int plane = IMG_H * IMG_W;
