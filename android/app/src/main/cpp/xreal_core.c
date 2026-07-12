@@ -100,6 +100,8 @@ void xr_equalize(const uint8_t *in, uint8_t *out, int n) {
 
 static float g_f[XR_OW * XR_OH];   /* shared scratch: single-thread use only */
 static float g_hp[XR_OW * XR_OH];
+static float g_cp[(XR_OH + 1) * XR_OW];  /* column-prefix scratch for the
+                                          * cache-friendly vertical high-pass */
 
 static float select_kth(float *a, int n, int k) {
     /* Hoare quickselect; a is scratch and gets reordered */
@@ -162,16 +164,30 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
         for (int x = 0; x < XR_OW; x++) row[x] -= c->stripe[x];
     }
 
-    /* vertical high-pass, per-frame row median subtraction */
-    for (int x = 0; x < XR_OW; x++) {
-        pref[0] = 0;
-        for (int y = 0; y < XR_OH; y++) pref[y + 1] = pref[y] + g_f[y * XR_OW + x];
-        for (int y = 0; y < XR_OH; y++) {
-            int lo = y - R < 0 ? 0 : y - R;
-            int hi = y + R > XR_OH - 1 ? XR_OH - 1 : y + R;
-            g_hp[y * XR_OW + x] = g_f[y * XR_OW + x] -
-                                  (pref[hi + 1] - pref[lo]) / (float)(hi - lo + 1);
-        }
+    /* vertical high-pass. The naive form loops columns-outer and strides down
+     * each column of g_f (1920-byte step -> a cache miss per access, every
+     * frame). Reformulated as two ROW-sequential passes over a full
+     * column-prefix buffer g_cp: g_cp[y+1][x] = g_cp[y][x] + g_f[y][x], then
+     * the windowed box-sum reads two whole prefix rows (g_cp[hi+1], g_cp[lo]).
+     * The per-column accumulation order in y is unchanged, so the result is
+     * bit-identical to the old loop. */
+    for (int x = 0; x < XR_OW; x++) g_cp[x] = 0.0f;          /* prefix row 0 */
+    for (int y = 0; y < XR_OH; y++) {
+        const float *row = g_f + (size_t)y * XR_OW;
+        const float *pp = g_cp + (size_t)y * XR_OW;          /* g_cp[y]   */
+        float *pc = g_cp + (size_t)(y + 1) * XR_OW;          /* g_cp[y+1] */
+        for (int x = 0; x < XR_OW; x++) pc[x] = pp[x] + row[x];
+    }
+    for (int y = 0; y < XR_OH; y++) {
+        int lo = y - R < 0 ? 0 : y - R;
+        int hi = y + R > XR_OH - 1 ? XR_OH - 1 : y + R;
+        const float *plo = g_cp + (size_t)lo * XR_OW;
+        const float *phi = g_cp + (size_t)(hi + 1) * XR_OW;
+        const float *row = g_f + (size_t)y * XR_OW;
+        float *hp = g_hp + (size_t)y * XR_OW;
+        float denom = (float)(hi - lo + 1);
+        for (int x = 0; x < XR_OW; x++)
+            hp[x] = row[x] - (phi[x] - plo[x]) / denom;
     }
     for (int y = 0; y < XR_OH; y++) {
         memcpy(buf, g_hp + y * XR_OW, XR_OW * sizeof(float));
