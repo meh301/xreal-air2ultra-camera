@@ -38,6 +38,15 @@
 #define MAX_W (2 * XR_W)     /* scrambled view: 1280x480 */
 #define MAX_H XR_OH          /* clean view:      960x640 */
 
+/* Telemetry counters (see nativeSlamPerf): stereo frames dropped because the
+ * two eyes came from different hardware pairs, and depth-worker busy time as a
+ * fraction of wall time. File scope so the frame path can touch them without
+ * the S lock. */
+static atomic_uint PAIR_DROPS;
+static atomic_uint DEPTH_BUSY_US;    /* accumulated depth compute microseconds;
+                                      * the reader divides by its own measured
+                                      * wall interval to get the duty cycle */
+
 /* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS). The IMU
  * pose was signed off on-device with the ground-truth remap; Basalt now
  * receives frames, extrinsics and inertial data in one consistent frame. */
@@ -458,6 +467,7 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
     if (S.have[0] && S.have[1] && S.cam_ctr[0] != S.cam_ctr[1]) {
         if ((int8_t)(S.cam_ctr[0] - S.cam_ctr[1]) > 0) S.have[1] = 0;
         else S.have[0] = 0;
+        atomic_fetch_add(&PAIR_DROPS, 1);   /* telemetry: mispaired frames */
     }
 
     if (S.have[0] && S.have[1]) {
@@ -1145,6 +1155,7 @@ static void *slam_worker(void *arg) {
                 xr_stereo_depth(&ST, disp_local);
                 float depth_ms = (float)(now_ms() - t0);
                 depth_stride = depth_ms > 13.0f ? 2 : 1;
+                atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
                 pthread_mutex_lock(&S.lock);
                 memcpy(S.disp, disp_local, sizeof S.disp);
                 S.depth_ms = depth_ms;
@@ -1786,6 +1797,44 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabMap(JNIEnv *env, jclass cls,
     uint32_t un = (uint32_t)n;
     memcpy(dst, &un, 4);
     return n;
+}
+
+/* Fill `out` with pipeline telemetry for the health line:
+ *   [0] keyframes match-scored in the last loop search
+ *   [1] candidate clusters geometrically verified
+ *   [2] match + PnP microseconds (lock-free phase)
+ *   [3] write-phase MAP_LOCK wait microseconds
+ *   [4] cumulative stereo pair-drops (mispaired eyes)
+ *   [5] depth duty cycle in per-mille since the previous call
+ * Cheap enough to call from the existing 10 s health tick. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSlamPerf(JNIEnv *env, jclass cls,
+                                                        jintArray out) {
+    (void)cls;
+    if (!out || (*env)->GetArrayLength(env, out) < 6) return;
+    int searched = 0, candidates = 0, match_us = 0, lock_us = 0;
+    xr_map_perf(&searched, &candidates, &match_us, &lock_us);
+
+    /* depth duty = compute microseconds accrued / wall microseconds elapsed
+     * since the last read; both measured here so no producer-side wall clock
+     * is needed. */
+    static int64_t last_wall_us;
+    static unsigned last_busy_us;
+    int64_t wall = now_mono_ns() / 1000;
+    unsigned busy = atomic_load(&DEPTH_BUSY_US);
+    int duty = 0;
+    if (last_wall_us && wall > last_wall_us) {
+        int64_t dw = wall - last_wall_us;
+        unsigned db = busy - last_busy_us;            /* wrap-safe delta */
+        duty = (int)((int64_t)db * 1000 / dw);
+        if (duty > 1000) duty = 1000;
+    }
+    last_wall_us = wall;
+    last_busy_us = busy;
+
+    jint vals[6] = { searched, candidates, match_us, lock_us,
+                     (jint)atomic_load(&PAIR_DROPS), duty };
+    (*env)->SetIntArrayRegion(env, out, 0, 6, vals);
 }
 
 /* Show/hide the tracked features (phone pane dots + glasses overlay). */

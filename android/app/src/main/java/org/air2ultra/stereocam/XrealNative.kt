@@ -97,6 +97,13 @@ object XrealNative {
     external fun nativeGrabMap(buf: ByteBuffer): Int
 
     /**
+     * Fill [out] (length >= 6) with loop-search / pipeline telemetry:
+     * [searched-kf, verified-candidates, match+PnP us, lock-wait us,
+     * cumulative stereo pair-drops, depth duty per-mille]. For the health log.
+     */
+    external fun nativeSlamPerf(out: IntArray)
+
+    /**
      * true: glasses in per-eye stereo display mode with the calibrated
      * world-aligned warp; false: mirror display mode showing the plain
      * side-by-side framebuffer. Switches the display over the MCU channel.

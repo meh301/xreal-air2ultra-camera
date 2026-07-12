@@ -131,6 +131,7 @@ class MainActivity : Activity() {
     private val mapBuffer: ByteBuffer =            // 8192 landmarks max
         ByteBuffer.allocateDirect(4 + 8192 * 12).order(ByteOrder.nativeOrder())
     private val mapPoints = FloatArray(8192 * 3)
+    private val slamPerf = IntArray(6)            // loop-search telemetry
     private var lastHealthLog = 0L
     private var thermalMark = ""
     private val handler = Handler(Looper.getMainLooper())
@@ -170,9 +171,13 @@ class MainActivity : Activity() {
                     thermalMark = if (thermal >= android.os.PowerManager.THERMAL_STATUS_MODERATE)
                         " [hot:$thermal]" else ""
                 }
+                XrealNative.nativeSlamPerf(slamPerf)
                 android.util.Log.i("xrealcam",
                     "health: nativeHeap=${heapMb}MB thermal=$thermal " +
-                    "(0=none 1=light 2=moderate 3=severe)")
+                    "(0=none 1=light 2=moderate 3=severe) | " +
+                    "search: ${slamPerf[0]}kf ${slamPerf[1]}cand " +
+                    "${slamPerf[2]}us match ${slamPerf[3]}us lock | " +
+                    "pairDrops=${slamPerf[4]} depthDuty=${slamPerf[5] / 10.0}%")
             }
 
             // accumulated landmark cloud for the 3D map view

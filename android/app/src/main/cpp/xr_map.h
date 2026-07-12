@@ -103,6 +103,11 @@ int xr_map_loop_stats(int *count, float pos[3], int *matches);
  * 4 alignment good but beyond the snap caps, 5 applied. */
 int xr_map_verify_stats(int *pairs, int *inliers);
 
+/* Last loop-search cost for the health line: keyframes match-scored,
+ * candidate clusters verified, match+PnP microseconds, lock-wait microseconds.
+ * Any out pointer may be NULL. */
+void xr_map_perf(int *searched, int *candidates, int *match_us, int *lock_us);
+
 /* The most recent match's keyframe landmarks (SESSION-frame world xyz,
  * n x 3 floats — stored coords through the matched node's correction) —
  * the AR loop/reloc flash. Returns the count copied (<= max). Their

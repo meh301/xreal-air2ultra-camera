@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <android/log.h>
@@ -225,6 +226,24 @@ static int CLOUD_DIRTY;
  * without taking the lock when nothing changed, so the VIO- and UI-rate
  * pollers stop copying an unchanged 96 KB cloud under MAP_LOCK. */
 static atomic_uint CLOUD_GEN;
+
+/* Loop-search telemetry (written under MAP_LOCK in the write phase, read by
+ * xr_map_perf). Tells us how well the spatial gate prunes and where the map
+ * thread spends its budget: how many keyframes were actually match-scored,
+ * how long the lock-free match+PnP took, and how long the brief write phase
+ * then waited for the lock the VIO worker also holds. */
+static struct {
+    int searched;         /* keyframes match_count'd in the last search */
+    int candidates;       /* clusters that reached geometric verification */
+    unsigned match_us;    /* lock-free match + top-K PnP wall time */
+    unsigned lock_us;     /* write-phase wait for MAP_LOCK */
+} PERF;
+
+static inline uint64_t map_mono_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
 
 static void *xfeat_preload_thread(void *arg) {
     (void)arg;
@@ -588,6 +607,16 @@ int xr_map_verify_stats(int *pairs, int *inliers) {
     int out = VER_LAST.outcome;
     pthread_mutex_unlock(&MAP_LOCK);
     return out;
+}
+
+/* Last loop-search cost: keyframes match-scored, clusters verified, match+PnP
+ * microseconds, and write-phase lock wait. For the health line / benchmarking;
+ * fields are plain ints written under the lock, so a torn read is harmless. */
+void xr_map_perf(int *searched, int *candidates, int *match_us, int *lock_us) {
+    if (searched) *searched = PERF.searched;
+    if (candidates) *candidates = PERF.candidates;
+    if (match_us) *match_us = (int)PERF.match_us;
+    if (lock_us) *lock_us = (int)PERF.lock_us;
 }
 
 int xr_map_loop_stats(int *count, float pos[3], int *matches) {
@@ -1450,9 +1479,12 @@ static void process_keyframe(void) {
     int raw_best_m = 0, raw_best_i = -1;
     int best_i = -1, best_m = 0, best_n3 = 0, best_nin = 0, best_covis = 0;
     int any_pairs = 0;
+    int searched = 0;                  /* keyframes actually match-scored */
+    unsigned match_us = 0;             /* telemetry: match+PnP wall time */
     float bDq[4], bDp[3];
     if (do_search) {
     did_search = 1;
+    uint64_t t_match0 = map_mono_us();
     /* mapping skips the freshest keyframes (trivial self-matches); a
      * relocalization query (stationary, or LOST) searches EVERYTHING —
      * the pre-loss keyframes are the best recovery anchors */
@@ -1491,6 +1523,7 @@ static void process_keyframe(void) {
             if (gx * gx + gy * gy + gz * gz > SHORTLIST_R_M * SHORTLIST_R_M)
                 continue;
         }
+        searched++;
         int m = match_count(&work, &KF[i]);
         if (m > raw_best_m) { raw_best_m = m; raw_best_i = i; }
         if (m < CAND_MIN_MATCHES) continue;
@@ -1542,13 +1575,16 @@ static void process_keyframe(void) {
             memcpy(bDp, cDp, sizeof bDp);
         }
     }
+    match_us = (unsigned)(map_mono_us() - t_match0);
     }   /* end LOCK-FREE candidate search */
 
     /* ---- write / publish: LOCKED, but BRIEF (no match, no PnP). The VIO
      * worker's fast-path calls (offer / get_correction / get_cloud) now
      * contend only with this, never the heavy search — the priority
      * inversion is gone. */
+    uint64_t t_lock0 = map_mono_us();
     pthread_mutex_lock(&MAP_LOCK);
+    unsigned lock_us = (unsigned)(map_mono_us() - t_lock0);
     if (atomic_load(&RESET_GEN) != rgen0) {
         /* reset / descriptor switch happened while we processed this
          * (pre-change) offer: abandon it ENTIRELY — no stale correction,
@@ -1557,6 +1593,12 @@ static void process_keyframe(void) {
          * repopulate the freshly-cleared map. */
         pthread_mutex_unlock(&MAP_LOCK);
         return;
+    }
+    if (did_search) {
+        PERF.searched = searched;
+        PERF.candidates = ncand;
+        PERF.match_us = match_us;
+        PERF.lock_us = lock_us;
     }
     memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
     memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
