@@ -100,6 +100,10 @@ static int zd_try_init(const char *model_path) {
     OrtSessionOptions *opts = NULL;
     if (!ort_ok(Z.api->CreateSessionOptions(&opts), "CreateSessionOptions"))
         return 0;
+    /* Cap CPU-fallback threads so a device without the QNN EP doesn't spawn
+     * inference threads across every core and starve the UVC / SLAM / render
+     * pipeline (the QNN EP runs on the HTP and ignores this). */
+    ort_ok(Z.api->SetIntraOpNumThreads(opts, 2), "SetIntraOpNumThreads");
     zd_append_ep(opts);                       /* NPU EP or CPU */
     ort_ok(Z.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL),
            "SetGraphOpt");
