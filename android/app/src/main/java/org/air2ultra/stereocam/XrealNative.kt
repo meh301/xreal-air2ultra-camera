@@ -52,7 +52,10 @@ object XrealNative {
 
     /** Runtime descriptor selector: BAD/TEBLID (false) vs XFeat (true).
      *  Clears the keyframe map on a real change (types can't cross-match). */
-    external fun nativeSetUseXfeat(on: Boolean)
+    /** Returns the descriptor actually in effect afterwards: false = BAD/TEBLID,
+     *  true = XFeat. A request for XFeat is rejected (returns false) when ONNX
+     *  Runtime / the model isn't available. */
+    external fun nativeSetUseXfeat(on: Boolean): Boolean
 
     /** True when XFeat is actually loaded (model staged + ONNX Runtime). */
     external fun nativeXfeatReady(): Boolean

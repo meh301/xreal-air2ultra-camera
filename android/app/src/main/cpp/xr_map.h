@@ -34,7 +34,9 @@ void xr_map_set_model(const char *onnx_path);
 /* Runtime descriptor selector: 0 = mini-ORB (default), 1 = XFeat (needs
  * the model staged + ONNX Runtime present). Clears the keyframe store on
  * a real change since the two descriptor types cannot cross-match. */
-void xr_map_set_use_xfeat(int on);
+/* Returns the descriptor in effect afterwards (0 = BAD/TEBLID, 1 = XFeat);
+ * a request for XFeat is rejected (returns 0) when ORT/the model is absent. */
+int xr_map_set_use_xfeat(int on);
 
 /* 1 when XFeat is actually loaded and usable (model + ORT), else 0. */
 int xr_map_xfeat_ready(void);

@@ -333,14 +333,18 @@ class MainActivity : Activity() {
         }
         val descButton = findViewById<Button>(R.id.desc_mode)
         descButton.setOnClickListener {
-            // switch the session-map descriptor; clears the keyframe map
-            useXfeat = !useXfeat
-            XrealNative.nativeSetUseXfeat(useXfeat)
-            val label = if (!useXfeat) R.string.desc_bad
-                        else if (XrealNative.nativeXfeatReady()) R.string.desc_xfeat
-                        else R.string.desc_xfeat_na
-            descButton.text = getString(label)
-            poseMap.reset()
+            // switch the session-map descriptor; native clears the keyframe map
+            // and returns the descriptor ACTUALLY in effect — a request for
+            // XFeat is rejected (stays BAD) when ORT/the model is absent, so we
+            // reflect the real state instead of desyncing the label, and only
+            // reset the view when the map was actually cleared.
+            val prev = useXfeat
+            useXfeat = XrealNative.nativeSetUseXfeat(!useXfeat)
+            descButton.text = getString(
+                if (useXfeat) R.string.desc_xfeat
+                else if (!prev && !useXfeat) R.string.desc_xfeat_na  // asked, refused
+                else R.string.desc_bad)
+            if (useXfeat != prev) poseMap.reset()
         }
         val depButton = findViewById<Button>(R.id.toggle_depth)
         depButton.setOnClickListener {

@@ -301,18 +301,39 @@ int xr_map_recovery_state(void) {
 
 /* Switch the keyframe descriptor (0 = BAD/TEBLID, 1 = XFeat). BAD and
  * XFeat keyframes cannot match each other, so the store is cleared on a
- * real change — the map rebuilds with the selected descriptor. */
-void xr_map_set_use_xfeat(int on) {
+ * real change — the map rebuilds with the selected descriptor. Only ever
+ * called from the UI/JNI thread. Returns the descriptor actually in effect
+ * afterwards (0 = BAD/TEBLID, 1 = XFeat) so the UI can reflect a rejected
+ * switch instead of desyncing its label. */
+int xr_map_set_use_xfeat(int on) {
     int want = on ? 1 : 0;
-    if (atomic_exchange(&USE_XFEAT, want) == want) return;
+    if (atomic_load(&USE_XFEAT) == want) return want;   /* no change */
+    if (want) {
+        /* Load XFeat NOW, before committing the switch. If ONNX Runtime or the
+         * model isn't there — always the case in a lean build — reject the
+         * switch: don't wipe a working BAD/TEBLID map for a descriptor that
+         * would only fall back to BAD anyway. Loading here rather than lazily
+         * on the map thread also guarantees XFeat is ready before the first
+         * keyframe, so a half-loaded switch can't store BAD keyframes into an
+         * otherwise-XFeat map. */
+        if (!MODEL_PATH[0] || !xr_xfeat_init(MODEL_PATH)) {
+            LOGI("session map: XFeat unavailable — staying on BAD/TEBLID");
+            return 0;                          /* rejected: still BAD/TEBLID */
+        }
+    }
+    atomic_store(&USE_XFEAT, want);
     pthread_mutex_lock(&MAP_LOCK);
     KF_N = 0;
     atomic_store(&KF_COUNT_PUB, 0);
     atomic_fetch_add(&RESET_GEN, 1);       /* invalidate any in-flight search */
     LAST_STORE_NS = 0;
+    CLOUD.n = 0;                            /* the old-descriptor cloud is void */
+    CLOUD_DIRTY = 0;
+    atomic_fetch_add(&CLOUD_GEN, 1);       /* readers drop it; empty until rebuilt */
     pthread_mutex_unlock(&MAP_LOCK);
     LOGI("session map: descriptor -> %s (keyframes cleared, rebuilding)",
          want ? "XFeat" : "BAD/TEBLID");
+    return want;
 }
 
 /* Whether the XFeat model + ONNX Runtime are actually loaded (so the UI
@@ -610,13 +631,17 @@ int xr_map_verify_stats(int *pairs, int *inliers) {
 }
 
 /* Last loop-search cost: keyframes match-scored, clusters verified, match+PnP
- * microseconds, and write-phase lock wait. For the health line / benchmarking;
- * fields are plain ints written under the lock, so a torn read is harmless. */
+ * microseconds, and write-phase lock wait. For the health line / benchmarking.
+ * PERF is written by the map thread under MAP_LOCK; take the lock here too —
+ * a concurrent plain read/write is a data race regardless of whether a torn
+ * value would be "harmless", and this is polled only every ~10 s. */
 void xr_map_perf(int *searched, int *candidates, int *match_us, int *lock_us) {
+    pthread_mutex_lock(&MAP_LOCK);
     if (searched) *searched = PERF.searched;
     if (candidates) *candidates = PERF.candidates;
     if (match_us) *match_us = (int)PERF.match_us;
     if (lock_us) *lock_us = (int)PERF.lock_us;
+    pthread_mutex_unlock(&MAP_LOCK);
 }
 
 int xr_map_loop_stats(int *count, float pos[3], int *matches) {
@@ -1408,14 +1433,20 @@ static void process_keyframe(void) {
      * unrecoverable loss needs a reset for now (proper new-submap handling
      * is the pending same-session-submap work). */
     int shaking = atomic_load(&SHAKING);
-    int rstate = atomic_load(&REC_STATE);
+    int rstate_prev = atomic_load(&REC_STATE);
+    int rstate = rstate_prev;
     if (shaking && kfn >= REC_MIN_MAP) {
         rstate = REC_LOST;
     } else if (rstate == REC_RECOVERED) {
         if (work.ts - snap_recovered_ns > REC_STABLE_NS) rstate = REC_HEALTHY;
     }
-    /* REC_LOST is left ONLY by a confirmed recovery (in the apply branch) */
-    atomic_store(&REC_STATE, rstate);
+    /* REC_LOST is left ONLY by a confirmed recovery (in the apply branch).
+     * Do NOT publish REC_STATE here. A concurrent reset / descriptor switch
+     * may have advanced RESET_GEN and set HEALTHY on a now-empty map; storing
+     * our (pre-reset) rstate unguarded would clobber that back to LOST, and
+     * with no map to relocalize against we would be stranded LOST. Publication
+     * happens only once the generation is revalidated under MAP_LOCK — in the
+     * write phase, and in the early-return path below for a bare transition. */
     int lost = rstate == REC_LOST;
     /* a shake with too small a map to be "lost" from still briefly freezes */
     int shake_freeze = shaking && kfn < REC_MIN_MAP;
@@ -1435,8 +1466,19 @@ static void process_keyframe(void) {
     int may_store = mapping && !q_only && !lost && !shake_freeze &&
                     work.n_lm >= STORE_MIN_LM &&
                     work.ts - snap_last_store_ns >= STORE_MIN_INTERVAL_NS;
-    if (!do_search && !may_store)
+    if (!do_search && !may_store) {
+        /* nothing heavy to do this pass, but a state TRANSITION (e.g. a shake
+         * flipping HEALTHY->LOST on a pass that neither searches nor stores)
+         * must still persist — gen-safely, and only when it actually changed
+         * so the common no-work path stays off the lock. */
+        if (rstate != rstate_prev) {
+            pthread_mutex_lock(&MAP_LOCK);
+            if (atomic_load(&RESET_GEN) == rgen0)
+                atomic_store(&REC_STATE, rstate);
+            pthread_mutex_unlock(&MAP_LOCK);
+        }
         return;
+    }
     if (do_search) last_search_ns = work.ts;
 
     /* descriptors: XFeat when selected AND available, BAD/TEBLID otherwise */
@@ -1594,6 +1636,10 @@ static void process_keyframe(void) {
         pthread_mutex_unlock(&MAP_LOCK);
         return;
     }
+    /* generation-safe recovery-state publication (see the note at the rstate
+     * computation). The apply branch may still override this to REC_RECOVERED
+     * on a confirmed closure, under this same lock hold. */
+    atomic_store(&REC_STATE, rstate);
     if (did_search) {
         PERF.searched = searched;
         PERF.candidates = ncand;

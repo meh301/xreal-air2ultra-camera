@@ -1956,12 +1956,15 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetXfeatModel(JNIEnv *env, jclass
     if (p) (*env)->ReleaseStringUTFChars(env, path, p);
 }
 
-/* Runtime descriptor selector: mini-ORB (false) vs XFeat (true). */
-JNIEXPORT void JNICALL
+/* Runtime descriptor selector: BAD/TEBLID (false) vs XFeat (true). Returns the
+ * descriptor actually in effect afterwards — a request for XFeat is rejected
+ * (returns false) when ONNX Runtime / the model isn't available (lean build,
+ * or not yet loaded), so the caller can avoid desyncing its UI. */
+JNIEXPORT jboolean JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetUseXfeat(JNIEnv *env, jclass cls,
                                                            jboolean on) {
     (void)env; (void)cls;
-    xr_map_set_use_xfeat(on);
+    return xr_map_set_use_xfeat(on) ? JNI_TRUE : JNI_FALSE;
 }
 
 /* 1 when XFeat is actually loaded (model + ONNX Runtime), else 0. */
