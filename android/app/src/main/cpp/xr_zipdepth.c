@@ -87,18 +87,20 @@ static void zd_append_ep(OrtSessionOptions *opts) {
             setenv("ADSP_LIBRARY_PATH", adsp, 1);
             LOGI("ZipDepth: ADSP_LIBRARY_PATH=%s", adsp);
         }
-        /* Absolute backend path (our bundled matched-2.33 libQnnHtp.so). Keep
-         * the provider options MINIMAL -- skip_qnn_version_check isn't in ORT
-         * 1.22's QNN provider and can fail registration. */
+        /* Absolute backend path (our bundled matched-2.33 libQnnHtp.so) + the
+         * EXPLICIT device descriptor so QNN skips the auto-detect that fails
+         * QnnDevice_create with INVALID_CONFIG on this device. lahaina = SD888:
+         * soc_model 30 (QNN_SOC_MODEL_SM8350, from the QAIRT header), htp_arch
+         * 68 (Hexagon V68). Both options exist in ORT 1.22's QNN provider. */
         char backend[560];
         if (libdir[0]) snprintf(backend, sizeof backend, "%s/libQnnHtp.so", libdir);
         else snprintf(backend, sizeof backend, "libQnnHtp.so");
-        const char *k[] = { "backend_path" };
-        const char *v[] = { backend };
-        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 1);
+        const char *k[] = { "backend_path", "soc_model", "htp_arch" };
+        const char *v[] = { backend, "30", "68" };
+        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 3);
         if (!st) {
-            LOGI("ZipDepth: QNN (Hexagon HTP) EP [soc='%s' board='%s'] %s",
-                 soc, board, backend);
+            LOGI("ZipDepth: QNN (HTP V68/SM8350) EP [board='%s'] %s",
+                 board, backend);
             return;
         }
     } else if (mtk) {
