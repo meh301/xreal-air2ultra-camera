@@ -356,6 +356,21 @@ int xr_map_set_use_xfeat(int on) {
     CLOUD.n = 0;                            /* the old-descriptor cloud is void */
     CLOUD_DIRTY = 0;
     atomic_fetch_add(&CLOUD_GEN, 1);       /* readers drop it; empty until rebuilt */
+    /* This is a NEW-MAP transition. If we were LOST, the map that reloc would
+     * recover against is now gone, and LOST only exits via a verified reloc —
+     * so leaving REC_STATE=LOST would strand us forever on the empty map. Reset
+     * the recovery lifecycle to HEALTHY and clear the pending/verify/candidate
+     * state. SHAKING is left intact on purpose: storage stays frozen until the
+     * physical shake actually ends. */
+    atomic_store(&REC_STATE, REC_HEALTHY);
+    PENDING_D.have = 0;
+    RECOVERED_NS = 0;
+    LAST_CAND.have = 0;
+    LAST_POSE.have = 0;
+    LAST_ACCEPT_NS = 0;
+    LAST_SNAP_NS = 0;
+    memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
+    memset(&VER_LAST, 0, sizeof VER_LAST);
     pthread_mutex_unlock(&MAP_LOCK);
     LOGI("session map: descriptor -> %s (keyframes cleared, rebuilding)",
          want ? "XFeat" : "BAD/TEBLID");
