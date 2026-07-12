@@ -98,16 +98,23 @@
 enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
 #define REC_MIN_MAP 12                 /* fewer keyframes than this = no map to be "lost" from (just a brief shake freeze) */
 #define REC_STABLE_NS 1200000000ull    /* healthy this long after a recovery -> normal cadence */
-/* loop SEARCH cadence is event-driven: a slow background check while
- * tracking is healthy (cheap — the SD888 compute budget), FASTER when LOST
- * so recovery is quick. NOT every offer: the brute-force match + top-K PnP
- * is tens of ms, and running it back-to-back on the (low-priority) map
- * thread starves the VIO — the "flying off" failure. ~4 Hz when lost is
- * the known-good rate; recovery still lands in a few frames. */
-#define LOOP_SEARCH_HEALTHY_NS 700000000ull
-#define LOOP_SEARCH_LOST_NS 250000000ull
+/* loop SEARCH cadence is event-driven AND descriptor-aware: FASTER when
+ * LOST (quick recovery), and faster in BAD mode than XFeat mode because
+ * BAD/TEBLID has no inference cost — only the (shared) brute-force match +
+ * top-K PnP, so we can afford to run it more often. XFeat mode stays
+ * backed off (its inference is tens of ms; running it back-to-back on the
+ * low-priority map thread starves the VIO — the "flying off" failure).
+ * BAD healthy ~3 Hz matches the known-good mini-ORB rate. */
+#define LOOP_SEARCH_HEALTHY_BAD_NS   300000000ull
+#define LOOP_SEARCH_HEALTHY_XFEAT_NS 700000000ull
+#define LOOP_SEARCH_LOST_BAD_NS      150000000ull
+#define LOOP_SEARCH_LOST_XFEAT_NS    250000000ull
 #define RELOC_TOPK 3                   /* candidate clusters verified when relocalizing (repetitive scenes hand raw scoring to the wrong keyframe) */
-#define CLOUD_MAX 3000                 /* displayed keyframe-derived cloud cap (SD888 thermal budget) */
+/* displayed keyframe-derived cloud cap — a generous safety ceiling, not a
+ * budget: the map is really bounded by the 200-keyframe rolling cap, and
+ * drawing points is cheap (GL_POINTS, ~linear). This shows essentially the
+ * whole session map rather than an arbitrary window. */
+#define CLOUD_MAX 8192
 
 enum { DESC_BAD = 0, DESC_XFEAT = 1 };
 
@@ -1312,11 +1319,14 @@ static void process_keyframe(void) {
 
     /* rate gates (map-thread-only timing). Skip ALL the heavy work when
      * this offer will neither search nor store — what keeps the map thread
-     * from starving Basalt. Search cadence is EVENT-DRIVEN: a slow
-     * background check while healthy (the SD888 compute budget), every
-     * offer the moment we are LOST so recovery is immediate. */
+     * from starving Basalt. Search cadence is event-driven and
+     * descriptor-aware (see the constants): faster when LOST, and faster in
+     * cheap BAD mode than in XFeat mode. */
     static uint64_t last_search_ns;
-    uint64_t search_iv = lost ? LOOP_SEARCH_LOST_NS : LOOP_SEARCH_HEALTHY_NS;
+    int xf = atomic_load(&USE_XFEAT) && xr_xfeat_available();
+    uint64_t search_iv = lost
+        ? (xf ? LOOP_SEARCH_LOST_XFEAT_NS : LOOP_SEARCH_LOST_BAD_NS)
+        : (xf ? LOOP_SEARCH_HEALTHY_XFEAT_NS : LOOP_SEARCH_HEALTHY_BAD_NS);
     int do_search = last_search_ns == 0 || q_only ||
                     work.ts - last_search_ns >= search_iv;
     int may_store = mapping && !q_only && !lost && !shake_freeze &&

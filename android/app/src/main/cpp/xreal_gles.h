@@ -69,7 +69,7 @@ void xr_gles_set_points(const float *rays_imu, int n, uint64_t exposure_ts_ns);
  * position as p + v*dt between the 30 Hz VIO updates, then renders with
  * full 6-DoF parallax — SLAM drift becomes directly visible against the
  * real world. */
-enum { XR_GLES_MAX_MAP = 4096 };
+enum { XR_GLES_MAX_MAP = 8192 };
 void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
                      const float p_base[3], const float v_base[3],
                      uint64_t ts_ns);

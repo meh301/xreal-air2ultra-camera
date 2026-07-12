@@ -128,9 +128,9 @@ class MainActivity : Activity() {
         ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
     private val imuG = FloatArray(3)
     private val imuA = FloatArray(3)
-    private val mapBuffer: ByteBuffer =            // 4096 landmarks max
-        ByteBuffer.allocateDirect(4 + 4096 * 12).order(ByteOrder.nativeOrder())
-    private val mapPoints = FloatArray(4096 * 3)
+    private val mapBuffer: ByteBuffer =            // 8192 landmarks max
+        ByteBuffer.allocateDirect(4 + 8192 * 12).order(ByteOrder.nativeOrder())
+    private val mapPoints = FloatArray(8192 * 3)
     private var lastHealthLog = 0L
     private var thermalMark = ""
     private val handler = Handler(Looper.getMainLooper())
