@@ -104,7 +104,7 @@ class MainActivity : Activity() {
     private var streaming = false
     private var stereoMode = true       // stereo+aligned vs plain SBS mirror
     private var showPoints = true
-    private var depthOn = true
+    private var depthOn = false     // matches native default: off (runs off-thread when on)
     private var eyeMode = 0             // glasses: 0 cam, 1 depth, 2 AR, 3 off
     private var paneMode = 0            // phone: 0 = L|depth, 1 = L|R
     private var mappingOn = true        // false = localization-only (frozen map)
@@ -347,6 +347,8 @@ class MainActivity : Activity() {
             if (useXfeat != prev) poseMap.reset()
         }
         val depButton = findViewById<Button>(R.id.toggle_depth)
+        depButton.text =                 // reflect the native default (off)
+            getString(if (depthOn) R.string.dep_on else R.string.dep_off)
         depButton.setOnClickListener {
             depthOn = !depthOn
             XrealNative.nativeSetDepth(depthOn)

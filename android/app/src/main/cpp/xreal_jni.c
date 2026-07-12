@@ -47,6 +47,18 @@ static atomic_uint DEPTH_BUSY_US;    /* accumulated depth compute microseconds;
                                       * the reader divides by its own measured
                                       * wall interval to get the duty cycle */
 
+/* Latest-frame-wins handoff from the SLAM worker to the depth worker: the SLAM
+ * thread drops the newest raw stereo pair here and moves on; the depth thread
+ * rectifies + runs SGM on its own context so depth latency never blocks VIO or
+ * tracking. No static initializer (would drag the 600 KB struct into .data);
+ * the lock/cond are set up in the s_init constructor. */
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    uint8_t in[2][XR_OW * XR_OH];    /* newest cleaned raw pair, left then right */
+    int full;                        /* a new pair is waiting */
+} DEPTH_BOX;
+
 /* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS). The IMU
  * pose was signed off on-device with the ground-truth remap; Basalt now
  * receives frames, extrinsics and inertial data in one consistent frame. */
@@ -69,6 +81,7 @@ static struct {
      * The tracker is the live front-end stand-in; Basalt plugs in behind
      * the same data flow (see docs/VSLAM.md). */
     pthread_t slam_thread;
+    pthread_t depth_thread;                 /* SGM depth, off the SLAM thread */
     atomic_int slam_running;
     pthread_mutex_t slam_lock;
     pthread_cond_t slam_cond;
@@ -193,9 +206,12 @@ __attribute__((constructor)) static void s_init(void) {
     pthread_mutex_init(&S.imu_lock, NULL);
     pthread_mutex_init(&S.slam_lock, NULL);
     pthread_cond_init(&S.slam_cond, NULL);
+    pthread_mutex_init(&DEPTH_BOX.lock, NULL);
+    pthread_cond_init(&DEPTH_BOX.cond, NULL);
     atomic_store(&S.align_variant, XR_ALIGN_VARIANT_DEFAULT);
     atomic_store(&S.stereo_mode, 1);
-    atomic_store(&S.depth_on, 1);
+    atomic_store(&S.depth_on, 0);        /* off by default — clean SLAM baseline;
+                                          * toggled on demand, runs off-thread */
     atomic_store(&S.show_pts, 1);
     atomic_store(&S.map_on, 1);
     atomic_store(&S.prop_on, 1);
@@ -1159,48 +1175,90 @@ static void *slam_worker(void *arg) {
             xr_gles_set_points(rays, atomic_load(&S.show_pts) ? nr : 0, ts);
         }
 
-        /* stereo depth (SGM) at every 2nd pair (15 Hz) by default — the
-         * Snapdragon 888 needs the headroom for Basalt + future AR work.
-         * Only runs per-pair when a pass fits in half a frame budget. */
-        static uint8_t disp_local[XS_W * XS_H];        /* slam thread only */
-        static uint32_t depth_tick;
-        static int depth_stride = 2;
-        if (atomic_load(&S.depth_on)) {
-            if (depth_tick++ % depth_stride == 0) {
-                xr_stereo_rectify(&ST, 1, S.slam_in[1]);
-                int64_t t0 = now_ms();
-                xr_stereo_depth(&ST, disp_local);
-                float depth_ms = (float)(now_ms() - t0);
-                depth_stride = depth_ms > 13.0f ? 2 : 1;
-                atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
-                pthread_mutex_lock(&S.lock);
-                memcpy(S.disp, disp_local, sizeof S.disp);
-                S.depth_ms = depth_ms;
-                pthread_mutex_unlock(&S.lock);
-
-                /* colorized copy for the glasses' depth passthrough (black
-                 * border so out-of-image samples clamp to black) */
-                static uint8_t drgba[XS_W * XS_H * 4];   /* slam thread only */
-                for (int y = 0; y < XS_H; y++) {
-                    int border_y = y == 0 || y == XS_H - 1;
-                    for (int x = 0; x < XS_W; x++) {
-                        uint8_t *px = drgba + ((size_t)y * XS_W + x) * 4;
-                        if (border_y || x == 0 || x == XS_W - 1) {
-                            px[0] = px[1] = px[2] = 0; px[3] = 0xFF;
-                        } else {
-                            disp_color(disp_local[y * XS_W + x], px);
-                        }
-                    }
-                }
-                xr_gles_submit_depth(drgba, XS_W, XS_H);
-            }
-        } else {
+        /* Depth is computed on its own thread (depth_worker): hand it the
+         * newest raw pair (latest-wins) and move on, so a slow SGM pass never
+         * delays VIO / tracking. Latest-wins IS the adaptive rate — if depth
+         * runs behind, the slam side just overwrites the pending pair. */
+        static int depth_was_on;
+        int depth_on = atomic_load(&S.depth_on);
+        if (depth_on) {
+            pthread_mutex_lock(&DEPTH_BOX.lock);
+            memcpy(DEPTH_BOX.in[0], S.slam_in[0], sizeof DEPTH_BOX.in[0]);
+            memcpy(DEPTH_BOX.in[1], S.slam_in[1], sizeof DEPTH_BOX.in[1]);
+            DEPTH_BOX.full = 1;
+            pthread_cond_signal(&DEPTH_BOX.cond);
+            pthread_mutex_unlock(&DEPTH_BOX.lock);
+        } else if (depth_was_on) {          /* on->off: blank the stale depth */
             pthread_mutex_lock(&S.lock);
             memset(S.disp, 0, sizeof S.disp);
             S.depth_ms = 0;
             pthread_mutex_unlock(&S.lock);
         }
+        depth_was_on = depth_on;
     }
+}
+
+/* Depth worker: consumes the newest raw pair from DEPTH_BOX, rectifies it in
+ * its OWN stereo context (the SLAM thread owns ST and overwrites ST.rect every
+ * frame, so depth cannot share it) and runs SGM. The context is ~14 MB, so it
+ * is allocated lazily on first use — a session that never turns depth on never
+ * pays for it. Priority sits below the SLAM/VIO threads. */
+static void *depth_worker(void *arg) {
+    (void)arg;
+    setpriority(PRIO_PROCESS, (id_t)gettid(), 15);   /* below SLAM (nice 10) */
+    xr_stereo *st = NULL;
+    static uint8_t in0[XR_OW * XR_OH], in1[XR_OW * XR_OH];   /* depth thread only */
+    static uint8_t disp_local[XS_W * XS_H];
+    static uint8_t drgba[XS_W * XS_H * 4];
+    for (;;) {
+        pthread_mutex_lock(&DEPTH_BOX.lock);
+        while (atomic_load(&S.slam_running) && !DEPTH_BOX.full)
+            pthread_cond_wait(&DEPTH_BOX.cond, &DEPTH_BOX.lock);
+        if (!atomic_load(&S.slam_running)) {
+            pthread_mutex_unlock(&DEPTH_BOX.lock);
+            break;
+        }
+        memcpy(in0, DEPTH_BOX.in[0], sizeof in0);    /* take the latest pair */
+        memcpy(in1, DEPTH_BOX.in[1], sizeof in1);
+        DEPTH_BOX.full = 0;
+        pthread_mutex_unlock(&DEPTH_BOX.lock);
+
+        if (!S.stereo_ready) continue;               /* calib not built yet */
+        if (!st) {
+            st = malloc(sizeof *st);
+            if (!st) { LOGE("depth: out of memory — depth disabled"); continue; }
+            xr_stereo_init(st, &S.eye_calib[0], &S.eye_calib[1],
+                           S.eye_calib[0].p_cam, S.eye_calib[1].p_cam,
+                           atomic_load(&S.align_variant));
+        }
+        xr_stereo_rectify(st, 0, in0);
+        xr_stereo_rectify(st, 1, in1);
+        int64_t t0 = now_ms();
+        xr_stereo_depth(st, disp_local);
+        float depth_ms = (float)(now_ms() - t0);
+        atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
+        pthread_mutex_lock(&S.lock);
+        memcpy(S.disp, disp_local, sizeof S.disp);
+        S.depth_ms = depth_ms;
+        pthread_mutex_unlock(&S.lock);
+
+        /* colorized copy for the glasses' depth passthrough (black border so
+         * out-of-image samples clamp to black) */
+        for (int y = 0; y < XS_H; y++) {
+            int border_y = y == 0 || y == XS_H - 1;
+            for (int x = 0; x < XS_W; x++) {
+                uint8_t *px = drgba + ((size_t)y * XS_W + x) * 4;
+                if (border_y || x == 0 || x == XS_W - 1) {
+                    px[0] = px[1] = px[2] = 0; px[3] = 0xFF;
+                } else {
+                    disp_color(disp_local[y * XS_W + x], px);
+                }
+            }
+        }
+        xr_gles_submit_depth(drgba, XS_W, XS_H);
+    }
+    free(st);
+    return NULL;
 }
 
 static void slam_start(void) {
@@ -1214,8 +1272,10 @@ static void slam_start(void) {
     memset(S.disp, 0, sizeof S.disp);
     xr_track_reset(&S.track);
     atomic_store(&S.lmc_clear, 1);
+    DEPTH_BOX.full = 0;
     atomic_store(&S.slam_running, 1);
     pthread_create(&S.slam_thread, NULL, slam_worker, NULL);
+    pthread_create(&S.depth_thread, NULL, depth_worker, NULL);
 }
 
 static void slam_stop(void) {
@@ -1224,7 +1284,13 @@ static void slam_stop(void) {
     atomic_store(&S.slam_running, 0);
     pthread_cond_broadcast(&S.slam_cond);
     pthread_mutex_unlock(&S.slam_lock);
+    /* wake the depth worker too (it waits on its own cond) so it sees the
+     * stopped flag and exits before we join */
+    pthread_mutex_lock(&DEPTH_BOX.lock);
+    pthread_cond_broadcast(&DEPTH_BOX.cond);
+    pthread_mutex_unlock(&DEPTH_BOX.lock);
     pthread_join(S.slam_thread, NULL);
+    pthread_join(S.depth_thread, NULL);
 }
 
 /* ---- IMU: enable + drain thread --------------------------------------------- */
