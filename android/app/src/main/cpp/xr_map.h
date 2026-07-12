@@ -116,7 +116,11 @@ int xr_map_loop_points(float *xyz, int max);
  * closure that deforms the keyframes deforms this cloud with them — the
  * visible healing. Feed it to the AR/3D view instead of a flat cloud that
  * would have to be rigidly shifted. Returns the count copied (<= max). */
-int xr_map_get_cloud(float *xyz, int max);
+/* Copy the keyframe-derived display cloud (session frame). *inout_gen is the
+ * generation the caller last saw; on return it holds the current generation.
+ * Returns the point count, or -1 (no lock taken, buffer untouched) when the
+ * cloud is unchanged since that generation. Pass NULL to always copy. */
+int xr_map_get_cloud(float *xyz, int max, unsigned *inout_gen);
 
 /* NOTE — cloud-map persistence (save/load of the anchored graph) is the
  * NEXT phase, not here yet. Doing it safely needs SUBMAPS: a loaded map

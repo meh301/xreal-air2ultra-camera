@@ -220,6 +220,11 @@ static struct { float q[4]; float p[3]; int gen; } LIVE = { .q = {1, 0, 0, 0} };
  * closure that deforms the keyframes deforms this cloud with them. */
 static struct { float xyz[CLOUD_MAX][3]; int n; } CLOUD;
 static int CLOUD_DIRTY;
+/* Bumped every time CLOUD is rebuilt (store / deform / evict). A reader
+ * passes back the generation it last copied; xr_map_get_cloud returns -1
+ * without taking the lock when nothing changed, so the VIO- and UI-rate
+ * pollers stop copying an unchanged 96 KB cloud under MAP_LOCK. */
+static atomic_uint CLOUD_GEN;
 
 static void *xfeat_preload_thread(void *arg) {
     (void)arg;
@@ -313,6 +318,7 @@ void xr_map_reset(void) {
     atomic_store(&REC_STATE, REC_HEALTHY);
     CLOUD.n = 0;
     CLOUD_DIRTY = 0;
+    atomic_fetch_add(&CLOUD_GEN, 1);       /* readers must drop the old cloud */
     memset(&LOOP_STATS, 0, sizeof LOOP_STATS);
     memset(&VER_LAST, 0, sizeof VER_LAST);
     CORR.q[0] = 1; CORR.q[1] = CORR.q[2] = CORR.q[3] = 0;
@@ -554,17 +560,23 @@ static void cloud_rebuild(void) {
     }
     CLOUD.n = n;
     CLOUD_DIRTY = 0;
+    atomic_fetch_add(&CLOUD_GEN, 1);
 }
 
 /* Snapshot the keyframe-derived cloud (session frame) for the AR/3D view.
  * This REPLACES the old flat cloud that the JNI layer rigidly shifted by
  * the correction — that shift moved everything together and healed
  * nothing; the map now lives in the keyframes and heals when they do. */
-int xr_map_get_cloud(float *xyz, int max) {
+int xr_map_get_cloud(float *xyz, int max, unsigned *inout_gen) {
+    /* Unlocked fast path: if the caller already holds the current generation
+     * the cloud is byte-for-byte unchanged, so skip both the lock and the
+     * copy and let the caller reuse the buffer it already has. */
+    if (inout_gen && atomic_load(&CLOUD_GEN) == *inout_gen) return -1;
     pthread_mutex_lock(&MAP_LOCK);
     int n = CLOUD.n;
     if (n > max) n = max;
     if (n > 0) memcpy(xyz, CLOUD.xyz, sizeof(float) * 3u * (size_t)n);
+    if (inout_gen) *inout_gen = atomic_load(&CLOUD_GEN);
     pthread_mutex_unlock(&MAP_LOCK);
     return n;
 }

@@ -1040,8 +1040,16 @@ static void *slam_worker(void *arg) {
                 float Rw[9];
                 wxyz_to_rot(st.q, Rw);
                 static float map_cloud[XR_GLES_MAX_MAP * 3]; /* worker only */
-                int mn = xr_map_get_cloud(map_cloud, XR_GLES_MAX_MAP);
-                xr_gles_set_map(map_cloud, mn, Rw, st.p, st.v, st.ts);
+                static unsigned map_cloud_gen;               /* worker only */
+                static int map_cloud_n;                      /* worker only */
+                /* Re-copy from the map only when the graph changed; every
+                 * frame still re-feeds the retained points with the fresh
+                 * head pose so parallax stays live (the pose, not the cloud,
+                 * is what moves at VIO rate). */
+                int mn = xr_map_get_cloud(map_cloud, XR_GLES_MAX_MAP,
+                                          &map_cloud_gen);
+                if (mn >= 0) map_cloud_n = mn;
+                xr_gles_set_map(map_cloud, map_cloud_n, Rw, st.p, st.v, st.ts);
 
                 /* anchor the 1 kHz head-pose propagator (session frame) */
                 prop_correct(st.q, st.p, st.v, st.ts);
@@ -1768,8 +1776,13 @@ Java_org_air2ultra_stereocam_XrealNative_nativeGrabMap(JNIEnv *env, jclass cls,
     jlong cap = (*env)->GetDirectBufferCapacity(env, buf);
     if (!dst || cap < 4) return 0;
     int max = (int)((cap - 4) / 12);
-    /* the keyframe-derived cloud (session frame) — same map that is drawn */
-    int n = xr_map_get_cloud((float *)(dst + 4), max);
+    /* the keyframe-derived cloud (session frame) — same map that is drawn.
+     * The UI polls at ~60 Hz but the cloud only changes on a store/deform,
+     * so a generation check skips the lock+copy and returns -1; the caller
+     * (which already guards `>= 0`) then keeps its retained points. */
+    static unsigned ui_cloud_gen;
+    int n = xr_map_get_cloud((float *)(dst + 4), max, &ui_cloud_gen);
+    if (n < 0) return n;                    /* unchanged — buffer untouched */
     uint32_t un = (uint32_t)n;
     memcpy(dst, &un, 4);
     return n;
