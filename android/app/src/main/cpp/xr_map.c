@@ -472,36 +472,44 @@ static void corr_interp(const float qa[4], const float pa[3],
  * recovery). When the recent stored trajectory drifted and then closed a
  * loop, the matched anchor and everything BEFORE it are trusted and hold
  * still; the drifted tail (anchor -> newest) is pulled toward D in
- * proportion to its odom PATH LENGTH from the anchor. Each keyframe's
- * landmarks follow, so the tail DEFORMS onto the reference. O(chain),
- * 4-DoF (gravity fixes roll/pitch). MAP_LOCK held.
+ * proportion to its PATH LENGTH from the anchor. Each keyframe's landmarks
+ * follow, so the tail DEFORMS onto the reference. O(chain), 4-DoF (gravity
+ * fixes roll/pitch). MAP_LOCK held. `qsp` = the query's SESSION position.
+ *
+ * The path is measured in the SESSION frame (pc), not raw odom: if Basalt
+ * re-initialised during the session, consecutive keyframes can span an odom
+ * discontinuity, and an odom-frame path length would be a huge bogus jump
+ * that corrupts the distribution. The session frame is continuous. Within a
+ * single odom epoch the two are near-identical (the correction is locally
+ * rigid), so this only changes behaviour across a discontinuity — for the
+ * better.
  *
  * This must NOT run for post-shake relocalization: storage is frozen
  * through a discontinuity, so the stored map is already correct and only
  * the live odom frame needs registering — deforming a correct map corrupts
  * it. The caller gates on REC_HEALTHY. */
-static void graph_deform(int anchor, const float qp[3],
+static void graph_deform(int anchor, const float qsp[3],
                          const float Dq[4], const float Dp[3]) {
     if (anchor < 0 || anchor >= KF_N) return;
-    static float cum[XR_MAP_MAX_KF];       /* odom path length from anchor */
+    static float cum[XR_MAP_MAX_KF];       /* session path length from anchor */
     float total = 0;
     cum[anchor] = 0;
     for (int j = anchor + 1; j < KF_N; j++) {
-        float dx = KF[j].p[0] - KF[j - 1].p[0];
-        float dy = KF[j].p[1] - KF[j - 1].p[1];
-        float dz = KF[j].p[2] - KF[j - 1].p[2];
+        float dx = KF[j].pc[0] - KF[j - 1].pc[0];
+        float dy = KF[j].pc[1] - KF[j - 1].pc[1];
+        float dz = KF[j].pc[2] - KF[j - 1].pc[2];
         total += sqrtf(dx * dx + dy * dy + dz * dz);
         cum[j] = total;
     }
     /* the correction D was estimated for the CURRENT query, not the newest
-     * stored keyframe. Extend the path to the query so the newest keyframe
-     * gets a fraction < 1 (the drift between it and the query rides on the
-     * live pose via CORR); otherwise the newest stored portion is
-     * over-deformed. */
+     * stored keyframe. Extend the path to the query (in session coords) so
+     * the newest keyframe gets a fraction < 1 (the drift between it and the
+     * query rides on the live pose via CORR); otherwise the newest stored
+     * portion is over-deformed. */
     if (KF_N > anchor + 1) {
-        float dx = qp[0] - KF[KF_N - 1].p[0];
-        float dy = qp[1] - KF[KF_N - 1].p[1];
-        float dz = qp[2] - KF[KF_N - 1].p[2];
+        float dx = qsp[0] - KF[KF_N - 1].pc[0];
+        float dy = qsp[1] - KF[KF_N - 1].pc[1];
+        float dz = qsp[2] - KF[KF_N - 1].pc[2];
         total += sqrtf(dx * dx + dy * dy + dz * dz);
     }
     for (int j = anchor + 1; j < KF_N; j++) {
@@ -1674,8 +1682,14 @@ static void process_keyframe(void) {
                          snap ? " + pose snapped" : "");
                 } else {
                     /* HEALTHY accumulated-drift closure: DEFORM the drifted
-                     * tail onto the reference (real co-localization). */
-                    graph_deform(best_i, work.p, Dq, Dp);
+                     * tail onto the reference (real co-localization). Pass
+                     * the query's SESSION position (CORR is still the
+                     * pre-closure correction here) so the path weighting is
+                     * discontinuity-safe. */
+                    float qsp[3];
+                    qrotv(CORR.q, work.p, qsp);
+                    qsp[0] += CORR.p[0]; qsp[1] += CORR.p[1]; qsp[2] += CORR.p[2];
+                    graph_deform(best_i, qsp, Dq, Dp);
                     CLOUD_DIRTY = 1;
                     LOGI("session map: LOOP kf#%d CLOSURE %.2fm %.0fdeg "
                          "(%d/%d inliers, %d covis) — map deformed%s", best_i,
