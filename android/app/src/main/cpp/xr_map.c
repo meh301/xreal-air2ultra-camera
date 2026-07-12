@@ -172,6 +172,11 @@ static uint64_t LAST_STORE_NS;         /* keyframe store rate limit */
 static uint64_t LAST_SNAP_NS;          /* correction cooldown anchor */
 static atomic_int SHAKING;             /* raw shake flag from the IMU thread */
 static atomic_int REC_STATE;           /* REC_HEALTHY / REC_LOST / REC_RECOVERED */
+/* bumped whenever another thread clears the store (reset / descriptor
+ * switch). The map thread captures it before its LOCK-FREE candidate
+ * search and re-checks after taking the lock: a mismatch means the map
+ * changed under the search, so its (now stale) result is discarded. */
+static atomic_uint RESET_GEN;
 static uint64_t RECOVERED_NS;          /* when the last recovery landed */
 static struct {                        /* correction awaiting confirmation */
     int have;
@@ -269,6 +274,7 @@ void xr_map_set_use_xfeat(int on) {
     pthread_mutex_lock(&MAP_LOCK);
     KF_N = 0;
     atomic_store(&KF_COUNT_PUB, 0);
+    atomic_fetch_add(&RESET_GEN, 1);       /* invalidate any in-flight search */
     LAST_STORE_NS = 0;
     pthread_mutex_unlock(&MAP_LOCK);
     LOGI("session map: descriptor -> %s (keyframes cleared, rebuilding)",
@@ -284,6 +290,7 @@ int xr_map_xfeat_ready(void) {
 void xr_map_reset(void) {
     pthread_mutex_lock(&MAP_LOCK);
     KF_N = 0;
+    atomic_fetch_add(&RESET_GEN, 1);       /* invalidate any in-flight search */
     LAST_CAND.have = 0;
     LAST_POSE.have = 0;
     MBOX.full = 0;
@@ -1368,38 +1375,36 @@ static void process_keyframe(void) {
         bad_extract(img, &work);
     }
 
-    pthread_mutex_lock(&MAP_LOCK);
-    memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
-    memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
-    LAST_POSE.have = 1;
-
-    /* spatial recency: keyframes near the current position stay fresh, so
-     * living in the same space never rolls its map away */
-    for (int i = 0; i < KF_N; i++) {
-        float dx = work.p[0] - KF[i].p[0], dy = work.p[1] - KF[i].p[1],
-              dz = work.p[2] - KF[i].p[2];
-        if (dx * dx + dy * dy + dz * dz < KF_NEAR_M * KF_NEAR_M)
-            KF[i].last_used = work.ts;
-    }
-
-    /* loop/reloc candidates: match the CURRENT view against the store
-     * (runs in both modes — in localization-only this IS the reloc query).
-     * In mapping mode skip the most recent keyframes (always similar).
-     * Throttled (do_search) so it can't monopolise the CPU. */
+    /* ---- candidate search + geometric verification: LOCK-FREE. Only the
+     * map thread WRITES the keyframe store; a concurrent reset / descriptor
+     * switch just zeroes KF_N and bumps RESET_GEN, so reading KF[] here is
+     * safe — a stale read (map cleared mid-search) is discarded below by
+     * the generation check. THIS is the priority-inversion fix: the
+     * tens-of-ms brute-force match + top-K PnP no longer runs under the lock
+     * the VIO worker needs for offer / get_correction / get_cloud. */
+    unsigned rgen0 = atomic_load(&RESET_GEN);
+    int did_search = 0;
+    int cand_i[RELOC_TOPK], cand_m[RELOC_TOPK], ncand = 0;
+    int raw_best_m = 0, raw_best_i = -1;
+    int best_i = -1, best_m = 0, best_n3 = 0, best_nin = 0, best_covis = 0;
+    int any_pairs = 0;
+    float bDq[4], bDp[3];
     if (do_search) {
+    did_search = 1;
     /* mapping skips the freshest keyframes (trivial self-matches); a
      * relocalization query (stationary, or LOST) searches EVERYTHING —
      * the pre-loss keyframes are the best recovery anchors */
     int relocalizing = q_only || lost;
-    int lim = (mapping && !relocalizing) ? KF_N - CAND_SKIP_RECENT : KF_N;
+    int kfn = KF_N;                        /* snapshot the bound (lock-free) */
+    int lim = (mapping && !relocalizing) ? kfn - CAND_SKIP_RECENT : kfn;
+    if (lim > kfn) lim = kfn;
+    if (lim < 0) lim = 0;
 
     /* rank the top-K matching keyframes. K is adaptive: 1 while tracking
      * is healthy (cheap), RELOC_TOPK when relocalizing — a repetitive
      * scene can hand raw scoring to the wrong keyframe, so several clusters
      * each get a geometric try and the strongest wins. */
     int K = relocalizing ? RELOC_TOPK : 1;
-    int cand_i[RELOC_TOPK], cand_m[RELOC_TOPK], ncand = 0;
-    int raw_best_m = 0, raw_best_i = -1;
     for (int i = 0; i < lim; i++) {
         int m = match_count(&work, &KF[i]);
         if (m > raw_best_m) { raw_best_m = m; raw_best_i = i; }
@@ -1438,6 +1443,43 @@ static void process_keyframe(void) {
         cand_i[pos] = i;
     }
 
+    /* verify every candidate cluster; keep the geometrically strongest
+     * (most inliers, covisibility-backed) — still lock-free */
+    for (int c = 0; c < ncand; c++) {
+        int cn3 = 0, cnin = 0, ccov = 0;
+        float cDq[4], cDp[3];
+        int ok = reloc_pnp(&work, cand_i[c], cDq, cDp, &cn3, &cnin, &ccov);
+        if (cn3 > any_pairs) any_pairs = cn3;
+        if (ok && ccov >= COVIS_MIN_KF && cnin > best_nin) {
+            best_i = cand_i[c]; best_m = cand_m[c];
+            best_n3 = cn3; best_nin = cnin; best_covis = ccov;
+            memcpy(bDq, cDq, sizeof bDq);
+            memcpy(bDp, cDp, sizeof bDp);
+        }
+    }
+    }   /* end LOCK-FREE candidate search */
+
+    /* ---- write / publish: LOCKED, but BRIEF (no match, no PnP). The VIO
+     * worker's fast-path calls (offer / get_correction / get_cloud) now
+     * contend only with this, never the heavy search — the priority
+     * inversion is gone. */
+    pthread_mutex_lock(&MAP_LOCK);
+    int stale = did_search && atomic_load(&RESET_GEN) != rgen0;
+    memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
+    memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
+    LAST_POSE.have = 1;
+
+    /* spatial recency: keyframes near the current position stay fresh, so
+     * living in the same space never rolls its map away */
+    for (int i = 0; i < KF_N; i++) {
+        float dx = work.p[0] - KF[i].p[0], dy = work.p[1] - KF[i].p[1],
+              dz = work.p[2] - KF[i].p[2];
+        if (dx * dx + dy * dy + dz * dz < KF_NEAR_M * KF_NEAR_M)
+            KF[i].last_used = work.ts;
+    }
+
+    /* apply the search result (skipped if the map was reset mid-search) */
+    if (did_search && !stale) {
     if (ncand == 0 && raw_best_i >= 0) {
         /* below the candidate bar: say so occasionally, so a "nothing
          * happens" report can distinguish no-match from no-verify */
@@ -1452,24 +1494,6 @@ static void process_keyframe(void) {
                  raw_best_m, raw_best_i, KF_N, CAND_MIN_MATCHES);
         }
     } else if (ncand > 0) {
-        /* verify every candidate cluster; keep the geometrically strongest
-         * (most inliers, covisibility-backed) */
-        int best_i = -1, best_m = 0, best_n3 = 0, best_nin = 0, best_covis = 0;
-        float bDq[4], bDp[3];
-        int any_pairs = 0;
-        for (int c = 0; c < ncand; c++) {
-            int cn3 = 0, cnin = 0, ccov = 0;
-            float cDq[4], cDp[3];
-            int ok = reloc_pnp(&work, cand_i[c], cDq, cDp, &cn3, &cnin, &ccov);
-            if (cn3 > any_pairs) any_pairs = cn3;
-            if (ok && ccov >= COVIS_MIN_KF && cnin > best_nin) {
-                best_i = cand_i[c]; best_m = cand_m[c];
-                best_n3 = cn3; best_nin = cnin; best_covis = ccov;
-                memcpy(bDq, cDq, sizeof bDq);
-                memcpy(bDp, cDp, sizeof bDp);
-            }
-        }
-
         LAST_CAND.a = work.ts;
         LAST_CAND.b = KF[cand_i[0]].ts;
         LAST_CAND.matches = cand_m[0];
@@ -1630,7 +1654,7 @@ static void process_keyframe(void) {
             }
         }
     }
-    }   /* end throttled loop search (do_search) */
+    }   /* end apply (verified result, under the lock) */
 
     /* store (mapping mode only; never for a stationary query — those are
      * matching-only; only frames that carry verifiable geometry, at a
