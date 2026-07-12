@@ -32,8 +32,13 @@ class PoseMapView @JvmOverloads constructor(
     private var flags = 0
     private var haveState = false
 
-    private val trail = ArrayList<FloatArray>()    // sampled positions (~2 cm gate)
+    // Sampled positions (~2 cm gate) in a flat ring buffer: no per-sample
+    // allocation and no O(n) shift when the history is full (was
+    // ArrayList<FloatArray> + removeAt(0)). trailHead is the oldest sample.
     private val TRAIL_MAX = 4096                    // ~80 m+ of path history
+    private val trailXyz = FloatArray(TRAIL_MAX * 3)
+    private var trailHead = 0
+    private var trailCount = 0
     private val trailScreen = FloatArray(TRAIL_MAX * 4)  // segment endpoints, batched draw
 
     // accumulated landmark cloud (world xyz triplets)
@@ -105,20 +110,24 @@ class PoseMapView @JvmOverloads constructor(
         loopCount = loops
         haveState = true
         if (follow) pos.copyInto(pivot)
-        val last = trail.lastOrNull()
-        val moved = last == null || run {
-            val dx = pos[0] - last[0]; val dy = pos[1] - last[1]; val dz = pos[2] - last[2]
+        val moved = trailCount == 0 || run {
+            val li = ((trailHead + trailCount - 1) % TRAIL_MAX) * 3   // newest
+            val dx = pos[0] - trailXyz[li]; val dy = pos[1] - trailXyz[li + 1]
+            val dz = pos[2] - trailXyz[li + 2]
             sqrt(dx * dx + dy * dy + dz * dz) > 0.02f
         }
         if (moved) {
-            trail.add(pos.copyOf())
-            if (trail.size > TRAIL_MAX) trail.removeAt(0)
+            val w = ((trailHead + trailCount) % TRAIL_MAX) * 3
+            trailXyz[w] = pos[0]; trailXyz[w + 1] = pos[1]; trailXyz[w + 2] = pos[2]
+            if (trailCount < TRAIL_MAX) trailCount++
+            else trailHead = (trailHead + 1) % TRAIL_MAX   // drop the oldest
         }
         invalidate()
     }
 
     fun reset() {
-        trail.clear()
+        trailHead = 0
+        trailCount = 0
         pivot.fill(0f)
         invalidate()
     }
@@ -314,11 +323,13 @@ class PoseMapView @JvmOverloads constructor(
         if (pn > 0) canvas.drawPoints(cloudScreen, 0, pn, cloudPaint)
 
         // trail — batched polyline (one drawLines call for the whole path)
-        if (trail.size > 1) {
+        if (trailCount > 1) {
             var tn = 0
-            project(trail[0][0], trail[0][1], trail[0][2], pa)
-            for (i in 1 until trail.size) {
-                project(trail[i][0], trail[i][1], trail[i][2], pb)
+            var o = trailHead * 3
+            project(trailXyz[o], trailXyz[o + 1], trailXyz[o + 2], pa)
+            for (k in 1 until trailCount) {
+                o = ((trailHead + k) % TRAIL_MAX) * 3
+                project(trailXyz[o], trailXyz[o + 1], trailXyz[o + 2], pb)
                 if (tn + 4 <= trailScreen.size) {
                     trailScreen[tn++] = pa[0]; trailScreen[tn++] = pa[1]
                     trailScreen[tn++] = pb[0]; trailScreen[tn++] = pb[1]
