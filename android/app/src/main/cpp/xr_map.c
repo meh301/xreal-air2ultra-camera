@@ -1096,11 +1096,13 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
     cov[ncov++] = best_i;
     static struct rc_nb nbr[XR_MAP_MAX_KF];
     int nnb = 0;
-    for (int s = 0; s < KF_N; s++) {
+    for (int s = 0; s < KF_N; s++) {   /* SESSION-frame proximity (pc): pool
+                                          physically-adjacent keyframes even
+                                          across drifted odom epochs */
         if (s == best_i || KF[s].desc_type != w->desc_type) continue;
-        float dx = KF[s].p[0] - KF[best_i].p[0];
-        float dy = KF[s].p[1] - KF[best_i].p[1];
-        float dz = KF[s].p[2] - KF[best_i].p[2];
+        float dx = KF[s].pc[0] - KF[best_i].pc[0];
+        float dy = KF[s].pc[1] - KF[best_i].pc[1];
+        float dz = KF[s].pc[2] - KF[best_i].pc[2];
         float d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > COVIS_R_M * COVIS_R_M) continue;
         nbr[nnb].s = s; nbr[nnb].d2 = d2; nnb++;
@@ -1312,6 +1314,18 @@ static void process_keyframe(void) {
     memcpy(work.lm_xyz, MBOX.lm_xyz, sizeof(float) * 3 * (size_t)work.n_lm);
     memcpy(work.lm_uv, MBOX.lm_uv, sizeof(float) * 2 * (size_t)work.n_lm);
     MBOX.full = 0;
+    /* Capture the store's generation, count and correction AT DEQUEUE, under
+     * the lock — the coherent state this (possibly stale) offer belongs to.
+     * The lock-free search below reads only these snapshots, never KF_N /
+     * CORR directly (those are written by a concurrent reset / descriptor
+     * switch — reading them unlocked would be a data race). If RESET_GEN has
+     * moved by the time we take the lock to publish, the whole result is
+     * abandoned — no stale correction AND no stale/wrong-descriptor store. */
+    unsigned rgen0 = atomic_load(&RESET_GEN);
+    int kfn = KF_N;
+    float snap_corr_q[4], snap_corr_p[3];
+    memcpy(snap_corr_q, CORR.q, sizeof snap_corr_q);
+    memcpy(snap_corr_p, CORR.p, sizeof snap_corr_p);
     pthread_mutex_unlock(&MAP_LOCK);
 
     int mapping = atomic_load(&MAPPING);
@@ -1385,12 +1399,12 @@ static void process_keyframe(void) {
 
     /* ---- candidate search + geometric verification: LOCK-FREE. Only the
      * map thread WRITES the keyframe store; a concurrent reset / descriptor
-     * switch just zeroes KF_N and bumps RESET_GEN, so reading KF[] here is
-     * safe — a stale read (map cleared mid-search) is discarded below by
-     * the generation check. THIS is the priority-inversion fix: the
-     * tens-of-ms brute-force match + top-K PnP no longer runs under the lock
-     * the VIO worker needs for offer / get_correction / get_cloud. */
-    unsigned rgen0 = atomic_load(&RESET_GEN);
+     * switch just zeroes KF_N and bumps RESET_GEN. KF[] CONTENTS are never
+     * touched by another thread, so reading them here is safe; KF_N and CORR
+     * ARE written by reset, so we use the DEQUEUE-time snapshots (kfn,
+     * snap_corr) instead of reading them unlocked. THIS is the
+     * priority-inversion fix: the tens-of-ms brute-force match + top-K PnP
+     * no longer runs under the lock the VIO worker needs. */
     int did_search = 0;
     int cand_i[RELOC_TOPK], cand_m[RELOC_TOPK], ncand = 0;
     int raw_best_m = 0, raw_best_i = -1;
@@ -1403,7 +1417,6 @@ static void process_keyframe(void) {
      * relocalization query (stationary, or LOST) searches EVERYTHING —
      * the pre-loss keyframes are the best recovery anchors */
     int relocalizing = q_only || lost;
-    int kfn = KF_N;                        /* snapshot the bound (lock-free) */
     int lim = (mapping && !relocalizing) ? kfn - CAND_SKIP_RECENT : kfn;
     if (lim > kfn) lim = kfn;
     if (lim < 0) lim = 0;
@@ -1426,8 +1439,9 @@ static void process_keyframe(void) {
         int sweep = (++healthy_search_n % FULL_SWEEP_EVERY) == 0;
         gate = !sweep;
         if (gate) {
-            qrotv(CORR.q, work.p, wsp);
-            wsp[0] += CORR.p[0]; wsp[1] += CORR.p[1]; wsp[2] += CORR.p[2];
+            qrotv(snap_corr_q, work.p, wsp);
+            wsp[0] += snap_corr_p[0]; wsp[1] += snap_corr_p[1];
+            wsp[2] += snap_corr_p[2];
         }
     }
     for (int i = 0; i < lim; i++) {
@@ -1446,10 +1460,10 @@ static void process_keyframe(void) {
          * review's point). Keep only the strongest keyframe per
          * neighbourhood, so the K slots cover K different places. */
         int near = -1;
-        for (int t = 0; t < ncand; t++) {
-            float dx = KF[i].p[0] - KF[cand_i[t]].p[0];
-            float dy = KF[i].p[1] - KF[cand_i[t]].p[1];
-            float dz = KF[i].p[2] - KF[cand_i[t]].p[2];
+        for (int t = 0; t < ncand; t++) {   /* SESSION-frame distance (pc) */
+            float dx = KF[i].pc[0] - KF[cand_i[t]].pc[0];
+            float dy = KF[i].pc[1] - KF[cand_i[t]].pc[1];
+            float dz = KF[i].pc[2] - KF[cand_i[t]].pc[2];
             if (dx * dx + dy * dy + dz * dz < COVIS_R_M * COVIS_R_M) {
                 near = t; break;
             }
@@ -1495,22 +1509,35 @@ static void process_keyframe(void) {
      * contend only with this, never the heavy search — the priority
      * inversion is gone. */
     pthread_mutex_lock(&MAP_LOCK);
-    int stale = did_search && atomic_load(&RESET_GEN) != rgen0;
+    if (atomic_load(&RESET_GEN) != rgen0) {
+        /* reset / descriptor switch happened while we processed this
+         * (pre-change) offer: abandon it ENTIRELY — no stale correction,
+         * and (the fix the audit caught) no stale / wrong-descriptor
+         * keyframe inserted below, which would otherwise immediately
+         * repopulate the freshly-cleared map. */
+        pthread_mutex_unlock(&MAP_LOCK);
+        return;
+    }
     memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
     memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
     LAST_POSE.have = 1;
 
     /* spatial recency: keyframes near the current position stay fresh, so
-     * living in the same space never rolls its map away */
+     * living in the same space never rolls its map away. Compared in the
+     * SESSION frame (corrected) — a physically-near keyframe from a
+     * different drifted odom epoch must still refresh. */
+    float wsp2[3];
+    qrotv(snap_corr_q, work.p, wsp2);
+    wsp2[0] += snap_corr_p[0]; wsp2[1] += snap_corr_p[1]; wsp2[2] += snap_corr_p[2];
     for (int i = 0; i < KF_N; i++) {
-        float dx = work.p[0] - KF[i].p[0], dy = work.p[1] - KF[i].p[1],
-              dz = work.p[2] - KF[i].p[2];
+        float dx = wsp2[0] - KF[i].pc[0], dy = wsp2[1] - KF[i].pc[1],
+              dz = wsp2[2] - KF[i].pc[2];
         if (dx * dx + dy * dy + dz * dz < KF_NEAR_M * KF_NEAR_M)
             KF[i].last_used = work.ts;
     }
 
-    /* apply the search result (skipped if the map was reset mid-search) */
-    if (did_search && !stale) {
+    /* apply the search result */
+    if (did_search) {
     if (ncand == 0 && raw_best_i >= 0) {
         /* below the candidate bar: say so occasionally, so a "nothing
          * happens" report can distinguish no-match from no-verify */
