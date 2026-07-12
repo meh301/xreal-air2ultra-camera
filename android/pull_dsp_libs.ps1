@@ -35,12 +35,17 @@ New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
 # The /vendor/lib64 ones are the app-namespace-invisible vendor libs (the real
 # fix); the /system/lib64 ones are libcdsprpc's platform-private closure (not in
-# the NDK, so also invisible to an app). ld-android.so / libdl_android.so are
-# intentionally omitted: they are linker-owned and never loaded from a file.
+# the NDK, so also invisible to an app). Which dmabuf memory lib libcdsprpc needs
+# is Android-version-dependent: older parts (SD888) pull libion.so, newer ones
+# (8 Gen 2/3) pull libvmmem.so -- list both; the absent one is skipped harmlessly.
+# ld-android.so / libdl_android.so are intentionally omitted: linker-owned (in the
+# runtime APEX), always resolvable in every namespace, never loaded from a file.
+# Verify the closure of anything new with the target device's NDK llvm-readelf -d.
 $libs = @(
     "/vendor/lib64/libcdsprpc.so",
     "/vendor/lib64/vendor.qti.hardware.dsp@1.0.so",
     "/vendor/lib64/libvmmem.so",
+    "/system/lib64/libion.so",
     "/system/lib64/libhidlbase.so",
     "/system/lib64/libhardware.so",
     "/system/lib64/libutils.so",
