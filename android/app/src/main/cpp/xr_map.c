@@ -26,8 +26,10 @@
 #include "xr_teblid_params.h"
 #include "xreal_core.h"
 
-#if defined(__ARM_FEATURE_DOTPROD)
+#if defined(__ARM_NEON)
 #include <arm_neon.h>
+#endif
+#if defined(__ARM_FEATURE_DOTPROD)
 #define MAP_SDOT 1
 #endif
 
@@ -763,11 +765,27 @@ static void bad_extract(const uint8_t *img, xr_kf *kf) {
 /* ---- matching ------------------------------------------------------------------- */
 
 static inline int hamming256(const int8_t *a, const int8_t *b) {
-    const uint64_t *ua = (const uint64_t *)a, *ub = (const uint64_t *)b;
+#if defined(__ARM_NEON)
+    /* 256-bit XOR -> per-byte population count -> widening pairwise
+     * reduction. vld1q loads are alignment-agnostic, which also removes the
+     * formal unaligned / strict-aliasing UB of the old uint64_t* cast
+     * (relevant while armeabi-v7a is a target). Portable aarch64 + v7a. */
+    uint8x16_t x0 = veorq_u8(vld1q_u8((const uint8_t *)a),
+                             vld1q_u8((const uint8_t *)b));
+    uint8x16_t x1 = veorq_u8(vld1q_u8((const uint8_t *)a + 16),
+                             vld1q_u8((const uint8_t *)b + 16));
+    uint8x16_t c = vaddq_u8(vcntq_u8(x0), vcntq_u8(x1));
+    uint64x2_t s = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(c)));
+    return (int)(vgetq_lane_u64(s, 0) + vgetq_lane_u64(s, 1));
+#else
+    uint64_t ua[4], ub[4];                 /* memcpy: no aliasing/alignment UB */
+    memcpy(ua, a, 32);
+    memcpy(ub, b, 32);
     return __builtin_popcountll(ua[0] ^ ub[0]) +
            __builtin_popcountll(ua[1] ^ ub[1]) +
            __builtin_popcountll(ua[2] ^ ub[2]) +
            __builtin_popcountll(ua[3] ^ ub[3]);
+#endif
 }
 
 static inline int dot64_i8(const int8_t *a, const int8_t *b) {
