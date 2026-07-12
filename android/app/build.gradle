@@ -11,12 +11,15 @@ plugins {
 // behaviour are untouched.
 def leanBuild = project.hasProperty('lean')
 
-// QNN build (./gradlew assembleDebug -Pqnn): use a QNN-enabled ONNX Runtime
-// (built with --use_qnn) + the Qualcomm backend libs staged in jniLibs by
-// android/fetch_qnn.ps1, so ZipDepth runs on the Hexagon NPU. The stock CPU
-// ORT from Maven is dropped to avoid two libonnxruntime.so; everything else
-// (the ONNX asset, xr_zipdepth's EP selection) is unchanged. arm64-only (the
-// NPU backends ship arm64 only).
+// QNN build (./gradlew assembleDebug -Pqnn): swap the stock CPU ORT for
+// Microsoft's prebuilt QNN-enabled ORT so ZipDepth runs on the Hexagon NPU.
+// onnxruntime-android-qnn pulls the Qualcomm backend libs (com.qualcomm.qti:
+// qnn-runtime, incl. libQnnHtp + the V68=SD888.. HTP skels) TRANSITIVELY and
+// version-matched from Maven -- no SDK, no jniLibs staging, no from-source
+// build. arm64-only (QNN ships arm64 only). Everything else (the ONNX asset,
+// xr_zipdepth's EP selection) is unchanged. android/fetch_qnn.ps1 is only for
+// OVERRIDING the backend libs with a specific QAIRT version (e.g. a newer SoC
+// arch than the matched qnn-runtime ships).
 def qnnBuild = project.hasProperty('qnn')
 
 android {
@@ -70,7 +73,7 @@ dependencies {
     // to run the XFeat session-map descriptors (see cpp/xr_xfeat.c). The
     // Java API is unused. Otherwise the app sticks to framework APIs +
     // the Kotlin stdlib (added by the Kotlin plugin). Omitted in the lean
-    // build (BAD/TEBLID only) and in the qnn build (a QNN-enabled ORT is
-    // supplied via jniLibs instead — see fetch_qnn.ps1).
-    if (!leanBuild && !qnnBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
+    // build (BAD/TEBLID only); swapped for the QNN-enabled ORT in the qnn build.
+    if (qnnBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android-qnn:1.22.0'
+    else if (!leanBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
 }
