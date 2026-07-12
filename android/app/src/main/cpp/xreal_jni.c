@@ -22,10 +22,13 @@
 #include <libusb.h>
 #include <libuvc/libuvc.h>
 
+#include "xr_depthcal.h"
 #include "xr_map.h"
+#include "xr_sgrid.h"
 #include "xr_slam.h"
 #include "xr_stereo.h"
 #include "xr_track.h"
+#include "xr_zipdepth.h"
 #include "xreal_align.h"
 #include "xreal_core.h"
 #include "xreal_gles.h"
@@ -70,6 +73,8 @@ static atomic_uint DEPTH_GEN;
  * receives frames, extrinsics and inertial data in one consistent frame. */
 #define XR_ENABLE_BASALT 1
 
+#define ZD_MAX_ANCH 768      /* stereo-grid + landmark anchors per depth frame */
+
 static struct {
     uvc_context_t *ctx;
     uvc_device_handle_t *devh;
@@ -87,7 +92,8 @@ static struct {
      * The tracker is the live front-end stand-in; Basalt plugs in behind
      * the same data flow (see docs/VSLAM.md). */
     pthread_t slam_thread;
-    pthread_t depth_thread;                 /* SGM depth, off the SLAM thread */
+    pthread_t depth_thread;                 /* SGM / ZipDepth, off the SLAM thread */
+    char zip_model[256];                    /* ZipDepth ONNX path (empty = SGM) */
     atomic_int slam_running;
     pthread_mutex_t slam_lock;
     pthread_cond_t slam_cond;
@@ -1246,7 +1252,58 @@ static void *depth_worker(void *arg) {
         xr_stereo_rectify(st, 0, in0);
         xr_stereo_rectify(st, 1, in1);
         int64_t t0 = now_ms();
-        xr_stereo_depth(st, disp_local);
+
+        /* Metric depth: ZipDepth (NPU) calibrated to metric via sparse anchors
+         * when the model + ORT are present, else SGM. Both write disp_local
+         * (quarter-pixel disparity) so the colorize/publish path is identical.
+         * Dormant until a model is staged -> today this always runs SGM. */
+        static int zd_try;                          /* throttle model re-init */
+        if (!xr_zipdepth_available() && S.zip_model[0] && (zd_try++ % 90) == 0)
+            xr_zipdepth_init(S.zip_model);
+        int used_zip = 0;
+        if (xr_zipdepth_available()) {
+            static float zdepth[XS_W * XS_H], dinv[XS_W * XS_H], metric[XS_W * XS_H];
+            if (xr_zipdepth_run(st->rect[0], XS_W, XS_H, zdepth) == 0) {
+                for (int i = 0; i < XS_W * XS_H; i++) {
+                    float dd = zdepth[i];            /* -> inverse-depth space */
+                    dd = dd < 0.05f ? 0.05f : dd > 100.0f ? 100.0f : dd;
+                    dinv[i] = 1.0f / dd;
+                }
+                /* sparse metric anchors: stereo grid (near/mid) + VIO
+                 * landmarks (far, from S.vio under the lock) */
+                static xr_anchor anch[ZD_MAX_ANCH];
+                int na = xr_sgrid_match(st->rect[0], st->rect[1], XS_W, XS_H,
+                                        st->f_rect, st->baseline_m,
+                                        anch, ZD_MAX_ANCH);
+                static float lmxyz[XR_SLAM_MAX_FEATURES][3], lq[4], lp[3];
+                pthread_mutex_lock(&S.lock);
+                int n_lm = S.vio_fresh ? S.vio.n_landmarks : 0;
+                if (n_lm > XR_SLAM_MAX_FEATURES) n_lm = XR_SLAM_MAX_FEATURES;
+                if (n_lm > 0) {
+                    memcpy(lmxyz, S.vio.lm_xyz, sizeof(float) * 3 * (size_t)n_lm);
+                    memcpy(lq, S.vio.q, sizeof lq);
+                    memcpy(lp, S.vio.p, sizeof lp);
+                }
+                pthread_mutex_unlock(&S.lock);
+                if (n_lm > 0 && na < ZD_MAX_ANCH)
+                    na += xr_lm_anchors(lmxyz, n_lm, lq, lp, st->R_rect_imu,
+                                        st->f_rect, (XS_W - 1) * 0.5f,
+                                        (XS_H - 1) * 0.5f, S.eye_calib[0].p_cam,
+                                        XS_W, XS_H, anch + na, ZD_MAX_ANCH - na);
+                static xr_depthcal cal;             /* persists across frames */
+                xr_depthcal_update(&cal, dinv, XS_W, XS_H, anch, na);
+                xr_depthcal_apply(&cal, dinv, metric, XS_W * XS_H, 0.1f, 30.0f);
+                /* metric depth -> quarter-pixel disparity for the display path */
+                float fbs = st->f_rect * st->baseline_m * (float)XS_SCALE;
+                for (int i = 0; i < XS_W * XS_H; i++) {
+                    float z = metric[i];
+                    int dq = z > 0.05f ? (int)(fbs / z + 0.5f) : 0;
+                    disp_local[i] = dq > 255 ? 255 : (uint8_t)dq;
+                }
+                used_zip = 1;
+            }
+        }
+        if (!used_zip) xr_stereo_depth(st, disp_local);   /* SGM */
         float depth_ms = (float)(now_ms() - t0);
         atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
         /* cheap early-out if a disable/re-enable already landed */
@@ -2069,6 +2126,21 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetXfeatModel(JNIEnv *env, jclass
     const char *p = path ? (*env)->GetStringUTFChars(env, path, NULL) : NULL;
     xr_map_set_model(p);
     if (p) (*env)->ReleaseStringUTFChars(env, path, p);
+}
+
+/* Path of the staged ZipDepth ONNX model. Empty/unset -> the depth worker
+ * stays on SGM. The depth worker inits it (off the UI thread) on first use. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetZipModel(JNIEnv *env, jclass cls,
+                                                           jstring path) {
+    (void)cls;
+    S.zip_model[0] = 0;
+    if (!path) return;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (p) {
+        strncpy(S.zip_model, p, sizeof S.zip_model - 1);
+        (*env)->ReleaseStringUTFChars(env, path, p);
+    }
 }
 
 /* Runtime descriptor selector: BAD/TEBLID (false) vs XFeat (true). Returns the

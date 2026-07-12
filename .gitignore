@@ -54,3 +54,6 @@ android/app/src/main/jniLibs/
 .vscode/
 __pycache__/
 *.pyc
+
+# ZipDepth model repo (reference + ONNX export tooling; not a build dep)
+/ZipDepth/

@@ -57,6 +57,10 @@ object XrealNative {
      *  Runtime / the model isn't available. */
     external fun nativeSetUseXfeat(on: Boolean): Boolean
 
+    /** Path of the staged ZipDepth ONNX model (monocular metric depth on the
+     *  NPU). Empty/unset keeps the depth worker on SGM. */
+    external fun nativeSetZipModel(path: String)
+
     /** True when XFeat is actually loaded (model staged + ONNX Runtime). */
     external fun nativeXfeatReady(): Boolean
 

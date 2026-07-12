@@ -544,6 +544,18 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "XFeat staging failed (BAD/TEBLID only): $e")
         }
+        // Stage the ZipDepth model if present; absent -> the depth worker stays
+        // on SGM (the .onnx is dropped in once exported — see zipdepth-plan).
+        try {
+            val zd = java.io.File(filesDir, "zipdepth.onnx")
+            assets.open("zipdepth.onnx").use { src ->
+                zd.outputStream().use { dst -> src.copyTo(dst) }
+            }
+            XrealNative.nativeSetZipModel(zd.absolutePath)
+            android.util.Log.i("xrealcam", "ZipDepth model staged: ${zd.absolutePath}")
+        } catch (e: Exception) {
+            android.util.Log.i("xrealcam", "ZipDepth model absent (SGM depth): $e")
+        }
     }
 
     /** Parse the on-device factory calibration and enable the world-aligned
