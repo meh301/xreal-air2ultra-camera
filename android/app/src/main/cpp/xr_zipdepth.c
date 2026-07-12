@@ -47,90 +47,85 @@ static int ort_ok(OrtStatus *st, const char *what) {
 
 static void lc(char *s) { for (; *s; s++) if (*s >= 'A' && *s <= 'Z') *s += 32; }
 
-/* Pick an NPU execution provider by SoC; leave CPU (default) if none fits or
- * the provider isn't in this ORT build (append returns an error -> fall back). */
-static void zd_append_ep(OrtSessionOptions *opts) {
-    char soc[PROP_VALUE_MAX] = {0}, board[PROP_VALUE_MAX] = {0};
-    int rc0 = __system_property_get("ro.soc.manufacturer", soc);
-    int rc1 = __system_property_get("ro.board.platform", board);
-    (void)rc0; (void)rc1;
-    lc(soc); lc(board);
-    int qcom = strstr(soc, "qti") || strstr(soc, "qualcomm") ||
-               strstr(board, "kona") || strstr(board, "lahaina") ||
-               strstr(board, "taro") || strstr(board, "kalama") ||
-               strstr(board, "pineapple") || strstr(board, "sm8");
-    int mtk = strstr(soc, "mediatek") || strstr(board, "mt6");
+/* Detect SoC family from build properties; also returns the board string. */
+static void zd_detect_soc(int *qcom, int *mtk, char *board, size_t bn) {
+    char soc[PROP_VALUE_MAX] = {0}, b[PROP_VALUE_MAX] = {0};
+    __system_property_get("ro.soc.manufacturer", soc);
+    __system_property_get("ro.board.platform", b);
+    lc(soc); lc(b);
+    *qcom = strstr(soc, "qti") || strstr(soc, "qualcomm") ||
+            strstr(b, "kona") || strstr(b, "lahaina") ||
+            strstr(b, "taro") || strstr(b, "kalama") ||
+            strstr(b, "pineapple") || strstr(b, "sm8");
+    *mtk = strstr(soc, "mediatek") || strstr(b, "mt6");
+    snprintf(board, bn, "%s", b);
+}
 
-    OrtStatus *st = NULL;
-    if (qcom) {
-        /* Our extracted native-lib dir (dladdr on our own code) -- the
-         * /data/app/.../lib/arm64 that holds the Maven QNN runtime: libQnnHtp +
-         * the V68 skel. */
-        char libdir[512] = {0};
-        Dl_info info;
-        if (dladdr((void *)zd_append_ep, &info) && info.dli_fname) {
-            const char *slash = strrchr(info.dli_fname, '/');
-            if (slash) snprintf(libdir, sizeof libdir, "%.*s",
-                                (int)(slash - info.dli_fname), info.dli_fname);
-        }
-        /* THE fix for QnnDevice_create INVALID_CONFIG (the failure was invariant
-         * to every EP option, backend_path, ADSP path and QNN version -- because
-         * it happens BEFORE any DSP contact): libQnnHtp.so must dlopen
-         * libcdsprpc.so (the FastRPC client) + the DSP HAL to reach the Hexagon,
-         * but /vendor/lib64 is NOT on an app's linker namespace, so they're never
-         * found and the device is refused as INVALID_CONFIG. Bundle those libs
-         * (pulled from the device into assets/qnn_dsp -> Z.dsp_dir) and point:
-         *   LD_LIBRARY_PATH   -> libcdsprpc.so + the QNN CPU libs (dsp_dir, libdir)
-         *   ADSP_LIBRARY_PATH -> the DSP skel libQnnHtpV68Skel.so (libdir, dsp_dir)
-         * Prepend both dirs to both vars (':' for LD, Qualcomm ';' for ADSP)
-         * before CreateSession, when the stub first talks to FastRPC. */
-        const char *dsp = Z.dsp_dir[0] ? Z.dsp_dir : libdir;
-        {
-            const char *e = getenv("LD_LIBRARY_PATH");
-            char v[1400];
-            snprintf(v, sizeof v, "%s:%s%s%s", dsp, libdir,
-                     (e && e[0]) ? ":" : "", (e && e[0]) ? e : "");
-            setenv("LD_LIBRARY_PATH", v, 1);
-        }
-        {
-            const char *e = getenv("ADSP_LIBRARY_PATH");
-            char v[1400];
-            snprintf(v, sizeof v, "%s;%s%s%s", libdir, dsp,
-                     (e && e[0]) ? ";" : "", (e && e[0]) ? e : "");
-            setenv("ADSP_LIBRARY_PATH", v, 1);
-        }
-        LOGI("ZipDepth: FastRPC libs dsp_dir=%s qnn_dir=%s (LD+ADSP set)",
-             dsp, libdir);
-        /* Absolute backend path (our matched Maven libQnnHtp.so). lahaina =
-         * SD888: soc_model 30 (QNN_SOC_MODEL_SM8350), htp_arch 68 (V68).
-         * enable_htp_fp16_precision=1 runs this FP32 model in fp16 ON the HTP
-         * (the no-calibration alternative to INT8 QDQ -- without it the float
-         * Convs fall back to CPU); opt mode 3 = best graph finalization. */
-        char backend[560];
-        if (libdir[0]) snprintf(backend, sizeof backend, "%s/libQnnHtp.so", libdir);
-        else snprintf(backend, sizeof backend, "libQnnHtp.so");
-        const char *k[] = { "backend_path", "soc_model", "htp_arch",
-                            "enable_htp_fp16_precision",
-                            "htp_graph_finalization_optimization_mode" };
-        const char *v[] = { backend, "30", "68", "1", "3" };
-        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 5);
-        if (!st) {
-            LOGI("ZipDepth: QNN (HTP V68/SM8350, fp16) EP [board='%s'] %s",
-                 board, backend);
-            return;
-        }
-    } else if (mtk) {
-        st = Z.api->SessionOptionsAppendExecutionProvider(opts, ZD_MTK_EP,
-                                                          NULL, NULL, 0);
-        if (!st) { LOGI("ZipDepth: MediaTek (NeuroPilot) EP"); return; }
+/* Prepend our native-lib dirs to the two loader paths so QNN's HTP can reach the
+ * Hexagon. THE reason this is needed: libQnnHtp.so must dlopen libcdsprpc.so (the
+ * FastRPC client) + its DSP/system-lib closure, but /vendor/lib64 + /system/lib64
+ * are NOT on an app's linker namespace -- so we bundle those libs in the app
+ * native-lib dir (pull_dsp_libs.ps1 -> jniLibs) and:
+ *   LD_LIBRARY_PATH   -> the linker finds libcdsprpc.so + the QNN CPU libs
+ *   ADSP_LIBRARY_PATH -> FastRPC finds the DSP skel (libQnnHtpV68Skel.so)
+ * (Bundling in nativeLibraryDir is what actually makes libcdsprpc loadable --
+ * it's on libQnnHtp's own namespace; LD_LIBRARY_PATH is belt-and-suspenders.)
+ * Writes the app native-lib dir (dladdr on our own code) into `libdir`. */
+static void zd_fastrpc_env(char *libdir, size_t ln) {
+    libdir[0] = 0;
+    Dl_info info;
+    if (dladdr((void *)zd_fastrpc_env, &info) && info.dli_fname) {
+        const char *slash = strrchr(info.dli_fname, '/');
+        if (slash) snprintf(libdir, ln, "%.*s",
+                            (int)(slash - info.dli_fname), info.dli_fname);
     }
+    const char *dsp = Z.dsp_dir[0] ? Z.dsp_dir : libdir;
+    { const char *e = getenv("LD_LIBRARY_PATH"); char v[1400];
+      snprintf(v, sizeof v, "%s:%s%s%s", dsp, libdir,
+               (e && e[0]) ? ":" : "", (e && e[0]) ? e : "");
+      setenv("LD_LIBRARY_PATH", v, 1); }
+    { const char *e = getenv("ADSP_LIBRARY_PATH"); char v[1400];
+      snprintf(v, sizeof v, "%s;%s%s%s", libdir, dsp,
+               (e && e[0]) ? ";" : "", (e && e[0]) ? e : "");
+      setenv("ADSP_LIBRARY_PATH", v, 1); }
+    LOGI("ZipDepth: FastRPC libs dsp_dir=%s qnn_dir=%s (LD+ADSP set)", dsp, libdir);
+}
+
+/* Build session options (verbose log so the QNN backend prints WHY it rejects a
+ * config; CPU-thread cap so a CPU fallback doesn't starve SLAM/render; graph
+ * opt), optionally append execution provider `ep` with n key/value pairs, then
+ * try to open the model. On success sets Z.session and returns 1; else logs
+ * `label` + the reason and returns 0. */
+static int zd_open(const char *model_path, const char *ep,
+                   const char **k, const char **v, int n, const char *label) {
+    OrtSessionOptions *opts = NULL;
+    if (!ort_ok(Z.api->CreateSessionOptions(&opts), "CreateSessionOptions"))
+        return 0;
+    ort_ok(Z.api->SetSessionLogSeverityLevel(opts, 0), "SetLogSeverity");
+    ort_ok(Z.api->SetIntraOpNumThreads(opts, 2), "SetIntraOpNumThreads");
+    ort_ok(Z.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL),
+           "SetGraphOpt");
+    if (ep) {
+        OrtStatus *st = Z.api->SessionOptionsAppendExecutionProvider(
+            opts, ep, k, v, n);
+        if (st) {
+            LOGE("ZipDepth: [%s] EP append failed: %s", label,
+                 Z.api->GetErrorMessage(st));
+            Z.api->ReleaseStatus(st);
+            Z.api->ReleaseSessionOptions(opts);
+            return 0;
+        }
+    }
+    OrtStatus *st = Z.api->CreateSession(Z.env, model_path, opts, &Z.session);
+    Z.api->ReleaseSessionOptions(opts);
     if (st) {
-        LOGE("ZipDepth: NPU EP unavailable (%s) — CPU",
-             Z.api->GetErrorMessage(st));
+        LOGE("ZipDepth: [%s] open failed: %s", label, Z.api->GetErrorMessage(st));
         Z.api->ReleaseStatus(st);
-    } else {
-        LOGI("ZipDepth: CPU EP (no NPU match: soc='%s' board='%s')", soc, board);
+        Z.session = NULL;
+        return 0;
     }
+    LOGI("ZipDepth: [%s] session opened", label);
+    return 1;
 }
 
 static int zd_try_init(const char *model_path) {
@@ -149,26 +144,50 @@ static int zd_try_init(const char *model_path) {
     if (!ort_ok(Z.api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "zipdepth", &Z.env),
                 "CreateEnv"))
         return 0;
-    OrtSessionOptions *opts = NULL;
-    if (!ort_ok(Z.api->CreateSessionOptions(&opts), "CreateSessionOptions"))
-        return 0;
-    /* VERBOSE so the QNN backend logs WHY QnnDevice_create rejects the config
-     * (the terse INVALID_CONFIG hides the offending field). Session-level, so
-     * it overrides the shared env's WARNING level. Grep logcat for Qnn/htp. */
-    ort_ok(Z.api->SetSessionLogSeverityLevel(opts, 0), "SetLogSeverity");
-    /* Cap CPU-fallback threads so a device without the QNN EP doesn't spawn
-     * inference threads across every core and starve the UVC / SLAM / render
-     * pipeline (the QNN EP runs on the HTP and ignores this). */
-    ort_ok(Z.api->SetIntraOpNumThreads(opts, 2), "SetIntraOpNumThreads");
-    zd_append_ep(opts);                       /* NPU EP or CPU */
-    ort_ok(Z.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL),
-           "SetGraphOpt");
-    if (!ort_ok(Z.api->CreateSession(Z.env, model_path, opts, &Z.session),
-                "CreateSession")) {
-        Z.api->ReleaseSessionOptions(opts);
-        return 0;
+
+    int qcom = 0, mtk = 0;
+    char board[PROP_VALUE_MAX] = {0};
+    zd_detect_soc(&qcom, &mtk, board, sizeof board);
+
+    int ok = 0;
+    if (qcom) {
+        char libdir[512];
+        zd_fastrpc_env(libdir, sizeof libdir);
+        char backend[560];
+        if (libdir[0]) snprintf(backend, sizeof backend, "%s/libQnnHtp.so", libdir);
+        else snprintf(backend, sizeof backend, "libQnnHtp.so");
+        /* The HTP device is created inside CreateSession. On-device JIT wants the
+         * HTP to AUTO-DETECT the SoC: passing an explicit soc_model/htp_arch
+         * builds a QnnHtpDevice platform descriptor that this lahaina/V68 rejects
+         * at QnnDevice_create as INVALID_CONFIG (verified: fails with the
+         * descriptor even with libcdsprpc present + both QNN 2.31/2.33; ORT only
+         * pushes that descriptor when soc/arch are set -- qnn_backend_manager.cc
+         * CreateDevice). So try auto-detect FIRST (no soc/arch), then the explicit
+         * variants as fallbacks -- first that opens the model wins. fp16 lets the
+         * FP32 model run on the HTP (the no-calibration alternative to INT8 QDQ);
+         * opt mode 3 = best graph finalization. */
+        const char *k0[] = { "backend_path", "enable_htp_fp16_precision",
+                             "htp_graph_finalization_optimization_mode" };
+        const char *v0[] = { backend, "1", "3" };
+        const char *k1[] = { "backend_path", "htp_arch",
+                             "enable_htp_fp16_precision",
+                             "htp_graph_finalization_optimization_mode" };
+        const char *v1[] = { backend, "68", "1", "3" };
+        const char *k2[] = { "backend_path", "soc_model",
+                             "enable_htp_fp16_precision",
+                             "htp_graph_finalization_optimization_mode" };
+        const char *v2[] = { backend, "30", "1", "3" };
+        LOGI("ZipDepth: QNN HTP init [board='%s'] %s", board, backend);
+        ok = zd_open(model_path, "QNN", k0, v0, 3, "QNN HTP auto-detect fp16")
+          || zd_open(model_path, "QNN", k1, v1, 4, "QNN HTP arch=68 fp16")
+          || zd_open(model_path, "QNN", k2, v2, 4, "QNN HTP soc=30 fp16");
+        if (!ok) LOGE("ZipDepth: all QNN HTP configs failed -> CPU fallback");
+    } else if (mtk) {
+        ok = zd_open(model_path, ZD_MTK_EP, NULL, NULL, 0, "MediaTek NeuroPilot");
     }
-    Z.api->ReleaseSessionOptions(opts);
+    if (!ok && !zd_open(model_path, NULL, NULL, NULL, 0, "CPU"))
+        return 0;
+
     if (!ort_ok(Z.api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,
                                            &Z.meminfo), "CreateCpuMemoryInfo"))
         return 0;
