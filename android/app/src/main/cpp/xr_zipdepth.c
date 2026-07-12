@@ -60,13 +60,16 @@ static void zd_append_ep(OrtSessionOptions *opts) {
 
     OrtStatus *st = NULL;
     if (qcom) {
-        /* Hexagon HTP (NPU) backend at burst clocks. The backend .so and the
-         * per-arch V*Stub/V*Skel libs must be packaged in jniLibs (see
-         * android/fetch_qnn.ps1); libcdsprpc.so is a device system lib. */
-        const char *k[] = { "backend_path", "htp_performance_mode" };
-        const char *v[] = { "libQnnHtp.so", "burst" };
-        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 2);
-        if (!st) { LOGI("ZipDepth: QNN (Hexagon HTP, burst) EP"); return; }
+        /* Hexagon HTP (NPU) backend. Minimal config: just the backend lib, so
+         * QNN creates the device with defaults -- adding htp_performance_mode
+         * here made 2.33's HTP reject device creation
+         * (QNN_DEVICE_ERROR_INVALID_CONFIG). Perf mode / burst is applied later
+         * once the base path runs. The backend .so ships via the QNN Maven
+         * runtime; libcdsprpc.so is a device system lib. */
+        const char *k[] = { "backend_path" };
+        const char *v[] = { "libQnnHtp.so" };
+        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 1);
+        if (!st) { LOGI("ZipDepth: QNN (Hexagon HTP) EP"); return; }
     } else if (mtk) {
         st = Z.api->SessionOptionsAppendExecutionProvider(opts, ZD_MTK_EP,
                                                           NULL, NULL, 0);
