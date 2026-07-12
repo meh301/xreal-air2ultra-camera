@@ -3,6 +3,7 @@
 
 #include <dlfcn.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/system_properties.h>
 
@@ -60,16 +61,23 @@ static void zd_append_ep(OrtSessionOptions *opts) {
 
     OrtStatus *st = NULL;
     if (qcom) {
-        /* Hexagon HTP (NPU) backend. Minimal config: just the backend lib, so
-         * QNN creates the device with defaults -- adding htp_performance_mode
-         * here made 2.33's HTP reject device creation
-         * (QNN_DEVICE_ERROR_INVALID_CONFIG). Perf mode / burst is applied later
-         * once the base path runs. The backend .so ships via the QNN Maven
-         * runtime; libcdsprpc.so is a device system lib. */
+        /* Point backend_path at OUR bundled libQnnHtp.so via its ABSOLUTE path
+         * (the app's native-lib dir, found by dladdr on our own code). The bare
+         * name let the device's VENDOR QNN libs load instead, whose version
+         * mismatches ORT's QNN EP -> QnnDevice_create fails INVALID_CONFIG. The
+         * whole matched QNN 2.33 set (system/prepare/skels) lives in that dir. */
+        char backend[512] = "libQnnHtp.so";
+        Dl_info info;
+        if (dladdr((void *)zd_append_ep, &info) && info.dli_fname) {
+            const char *slash = strrchr(info.dli_fname, '/');
+            if (slash)
+                snprintf(backend, sizeof backend, "%.*s/libQnnHtp.so",
+                         (int)(slash - info.dli_fname), info.dli_fname);
+        }
         const char *k[] = { "backend_path" };
-        const char *v[] = { "libQnnHtp.so" };
+        const char *v[] = { backend };
         st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 1);
-        if (!st) { LOGI("ZipDepth: QNN (Hexagon HTP) EP"); return; }
+        if (!st) { LOGI("ZipDepth: QNN (Hexagon HTP) EP [%s]", backend); return; }
     } else if (mtk) {
         st = Z.api->SessionOptionsAppendExecutionProvider(opts, ZD_MTK_EP,
                                                           NULL, NULL, 0);
