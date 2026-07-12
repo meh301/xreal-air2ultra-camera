@@ -74,10 +74,17 @@ static void zd_append_ep(OrtSessionOptions *opts) {
                 snprintf(backend, sizeof backend, "%.*s/libQnnHtp.so",
                          (int)(slash - info.dli_fname), info.dli_fname);
         }
-        const char *k[] = { "backend_path" };
-        const char *v[] = { backend };
-        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 1);
-        if (!st) { LOGI("ZipDepth: QNN (Hexagon HTP) EP [%s]", backend); return; }
+        /* skip_qnn_version_check: tolerate a minor QNN API delta between ORT's
+         * EP and the loaded backend. The soc/board is logged so we can see the
+         * exact Hexagon arch if device creation still rejects the config. */
+        const char *k[] = { "backend_path", "skip_qnn_version_check" };
+        const char *v[] = { backend, "1" };
+        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 2);
+        if (!st) {
+            LOGI("ZipDepth: QNN (Hexagon HTP) EP [soc='%s' board='%s'] %s",
+                 soc, board, backend);
+            return;
+        }
     } else if (mtk) {
         st = Z.api->SessionOptionsAppendExecutionProvider(opts, ZD_MTK_EP,
                                                           NULL, NULL, 0);
