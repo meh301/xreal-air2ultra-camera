@@ -1249,14 +1249,9 @@ static void *depth_worker(void *arg) {
         xr_stereo_depth(st, disp_local);
         float depth_ms = (float)(now_ms() - t0);
         atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
-        /* a disable (or re-enable) during this SGM pass cancels it: don't
-         * repaint the depth output with a now-stale frame */
+        /* cheap early-out if a disable/re-enable already landed */
         if (job_gen != atomic_load(&DEPTH_GEN) || !atomic_load(&S.depth_on))
             continue;
-        pthread_mutex_lock(&S.lock);
-        memcpy(S.disp, disp_local, sizeof S.disp);
-        S.depth_ms = depth_ms;
-        pthread_mutex_unlock(&S.lock);
 
         /* colorized copy for the glasses' depth passthrough (black border so
          * out-of-image samples clamp to black) */
@@ -1271,7 +1266,21 @@ static void *depth_worker(void *arg) {
                 }
             }
         }
-        xr_gles_submit_depth(drgba, XS_W, XS_H);
+
+        /* Publish LINEARIZED against disable: nativeSetDepth(false) advances
+         * DEPTH_GEN, blanks, and clears the GLES depth all under DEPTH_BOX.lock,
+         * so re-checking the stamp here under the same lock guarantees a disable
+         * can't slip between the check and the writes and leave a stale frame.
+         * Lock order DEPTH_BOX -> S -> (submit's G): matches nativeSetDepth. */
+        pthread_mutex_lock(&DEPTH_BOX.lock);
+        if (job_gen == atomic_load(&DEPTH_GEN) && atomic_load(&S.depth_on)) {
+            pthread_mutex_lock(&S.lock);
+            memcpy(S.disp, disp_local, sizeof S.disp);
+            S.depth_ms = depth_ms;
+            pthread_mutex_unlock(&S.lock);
+            xr_gles_submit_depth(drgba, XS_W, XS_H);
+        }
+        pthread_mutex_unlock(&DEPTH_BOX.lock);
     }
     free(st);
     return NULL;
@@ -1951,18 +1960,26 @@ JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetDepth(JNIEnv *env, jclass cls,
                                                         jboolean on) {
     (void)env; (void)cls;
-    int en = on ? 1 : 0;
-    atomic_store(&S.depth_on, en);
-    atomic_fetch_add(&DEPTH_GEN, 1);       /* cancel any in-flight / queued job */
-    if (!en) {
-        pthread_mutex_lock(&DEPTH_BOX.lock);
-        DEPTH_BOX.full = 0;                 /* drop the pending pair */
-        pthread_mutex_unlock(&DEPTH_BOX.lock);
-        pthread_mutex_lock(&S.lock);
-        memset(S.disp, 0, sizeof S.disp);   /* blank the depth output now */
-        S.depth_ms = 0;
-        pthread_mutex_unlock(&S.lock);
+    if (on) {
+        atomic_store(&S.depth_on, 1);
+        atomic_fetch_add(&DEPTH_GEN, 1);   /* cancel any stale in-flight job */
+        return;
     }
+    /* Disable, fully serialized against the worker's check-and-publish (same
+     * DEPTH_BOX.lock): the worker can only publish while it holds this lock and
+     * re-verifies the generation, so once we advance it here nothing stale can
+     * land. Lock order DEPTH_BOX -> S -> G(inside clear_depth), same as the
+     * worker's publish path. */
+    pthread_mutex_lock(&DEPTH_BOX.lock);
+    atomic_store(&S.depth_on, 0);
+    atomic_fetch_add(&DEPTH_GEN, 1);        /* cancel in-flight + queued */
+    DEPTH_BOX.full = 0;                      /* drop the pending pair */
+    pthread_mutex_lock(&S.lock);
+    memset(S.disp, 0, sizeof S.disp);        /* blank the phone-pane depth */
+    S.depth_ms = 0;
+    pthread_mutex_unlock(&S.lock);
+    xr_gles_clear_depth();                   /* drop the stale glasses depth tex */
+    pthread_mutex_unlock(&DEPTH_BOX.lock);
 }
 
 /* Glasses eye-view mode: 0 = camera passthrough, 1 = depth passthrough

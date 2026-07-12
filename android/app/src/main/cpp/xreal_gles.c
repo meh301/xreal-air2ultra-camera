@@ -42,8 +42,14 @@ static struct {
     /* commands / staged data (producer side) */
     ANativeWindow *pending_win;
     int win_changed;
-    xr_eye_calib eyes_calib[2];
-    int calib_variant;
+    /* calibration is double-published: the setter writes pending_* under G.lock,
+     * the render thread promotes pending -> active (eyes_calib/calib_variant)
+     * while it still holds the lock, and only the render thread reads the active
+     * fields afterward — so a mid-present calibration change can't race. */
+    xr_eye_calib eyes_calib[2];        /* ACTIVE: render thread only */
+    int calib_variant;                 /* ACTIVE: render thread only */
+    xr_eye_calib pending_calib[2];     /* staged by the setter */
+    int pending_variant;
     int calib_staged;
     int calib_valid;     /* calibration persists: meshes (re)build whenever a
                             surface exists — the surface often arrives AFTER
@@ -784,9 +790,14 @@ static void *render_thread(void *arg) {
             G.win_changed = 0;
         }
         if (G.calib_staged) {
+            /* promote staged -> active while we own the lock; the render thread
+             * is the only reader of the active fields from here on */
+            memcpy(G.eyes_calib, G.pending_calib, sizeof G.eyes_calib);
+            G.calib_variant = G.pending_variant;
             G.calib_staged = 0;
             G.calib_valid = 1;
             G.mesh_ready = 0;                 /* (re)build below */
+            G.map_disp_ready = 0;             /* recompute GPU display rotation */
         }
         int mode = G.frame_mode;
         uint32_t seq = G.frame_seq;
@@ -894,11 +905,9 @@ void xr_gles_set_window(ANativeWindow *win) {
 void xr_gles_set_alignment(const xr_eye_calib eyes[2], int variant) {
     pthread_mutex_lock(&G.lock);
     ensure_thread();
-    memcpy(G.eyes_calib, eyes, sizeof G.eyes_calib);
-    G.calib_variant = variant;
-    G.calib_staged = 1;
-    G.map_disp_ready = 0;        /* recompute the GPU display rotation from the
-                                  * new calibration / variant */
+    memcpy(G.pending_calib, eyes, sizeof G.pending_calib);  /* stage only */
+    G.pending_variant = variant;
+    G.calib_staged = 1;          /* render thread promotes it under the lock */
     pthread_cond_signal(&G.cond);
     pthread_mutex_unlock(&G.lock);
 }
@@ -1034,6 +1043,16 @@ void xr_gles_submit_depth(const uint8_t *rgba, int w, int h) {
     G.depth_w = w;
     G.depth_h = h;
     G.depth_fresh = 1;
+    pthread_cond_signal(&G.cond);
+    pthread_mutex_unlock(&G.lock);
+}
+
+/* Blank the glasses' depth passthrough so a disabled/stale depth frame can't
+ * linger on screen if the view is still in depth mode. */
+void xr_gles_clear_depth(void) {
+    pthread_mutex_lock(&G.lock);
+    memset(G.depth_img, 0, sizeof G.depth_img);
+    G.depth_fresh = 1;                 /* next present uploads the blank */
     pthread_cond_signal(&G.cond);
     pthread_mutex_unlock(&G.lock);
 }

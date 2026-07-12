@@ -134,5 +134,8 @@ void xr_gles_set_rect(const float R_rect_imu[9], float f, float cx, float cy);
  * internally. The border pixels should be black — samples that leave the
  * image clamp to them. */
 void xr_gles_submit_depth(const uint8_t *rgba, int w, int h);
+/* Blank the depth passthrough (e.g. when depth is disabled) so no stale frame
+ * lingers if the glasses stay in depth view. */
+void xr_gles_clear_depth(void);
 
 #endif
