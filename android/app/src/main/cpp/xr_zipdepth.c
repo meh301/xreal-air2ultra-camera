@@ -97,7 +97,8 @@ static void zd_fastrpc_env(char *libdir, size_t ln) {
  * try to open the model. On success sets Z.session and returns 1; else logs
  * `label` + the reason and returns 0. */
 static int zd_open(const char *model_path, const char *ep,
-                   const char **k, const char **v, int n, const char *label) {
+                   const char **k, const char **v, int n, int strict,
+                   const char *label) {
     OrtSessionOptions *opts = NULL;
     if (!ort_ok(Z.api->CreateSessionOptions(&opts), "CreateSessionOptions"))
         return 0;
@@ -115,14 +116,15 @@ static int zd_open(const char *model_path, const char *ep,
             Z.api->ReleaseSessionOptions(opts);
             return 0;
         }
-        /* Make a QNN failure FAIL the session instead of silently placing all
-         * nodes on the CPU EP: otherwise CreateSession "succeeds" on CPU (slow,
-         * and it masks whether the NPU device was actually created). With this,
-         * the session opens ONLY if QNN takes the whole graph -> honest signal
-         * per config, and no CPU-fallback that would starve SLAM/render. */
-        ort_ok(Z.api->AddSessionConfigEntry(
-                   opts, "session.disable_cpu_ep_fallback", "1"),
-               "DisableCpuFallback");
+        /* strict: make a QNN failure FAIL the session instead of silently
+         * placing all nodes on the CPU EP (which would "succeed" slowly on CPU
+         * and mask whether the NPU actually ran). Non-strict allows a few
+         * boundary nodes (e.g. the I/O quantize/dequantize of a QDQ model) on the
+         * CPU while the heavy compute stays on the NPU. */
+        if (strict)
+            ort_ok(Z.api->AddSessionConfigEntry(
+                       opts, "session.disable_cpu_ep_fallback", "1"),
+                   "DisableCpuFallback");
     }
     OrtStatus *st = Z.api->CreateSession(Z.env, model_path, opts, &Z.session);
     Z.api->ReleaseSessionOptions(opts);
@@ -167,35 +169,30 @@ static int zd_try_init(const char *model_path) {
             snprintf(gpu, sizeof gpu, "%s/libQnnGpu.so", libdir);
         } else { snprintf(htp, sizeof htp, "libQnnHtp.so");
                  snprintf(gpu, sizeof gpu, "libQnnGpu.so"); }
-        /* The QNN device is created inside CreateSession. On the HTP (Hexagon
-         * NPU) it kept failing QnnDevice_create INVALID_CONFIG even with the
-         * FastRPC libs bundled AND with an EMPTY device config (auto-detect, no
-         * soc/arch) -- so it is NOT the platform descriptor; the HTP is masking a
-         * deeper DSP/FastRPC failure (very likely unsigned-PD access to the cDSP)
-         * as INVALID_CONFIG. So try the HTP first (auto-detect, then arch=68),
-         * then fall back to the QNN GPU backend (libQnnGpu.so, Adreno via OpenCL)
-         * which needs no DSP/FastRPC/skel at all. First that takes the whole
-         * graph wins (disable_cpu_ep_fallback makes a fail honest). fp16 lets the
-         * FP32 model run on the HTP; opt mode 3 = best graph finalization. */
-        const char *kh[] = { "backend_path", "enable_htp_fp16_precision",
+        /* The device creation is fixed (real vendor libcdsprpc via
+         * <uses-native-library> -> unsigned PD on the cDSP -> QnnDevice_create
+         * succeeds). The model is now INT8/A16W8 QDQ, so the WHOLE graph maps to
+         * the V68 HTP -- no fp16 (that was the FP32-model bridge, and V68 has no
+         * HTP fp16 path anyway). soc_model 30 = SM8350, htp_arch 68 = V68, opt
+         * mode 3. Try: (1) FULL HTP (disable_cpu_ep_fallback -> every node on the
+         * NPU or fail -> the honest "it's on the NPU" signal), (2) HTP allowing a
+         * few boundary quantize/dequantize nodes on the CPU (heavy compute still
+         * on the NPU), (3) the Adreno GPU as a last resort. */
+        const char *kh[] = { "backend_path", "soc_model", "htp_arch",
                              "htp_graph_finalization_optimization_mode" };
-        const char *vh[] = { htp, "1", "3" };
-        const char *ka[] = { "backend_path", "htp_arch",
-                             "enable_htp_fp16_precision",
-                             "htp_graph_finalization_optimization_mode" };
-        const char *va[] = { htp, "68", "1", "3" };
+        const char *vh[] = { htp, "30", "68", "3" };
         const char *kg[] = { "backend_path" };
         const char *vg[] = { gpu };
         LOGI("ZipDepth: QNN init [board='%s'] htp=%s gpu=%s", board, htp, gpu);
-        ok = zd_open(model_path, "QNN", kh, vh, 3, "QNN HTP auto-detect fp16")
-          || zd_open(model_path, "QNN", ka, va, 4, "QNN HTP arch=68 fp16")
-          || zd_open(model_path, "QNN", kg, vg, 1, "QNN GPU (Adreno/OpenCL)");
+        ok = zd_open(model_path, "QNN", kh, vh, 4, 1, "QNN HTP full (INT8)")
+          || zd_open(model_path, "QNN", kh, vh, 4, 0, "QNN HTP +cpu-boundary (INT8)")
+          || zd_open(model_path, "QNN", kg, vg, 1, 1, "QNN GPU (Adreno)");
         if (!ok)
-            LOGE("ZipDepth: no QNN backend took the graph -> staying on SGM "
-                 "(CPU ZipDepth starves the pipeline). Capture a FULL logcat "
-                 "(fastrpc/adsprpc/QnnHtp tags) for the DSP-side reason.");
+            LOGE("ZipDepth: no QNN backend took the graph -> staying on SGM. "
+                 "Capture a FULL logcat (onnxruntime/fastrpc tags) -- look for "
+                 "which op failed QNN validation (error 3110).");
     } else if (mtk) {
-        ok = zd_open(model_path, ZD_MTK_EP, NULL, NULL, 0, "MediaTek NeuroPilot");
+        ok = zd_open(model_path, ZD_MTK_EP, NULL, NULL, 0, 1, "MediaTek NeuroPilot");
     }
     if (!ok) return 0;   /* NPU unavailable -> depth worker keeps using SGM */
 
