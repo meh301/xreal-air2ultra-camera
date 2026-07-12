@@ -86,6 +86,8 @@ dependencies {
     // Java API is unused. Otherwise the app sticks to framework APIs +
     // the Kotlin stdlib (added by the Kotlin plugin). Omitted in the lean
     // build (BAD/TEBLID only); swapped for the QNN-enabled ORT in the qnn build.
-    if (qnnBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android-qnn:1.22.0'
+    // 1.22.0 (QNN 2.33) fails QnnDevice_create INVALID_CONFIG on lahaina/SD888
+    // (V68) -- a device-creation regression; 1.21.1 pulls an older matched QNN.
+    if (qnnBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android-qnn:1.21.1'
     else if (!leanBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
 }
