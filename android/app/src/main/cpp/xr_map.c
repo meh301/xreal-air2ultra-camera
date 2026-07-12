@@ -139,7 +139,13 @@ typedef struct {
     int desc_type;
     int n_kp;
     float kp_uv[XR_MAP_KP_PER_KF][2];
-    int8_t desc[XR_MAP_KP_PER_KF][64];   /* BAD/TEBLID uses the first 32 bytes */
+    /* One descriptor type per keyframe (desc_type). Overlaid so BAD/TEBLID
+     * packs at a 32-byte stride — two descriptors per cache line in the hot
+     * match scan — instead of the old 64-byte slots it half-filled. */
+    union {
+        int8_t bad[XR_MAP_KP_PER_KF][32];    /* TEBLID/BAD: 256-bit Hamming */
+        int8_t xfeat[XR_MAP_KP_PER_KF][64];  /* XFeat: int8 64-D */
+    } desc;
     int lm_of_kp[XR_MAP_KP_PER_KF];      /* kp -> landmark index, or -1 */
     int n_lm;
     int32_t lm_id[XR_MAP_KP_PER_KF];
@@ -796,7 +802,7 @@ static void bad_extract(const uint8_t *img, xr_kf *kf) {
         kf->kp_uv[j][0] = (float)x;
         kf->kp_uv[j][1] = (float)y;
         kf->lm_of_kp[j] = i;
-        teblid_describe(img, x, y, kf->desc[j]);
+        teblid_describe(img, x, y, kf->desc.bad[j]);
     }
     /* then FAST-grid corners for place-recognition coverage (no 3D) */
     enum { GX = (XR_OW - 2 * MARGIN) / NMS_GRID,
@@ -824,7 +830,7 @@ static void bad_extract(const uint8_t *img, xr_kf *kf) {
             kf->kp_uv[i][0] = (float)bx;
             kf->kp_uv[i][1] = (float)by;
             kf->lm_of_kp[i] = -1;
-            teblid_describe(img, bx, by, kf->desc[i]);
+            teblid_describe(img, bx, by, kf->desc.bad[i]);
         }
 }
 
@@ -882,7 +888,7 @@ static int match_pairs_lim(const xr_kf *a, int na, const xr_kf *b, int nb,
         for (int i = 0; i < na; i++) {
             int best = -32768 * 64, second = best, jb = -1;
             for (int j = 0; j < nb; j++) {
-                int d = dot64_i8(a->desc[i], b->desc[j]);
+                int d = dot64_i8(a->desc.xfeat[i], b->desc.xfeat[j]);
                 if (d > best) { second = best; best = d; jb = j; }
                 else if (d > second) second = d;
             }
@@ -898,7 +904,7 @@ static int match_pairs_lim(const xr_kf *a, int na, const xr_kf *b, int nb,
         for (int i = 0; i < na; i++) {
             int best = 999, second = 999, jb = -1;
             for (int j = 0; j < nb; j++) {
-                int d = hamming256(a->desc[i], b->desc[j]);
+                int d = hamming256(a->desc.bad[i], b->desc.bad[j]);
                 if (d < best) { second = best; best = d; jb = j; }
                 else if (d < second) second = d;
             }
@@ -1221,11 +1227,11 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
             int best = bad ? 999 : -(1 << 30), second = best, bj = -1;
             for (int j = 0; j < nkp; j++) {
                 if (bad) {
-                    int d = hamming256(w->desc[i], KF[s].desc[j]);
+                    int d = hamming256(w->desc.bad[i], KF[s].desc.bad[j]);
                     if (d < best) { second = best; best = d; bj = j; }
                     else if (d < second) second = d;
                 } else {
-                    int d = dot64_i8(w->desc[i], KF[s].desc[j]);
+                    int d = dot64_i8(w->desc.xfeat[i], KF[s].desc.xfeat[j]);
                     if (d > best) { second = best; best = d; bj = j; }
                     else if (d > second) second = d;
                 }
@@ -1484,7 +1490,7 @@ static void process_keyframe(void) {
     /* descriptors: XFeat when selected AND available, BAD/TEBLID otherwise */
     if (atomic_load(&USE_XFEAT) && MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);
     if (atomic_load(&USE_XFEAT) && xr_xfeat_available()) {
-        int n = xr_xfeat_extract(img, work.kp_uv, work.desc,
+        int n = xr_xfeat_extract(img, work.kp_uv, work.desc.xfeat,
                                  XR_MAP_KP_PER_KF);
         if (n >= 0) {
             work.n_kp = n;
