@@ -3,6 +3,14 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Lean build (./gradlew assembleDebug -Plean): arm64-only and without ONNX
+// Runtime, for a TEBLID/BAD-only deployment. XFeat dlopens libonnxruntime.so
+// and falls back to BAD when it is absent (see cpp/xr_xfeat.c), so dropping
+// the dependency simply omits the ~18 MB .so; nothing else changes. Kept as a
+// property, not a product flavor, so the default full build's task names and
+// behaviour are untouched.
+def leanBuild = project.hasProperty('lean')
+
 android {
     namespace 'org.air2ultra.stereocam'
     compileSdk 34
@@ -16,7 +24,8 @@ android {
         versionName '1.0'
         ndk {
             // x86 omitted: emulators can't see the glasses anyway
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
+            if (leanBuild) abiFilters 'arm64-v8a'
+            else abiFilters 'arm64-v8a', 'armeabi-v7a'
         }
     }
 
@@ -24,6 +33,13 @@ android {
         ndkBuild {
             path 'src/main/cpp/Android.mk'
         }
+    }
+
+    // The 2.7 MB XFeat model lives outside main/ so the lean build (no ONNX
+    // Runtime to run it) doesn't ship it; the full build pulls it back in.
+    // Kotlin already treats a missing model as "BAD/TEBLID only".
+    if (!leanBuild) {
+        sourceSets.main.assets.srcDir 'src/xfeat/assets'
     }
 
     buildTypes {
@@ -45,6 +61,7 @@ dependencies {
     // ONNX Runtime: packages libonnxruntime.so, which native code dlopens
     // to run the XFeat session-map descriptors (see cpp/xr_xfeat.c). The
     // Java API is unused. Otherwise the app sticks to framework APIs +
-    // the Kotlin stdlib (added by the Kotlin plugin).
-    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
+    // the Kotlin stdlib (added by the Kotlin plugin). Omitted in the lean
+    // build, which runs BAD/TEBLID descriptors only.
+    if (!leanBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
 }
