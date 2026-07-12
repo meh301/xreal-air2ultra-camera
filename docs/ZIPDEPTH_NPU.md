@@ -16,31 +16,60 @@ landmarks + a sparse-stereo grid (`xr_depthcal` / `xr_sgrid` / `xr_zipdepth`).
    Maven.
 3. **On-device compile** — the QNN EP compiles the ONNX to the specific Hexagon
    at session load (cacheable). `xr_zipdepth.c` requests
-   `backend_path=libQnnHtp.so`, `htp_performance_mode=burst`.
+   `backend_path=libQnnHtp.so`, `soc_model=30` (SM8350), `htp_arch=68` (V68),
+   and `enable_htp_fp16_precision=1` (runs this FP32 model in fp16 on the HTP —
+   the no-calibration alternative to INT8 QDQ).
 
-## Build it — two commands
+## The FastRPC libs — the one non-obvious requirement
+
+QNN's `libQnnHtp.so` must `dlopen` **`libcdsprpc.so`** (the FastRPC client) and
+its DSP/system-lib closure to reach the Hexagon. Those live in `/vendor/lib64`
+and `/system/lib64`, which are **not** on an Android app's linker namespace — so
+they are never found and `QnnDevice_create` fails
+`QNN_DEVICE_ERROR_INVALID_CONFIG` **before any DSP contact** (which is why no EP
+option, `backend_path`, `ADSP_LIBRARY_PATH` or QNN version ever moved it). The
+fix is to bundle those libs in the app's native-lib dir (`jniLibs`), on the same
+namespace as `libQnnHtp.so`. They are **device-specific**, so pull them from the
+target phone:
+
+```
+powershell -File android\pull_dsp_libs.ps1     # phone on adb; -> jniLibs/arm64-v8a
+```
+
+(Proven set + root cause: `DakeQQ/YOLO-Depth-Estimation-for-Android`, ONNX
+Runtime issue #21214.)
+
+## Build it — three commands
 
 ```
 # 1. ONNX (already staged; regenerate if the checkpoint changes). --npu is
 #    required for the npu checkpoint.
 powershell -File android\build_zipdepth_onnx.ps1
 
-# 2. NPU build. -Pqnn swaps in onnxruntime-android-qnn (ORT + matched QNN
+# 2. FastRPC/DSP libs from THIS device (see above). One-time, per device model.
+powershell -File android\pull_dsp_libs.ps1
+
+# 3. NPU build. -Pqnn swaps in onnxruntime-android-qnn (ORT + matched QNN
 #    backend libs, from Maven), arm64-only.
 gradlew assembleDebug -Pqnn
 ```
 
-That's the whole NPU build — **no QAIRT SDK, no from-source ORT build.** The
-resulting APK (~165 MB) carries `libonnxruntime.so` (QNN EP), the QNN 2.33
-backend + `libQnnHtpV68Skel.so` (V68 = SD888), and `zipdepth.onnx`.
+**No QAIRT SDK, no from-source ORT build.** The resulting APK carries
+`libonnxruntime.so` (QNN EP), the matched QNN backend + `libQnnHtpV68Skel.so`
+(V68 = SD888), the device FastRPC libs, and `zipdepth.onnx`.
 
 The default `gradlew assembleDebug` (no `-Pqnn`) uses the stock CPU ORT, so the
 exact same pipeline runs on the CPU for testing without the NPU stack.
 
 ## Verify on device
 
-`adb logcat -s xrealcam`, with depth enabled:
-- `ZipDepth: QNN (Hexagon HTP, burst) EP` (not `CPU EP` → the NPU loaded)
+`adb logcat -s xrealcam onnxruntime`, with depth enabled:
+- `ZipDepth: FastRPC libs dsp_dir=… qnn_dir=…` — the FastRPC lib dirs.
+- `ZipDepth: QNN (HTP V68/SM8350, fp16) EP` (not `CPU EP` → the NPU loaded)
+- **no** `Failed to create device … INVALID_CONFIG` from `onnxruntime` (that line
+  means `libcdsprpc.so` still isn't being found — re-run `pull_dsp_libs.ps1`).
+- `Session … successfully initialized` with nodes on the QNN EP (not
+  `All nodes placed on [CPUExecutionProvider]`).
 - `ZipDepth ready: … (384x384, in=image out=depth)`
 - first session load is slow (QNN compiles the graph on-device).
 

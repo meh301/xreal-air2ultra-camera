@@ -556,6 +556,29 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.i("xrealcam", "ZipDepth model absent (SGM depth): $e")
         }
+        // Stage the QNN FastRPC/DSP libs (libcdsprpc.so + the DSP HAL, pulled
+        // from THIS device into assets/qnn_dsp — see android/pull_dsp_libs.ps1).
+        // QNN's libQnnHtp.so must dlopen libcdsprpc.so to reach the Hexagon, but
+        // /vendor/lib64 isn't on the app's linker namespace, so without these
+        // QnnDevice_create fails INVALID_CONFIG. Absent (non-qnn build or not
+        // pulled) -> ZipDepth stays on CPU/SGM.
+        try {
+            val dspDir = java.io.File(filesDir, "qnn_dsp")
+            dspDir.mkdirs()
+            var n = 0
+            for (name in assets.list("qnn_dsp") ?: emptyArray()) {
+                assets.open("qnn_dsp/$name").use { src ->
+                    java.io.File(dspDir, name).outputStream().use { dst -> src.copyTo(dst) }
+                }
+                n++
+            }
+            if (n > 0) {
+                XrealNative.nativeSetQnnDspDir(dspDir.absolutePath)
+                android.util.Log.i("xrealcam", "QNN DSP libs staged: $n -> ${dspDir.absolutePath}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.i("xrealcam", "QNN DSP libs absent (ZipDepth CPU/SGM): $e")
+        }
     }
 
     /** Parse the on-device factory calibration and enable the world-aligned

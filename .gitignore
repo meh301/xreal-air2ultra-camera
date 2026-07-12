@@ -60,3 +60,7 @@ __pycache__/
 
 # ZipDepth ONNX (24 MB; regenerate: ZipDepth/scripts/export.py --npu, see build_zipdepth_onnx.ps1)
 android/app/src/xfeat/assets/zipdepth.onnx
+
+# QNN FastRPC/DSP libs pulled from the target device (needed for the HTP device;
+# device-specific, not redistributable — regenerate: android/pull_dsp_libs.ps1)
+android/app/src/xfeat/assets/qnn_dsp/

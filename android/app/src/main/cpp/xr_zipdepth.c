@@ -33,6 +33,7 @@ static struct {
     OrtMemoryInfo *meminfo;
     char in_name[64];
     char out_name[64];
+    char dsp_dir[256];                /* device-pulled FastRPC/DSP libs (or "") */
     atomic_int ready;                 /* release-published once usable */
     float input[3 * ZD_IN_H * ZD_IN_W];   /* NCHW RGB, init-thread only */
 } Z;
@@ -62,8 +63,9 @@ static void zd_append_ep(OrtSessionOptions *opts) {
 
     OrtStatus *st = NULL;
     if (qcom) {
-        /* Our native-lib dir (dladdr on our own code) -- the extracted
-         * /data/app/.../lib/arm64 that holds libQnnHtp + the V*Skel libs. */
+        /* Our extracted native-lib dir (dladdr on our own code) -- the
+         * /data/app/.../lib/arm64 that holds the Maven QNN runtime: libQnnHtp +
+         * the V68 skel. */
         char libdir[512] = {0};
         Dl_info info;
         if (dladdr((void *)zd_append_ep, &info) && info.dli_fname) {
@@ -71,35 +73,49 @@ static void zd_append_ep(OrtSessionOptions *opts) {
             if (slash) snprintf(libdir, sizeof libdir, "%.*s",
                                 (int)(slash - info.dli_fname), info.dli_fname);
         }
-        /* THE fix for QnnDevice_create INVALID_CONFIG: FastRPC loads the HTP
-         * skel (libQnnHtpV68Skel.so) onto the Hexagon by searching
-         * ADSP_LIBRARY_PATH, whose default (/vendor/lib/rfsa/adsp, /dsp) does
-         * NOT include the app dir -- so the skel is never found and device
-         * creation fails. Prepend our lib dir (Qualcomm's ';' separator) before
-         * CreateSession, which is when the stub asks FastRPC for the skel. */
-        if (libdir[0]) {
-            const char *existing = getenv("ADSP_LIBRARY_PATH");
-            char adsp[1024];
-            if (existing && existing[0])
-                snprintf(adsp, sizeof adsp, "%s;%s", libdir, existing);
-            else
-                snprintf(adsp, sizeof adsp, "%s", libdir);
-            setenv("ADSP_LIBRARY_PATH", adsp, 1);
-            LOGI("ZipDepth: ADSP_LIBRARY_PATH=%s", adsp);
+        /* THE fix for QnnDevice_create INVALID_CONFIG (the failure was invariant
+         * to every EP option, backend_path, ADSP path and QNN version -- because
+         * it happens BEFORE any DSP contact): libQnnHtp.so must dlopen
+         * libcdsprpc.so (the FastRPC client) + the DSP HAL to reach the Hexagon,
+         * but /vendor/lib64 is NOT on an app's linker namespace, so they're never
+         * found and the device is refused as INVALID_CONFIG. Bundle those libs
+         * (pulled from the device into assets/qnn_dsp -> Z.dsp_dir) and point:
+         *   LD_LIBRARY_PATH   -> libcdsprpc.so + the QNN CPU libs (dsp_dir, libdir)
+         *   ADSP_LIBRARY_PATH -> the DSP skel libQnnHtpV68Skel.so (libdir, dsp_dir)
+         * Prepend both dirs to both vars (':' for LD, Qualcomm ';' for ADSP)
+         * before CreateSession, when the stub first talks to FastRPC. */
+        const char *dsp = Z.dsp_dir[0] ? Z.dsp_dir : libdir;
+        {
+            const char *e = getenv("LD_LIBRARY_PATH");
+            char v[1400];
+            snprintf(v, sizeof v, "%s:%s%s%s", dsp, libdir,
+                     (e && e[0]) ? ":" : "", (e && e[0]) ? e : "");
+            setenv("LD_LIBRARY_PATH", v, 1);
         }
-        /* Absolute backend path (our bundled matched-2.33 libQnnHtp.so) + the
-         * EXPLICIT device descriptor so QNN skips the auto-detect that fails
-         * QnnDevice_create with INVALID_CONFIG on this device. lahaina = SD888:
-         * soc_model 30 (QNN_SOC_MODEL_SM8350, from the QAIRT header), htp_arch
-         * 68 (Hexagon V68). Both options exist in ORT 1.22's QNN provider. */
+        {
+            const char *e = getenv("ADSP_LIBRARY_PATH");
+            char v[1400];
+            snprintf(v, sizeof v, "%s;%s%s%s", libdir, dsp,
+                     (e && e[0]) ? ";" : "", (e && e[0]) ? e : "");
+            setenv("ADSP_LIBRARY_PATH", v, 1);
+        }
+        LOGI("ZipDepth: FastRPC libs dsp_dir=%s qnn_dir=%s (LD+ADSP set)",
+             dsp, libdir);
+        /* Absolute backend path (our matched Maven libQnnHtp.so). lahaina =
+         * SD888: soc_model 30 (QNN_SOC_MODEL_SM8350), htp_arch 68 (V68).
+         * enable_htp_fp16_precision=1 runs this FP32 model in fp16 ON the HTP
+         * (the no-calibration alternative to INT8 QDQ -- without it the float
+         * Convs fall back to CPU); opt mode 3 = best graph finalization. */
         char backend[560];
         if (libdir[0]) snprintf(backend, sizeof backend, "%s/libQnnHtp.so", libdir);
         else snprintf(backend, sizeof backend, "libQnnHtp.so");
-        const char *k[] = { "backend_path", "soc_model", "htp_arch" };
-        const char *v[] = { backend, "30", "68" };
-        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 3);
+        const char *k[] = { "backend_path", "soc_model", "htp_arch",
+                            "enable_htp_fp16_precision",
+                            "htp_graph_finalization_optimization_mode" };
+        const char *v[] = { backend, "30", "68", "1", "3" };
+        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 5);
         if (!st) {
-            LOGI("ZipDepth: QNN (HTP V68/SM8350) EP [board='%s'] %s",
+            LOGI("ZipDepth: QNN (HTP V68/SM8350, fp16) EP [board='%s'] %s",
                  board, backend);
             return;
         }
@@ -177,10 +193,13 @@ static int zd_try_init(const char *model_path) {
     return 1;
 }
 
-int xr_zipdepth_init(const char *model_path) {
+int xr_zipdepth_init(const char *model_path, const char *dsp_dir) {
     if (atomic_load_explicit(&Z.ready, memory_order_acquire)) return 1;
     static atomic_int busy;
     if (atomic_exchange(&busy, 1)) return 0;
+    Z.dsp_dir[0] = 0;
+    if (dsp_dir && dsp_dir[0])
+        strncpy(Z.dsp_dir, dsp_dir, sizeof Z.dsp_dir - 1);
     int ok = zd_try_init(model_path);
     if (!ok) atomic_store(&busy, 0);
     return ok;

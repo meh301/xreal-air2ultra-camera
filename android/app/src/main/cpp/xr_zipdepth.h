@@ -18,8 +18,11 @@
 #include <stdint.h>
 
 /* Load ORT + the model and pick an execution provider. Retryable (returns 0
- * until the .so + model are present); thread-safe (one caller does the work). */
-int xr_zipdepth_init(const char *model_path);
+ * until the .so + model are present); thread-safe (one caller does the work).
+ * dsp_dir = the directory holding the device-pulled FastRPC/DSP libs
+ * (libcdsprpc.so + the DSP HAL, staged from assets/qnn_dsp); NULL/empty if not
+ * staged (then the QNN HTP device can't be created and it falls back to CPU). */
+int xr_zipdepth_init(const char *model_path, const char *dsp_dir);
 int xr_zipdepth_available(void);
 
 /* Run on a w*h grayscale rectified image; write w*h affine-metric DEPTH (the

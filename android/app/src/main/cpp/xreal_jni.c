@@ -94,6 +94,7 @@ static struct {
     pthread_t slam_thread;
     pthread_t depth_thread;                 /* SGM / ZipDepth, off the SLAM thread */
     char zip_model[256];                    /* ZipDepth ONNX path (empty = SGM) */
+    char qnn_dsp_dir[256];                  /* device FastRPC/DSP libs (QNN HTP) */
     atomic_int slam_running;
     pthread_mutex_t slam_lock;
     pthread_cond_t slam_cond;
@@ -1259,7 +1260,7 @@ static void *depth_worker(void *arg) {
          * Dormant until a model is staged -> today this always runs SGM. */
         static int zd_try;                          /* throttle model re-init */
         if (!xr_zipdepth_available() && S.zip_model[0] && (zd_try++ % 90) == 0)
-            xr_zipdepth_init(S.zip_model);
+            xr_zipdepth_init(S.zip_model, S.qnn_dsp_dir);
         int used_zip = 0;
         if (xr_zipdepth_available()) {
             static float zdepth[XS_W * XS_H], dinv[XS_W * XS_H], metric[XS_W * XS_H];
@@ -2139,6 +2140,24 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetZipModel(JNIEnv *env, jclass c
     const char *p = (*env)->GetStringUTFChars(env, path, NULL);
     if (p) {
         strncpy(S.zip_model, p, sizeof S.zip_model - 1);
+        (*env)->ReleaseStringUTFChars(env, path, p);
+    }
+}
+
+/* Directory of the device-pulled QNN FastRPC/DSP libs (libcdsprpc.so + the DSP
+ * HAL), staged from assets/qnn_dsp. QNN's libQnnHtp.so dlopens libcdsprpc.so to
+ * reach the Hexagon; /vendor/lib64 isn't on the app's linker namespace, so
+ * without these on LD_LIBRARY_PATH QnnDevice_create fails INVALID_CONFIG and
+ * ZipDepth falls back to CPU. Empty/unset on non-qnn builds. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetQnnDspDir(JNIEnv *env, jclass cls,
+                                                            jstring path) {
+    (void)cls;
+    S.qnn_dsp_dir[0] = 0;
+    if (!path) return;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (p) {
+        strncpy(S.qnn_dsp_dir, p, sizeof S.qnn_dsp_dir - 1);
         (*env)->ReleaseStringUTFChars(env, path, p);
     }
 }
