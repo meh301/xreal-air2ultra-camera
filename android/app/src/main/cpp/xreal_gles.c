@@ -104,9 +104,18 @@ static struct {
     int frames;
     double render_ms_acc, wait_ms_acc;
     int64_t stat_t0;
-} G = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
-        .calib_variant = XR_ALIGN_VARIANT_DEFAULT, .timewarp = 1,
-        .show_points = 1, .eye_mode = XR_EYE_CAM };
+} G;
+/* No static initializer -> G is zero-filled in .bss instead of carried as
+ * 2.1 MB in .data (see the S struct in xreal_jni.c). The lock/cond and the
+ * nonzero defaults are set in a load-time constructor; eye_mode's default
+ * XR_EYE_CAM is 0, so it needs no explicit set. */
+__attribute__((constructor)) static void g_init(void) {
+    pthread_mutex_init(&G.lock, NULL);
+    pthread_cond_init(&G.cond, NULL);
+    G.calib_variant = XR_ALIGN_VARIANT_DEFAULT;
+    G.timewarp = 1;
+    G.show_points = 1;
+}
 
 static float LOOP_XYZ[XR_GLES_MAX_LOOP * 3];        /* .bss, G.lock */
 

@@ -181,13 +181,25 @@ static struct {
      * channel signs against the factory calibration numbers */
     double raw_gbias[3];
     int raw_gbias_n;
-} S = { .lock = PTHREAD_MUTEX_INITIALIZER,
-        .imu_lock = PTHREAD_MUTEX_INITIALIZER,
-        .slam_lock = PTHREAD_MUTEX_INITIALIZER,
-        .slam_cond = PTHREAD_COND_INITIALIZER,
-        .align_variant = XR_ALIGN_VARIANT_DEFAULT,
-        .stereo_mode = 1, .depth_on = 1, .show_pts = 1, .map_on = 1,
-        .prop_on = 1 };
+} S;
+/* S has NO static initializer on purpose: any nonzero (or even non-trivial
+ * all-zero designated) initializer puts the whole 5.6 MB struct in .data,
+ * where it is carried in the .so per ABI and dirty-mapped at load. With no
+ * initializer it is zero-filled in .bss, and the locks + nonzero defaults are
+ * set in a load-time constructor that runs at dlopen, before any native call
+ * or thread. */
+__attribute__((constructor)) static void s_init(void) {
+    pthread_mutex_init(&S.lock, NULL);
+    pthread_mutex_init(&S.imu_lock, NULL);
+    pthread_mutex_init(&S.slam_lock, NULL);
+    pthread_cond_init(&S.slam_cond, NULL);
+    atomic_store(&S.align_variant, XR_ALIGN_VARIANT_DEFAULT);
+    atomic_store(&S.stereo_mode, 1);
+    atomic_store(&S.depth_on, 1);
+    atomic_store(&S.show_pts, 1);
+    atomic_store(&S.map_on, 1);
+    atomic_store(&S.prop_on, 1);
+}
 
 /* ~14 MB of rectification maps + SGM scratch. Kept outside S: S has nonzero
  * initializers, so its members live in .data and would bloat the .so by
