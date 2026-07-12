@@ -136,6 +136,10 @@ static int zd_try_init(const char *model_path) {
     OrtSessionOptions *opts = NULL;
     if (!ort_ok(Z.api->CreateSessionOptions(&opts), "CreateSessionOptions"))
         return 0;
+    /* VERBOSE so the QNN backend logs WHY QnnDevice_create rejects the config
+     * (the terse INVALID_CONFIG hides the offending field). Session-level, so
+     * it overrides the shared env's WARNING level. Grep logcat for Qnn/htp. */
+    ort_ok(Z.api->SetSessionLogSeverityLevel(opts, 0), "SetLogSeverity");
     /* Cap CPU-fallback threads so a device without the QNN EP doesn't spawn
      * inference threads across every core and starve the UVC / SLAM / render
      * pipeline (the QNN EP runs on the HTP and ignores this). */
