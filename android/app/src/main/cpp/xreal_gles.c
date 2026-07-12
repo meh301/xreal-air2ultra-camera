@@ -99,7 +99,8 @@ static struct {
     GLuint prog_map, vbo_map;
     GLint lm_world, lm_head, lm_rhead, lm_pm, lm_rd, lm_k, lm_half, lm_color;
     int map_vbo_n;                                  /* points uploaded to vbo_map */
-    int map_dirty;                                  /* cloud changed -> re-upload */
+    unsigned map_pub_gen;                           /* bumped on each cloud change
+                                                     * (monotonic: no lost update) */
     float map_disp_R[2][9];                         /* per-eye display rot, const */
     int map_disp_ready;
     GLuint vbo_eye[2], vbo_quad, ibo;
@@ -126,6 +127,16 @@ __attribute__((constructor)) static void g_init(void) {
 }
 
 static float LOOP_XYZ[XR_GLES_MAX_LOOP * 3];        /* .bss, G.lock */
+
+/* Per-present snapshot of the map publication, filled under G.lock in the
+ * render loop so render_frame reads a consistent head pose + cloud without
+ * racing the VIO-rate producers (set_map_pose / set_map_points). The 96 KB
+ * cloud copy happens only when the generation advances. */
+static float RS_map_R[9], RS_map_p[3], RS_map_v[3];
+static uint64_t RS_map_ts;
+static int RS_map_n;                                /* cloud point count */
+static unsigned RS_map_gen;                         /* gen of RS_map_xyz */
+static float RS_map_xyz[XR_GLES_MAX_MAP * 3];
 
 static int64_t now_ms64(void) {
     struct timespec ts;
@@ -169,12 +180,15 @@ static const char *VS_MAP =
     "  float dist = length(a);\n"
     "  vec3 d = uPm * a;\n"
     "  vec3 p = uRd * d;\n"
-    "  if (dist < 0.3 || p.z <= 1e-6) { gl_Position = vec4(2.0);\n"
+    /* cull off-screen: put the vertex at NDC x=2 (w=1) so it is truly outside
+     * the clip volume — vec4(2.0) would give x/w=1, i.e. on the edge, and a
+     * 0.0 point size can be clamped up to the implementation minimum */
+    "  if (dist < 0.3 || p.z <= 1e-6) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0);\n"
     "    gl_PointSize = 0.0; return; }\n"
     "  float u = uK.x * (p.x / p.z) + uK.z;\n"
     "  float v = uK.y * (p.y / p.z) + uK.w;\n"
     "  if (u < 0.0 || u > 2.0*uHalf.x || v < 0.0 || v > 2.0*uHalf.y) {\n"
-    "    gl_Position = vec4(2.0); gl_PointSize = 0.0; return; }\n"
+    "    gl_Position = vec4(2.0, 2.0, 0.0, 1.0); gl_PointSize = 0.0; return; }\n"
     "  gl_Position = vec4(u/uHalf.x - 1.0, 1.0 - v/uHalf.y, 0.0, 1.0);\n"
     "  gl_PointSize = clamp(9.0 / dist, 3.0, 16.0);\n"
     "}\n";
@@ -250,6 +264,13 @@ static int gl_objects_init(void) {
     glAttachShader(G.prog_map, vsm);
     glAttachShader(G.prog_map, fsm);
     glLinkProgram(G.prog_map);
+    GLint mlink = 0;
+    glGetProgramiv(G.prog_map, GL_LINK_STATUS, &mlink);
+    if (!mlink) {                      /* shaders are only compiled on-device */
+        char log[256];
+        glGetProgramInfoLog(G.prog_map, sizeof log, NULL, log);
+        LOGE("map shader link failed: %s", log);
+    }
     G.lm_world = glGetAttribLocation(G.prog_map, "aWorld");
     G.lm_head  = glGetUniformLocation(G.prog_map, "uHead");
     G.lm_rhead = glGetUniformLocation(G.prog_map, "uRhead");
@@ -517,29 +538,29 @@ static void render_frame(int mode, int fresh, const float *dR,
         const float *ar_pm = NULL;
         int ar_ready = 0;
         uint64_t ar_tn = 0;
-        if (eye_mode == XR_EYE_AR && G.show_points && G.map_count > 0) {
+        if (eye_mode == XR_EYE_AR && G.show_points && RS_map_n > 0) {
             ar_tn = G.time_fn ? G.time_fn() : 0;
             if (G.head_fn && G.head_fn(ar_R, ar_ph) == 0) {
                 ar_ready = 1;          /* 1 kHz propagator, photon-time */
             } else {
-                /* fallback: last VIO pose warped by the AHRS delta plus
-                 * velocity extrapolation */
-                memcpy(ar_R, G.map_R, sizeof ar_R);
+                /* fallback: last VIO pose (snapshot) warped by the AHRS delta
+                 * plus velocity extrapolation */
+                memcpy(ar_R, RS_map_R, sizeof ar_R);
                 int (*pfn)(uint64_t, float[9]) =
                     G.pose_ar_fn ? G.pose_ar_fn : G.pose_fn;
-                if (G.timewarp && pfn && G.map_ts &&
-                    pfn(G.map_ts, ar_dRm) == 0)
+                if (G.timewarp && pfn && RS_map_ts &&
+                    pfn(RS_map_ts, ar_dRm) == 0)
                     ar_pm = ar_dRm;
-                ar_ph[0] = G.map_p[0];
-                ar_ph[1] = G.map_p[1];
-                ar_ph[2] = G.map_p[2];
-                if (ar_tn && G.map_ts && ar_tn > G.map_ts) {
-                    float dt = (float)(ar_tn - G.map_ts + XR_GLES_PREDICT_NS)
+                ar_ph[0] = RS_map_p[0];
+                ar_ph[1] = RS_map_p[1];
+                ar_ph[2] = RS_map_p[2];
+                if (ar_tn && RS_map_ts && ar_tn > RS_map_ts) {
+                    float dt = (float)(ar_tn - RS_map_ts + XR_GLES_PREDICT_NS)
                                * 1e-9f;
                     if (dt < 0.2f) {
-                        ar_ph[0] += G.map_v[0] * dt;
-                        ar_ph[1] += G.map_v[1] * dt;
-                        ar_ph[2] += G.map_v[2] * dt;
+                        ar_ph[0] += RS_map_v[0] * dt;
+                        ar_ph[1] += RS_map_v[1] * dt;
+                        ar_ph[2] += RS_map_v[2] * dt;
                     }
                 }
                 ar_ready = 1;
@@ -607,14 +628,14 @@ static void render_frame(int mode, int fresh, const float *dR,
                                       G.map_disp_R[1]);
                     G.map_disp_ready = 1;
                 }
-                if (G.map_dirty) {                  /* re-upload only on change */
-                    int mc = G.map_count;
-                    if (mc > XR_GLES_MAX_MAP) mc = XR_GLES_MAX_MAP;
+                static unsigned vbo_gen;            /* render thread only */
+                if (RS_map_gen != vbo_gen) {        /* re-upload only on change */
                     glBindBuffer(GL_ARRAY_BUFFER, G.vbo_map);
-                    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 3 * (size_t)mc,
-                                 G.map_xyz, GL_STATIC_DRAW);
-                    G.map_vbo_n = mc;
-                    G.map_dirty = 0;
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 sizeof(float) * 3 * (size_t)RS_map_n,
+                                 RS_map_xyz, GL_STATIC_DRAW);
+                    G.map_vbo_n = RS_map_n;
+                    vbo_gen = RS_map_gen;
                 }
                 if (G.map_disp_ready && G.map_vbo_n > 0) {
                     static const float ident[9] = { 1,0,0, 0,1,0, 0,0,1 };
@@ -774,6 +795,21 @@ static void *render_thread(void *arg) {
         uint64_t pt_ts = G.pt_ts;
         int tw = G.timewarp;
         int (*pose_fn)(uint64_t, float[9]) = G.pose_fn;
+        /* snapshot the map head pose (VIO-rate) and, only when it changed, the
+         * cloud — so render_frame never races the producers */
+        memcpy(RS_map_R, G.map_R, sizeof RS_map_R);
+        memcpy(RS_map_p, G.map_p, sizeof RS_map_p);
+        memcpy(RS_map_v, G.map_v, sizeof RS_map_v);
+        RS_map_ts = G.map_ts;
+        RS_map_n = G.map_count;
+        if (G.map_pub_gen != RS_map_gen) {
+            int mc = G.map_count;
+            if (mc > XR_GLES_MAX_MAP) mc = XR_GLES_MAX_MAP;
+            if (mc > 0) memcpy(RS_map_xyz, G.map_xyz,
+                               sizeof(float) * 3 * (size_t)mc);
+            RS_map_n = mc;
+            RS_map_gen = G.map_pub_gen;
+        }
         pthread_mutex_unlock(&G.lock);
 
         if (win_changed) {
@@ -861,6 +897,8 @@ void xr_gles_set_alignment(const xr_eye_calib eyes[2], int variant) {
     memcpy(G.eyes_calib, eyes, sizeof G.eyes_calib);
     G.calib_variant = variant;
     G.calib_staged = 1;
+    G.map_disp_ready = 0;        /* recompute the GPU display rotation from the
+                                  * new calibration / variant */
     pthread_cond_signal(&G.cond);
     pthread_mutex_unlock(&G.lock);
 }
@@ -920,7 +958,7 @@ void xr_gles_set_map_points(const float *xyz_world, int n) {
     pthread_mutex_lock(&G.lock);
     if (n > 0) memcpy(G.map_xyz, xyz_world, sizeof(float) * (size_t)n * 3);
     G.map_count = n;
-    G.map_dirty = 1;              /* render thread re-uploads vbo_map on next AR present */
+    G.map_pub_gen++;             /* monotonic: the render snapshot re-uploads */
     pthread_mutex_unlock(&G.lock);
 }
 
