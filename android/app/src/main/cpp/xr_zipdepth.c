@@ -115,6 +115,14 @@ static int zd_open(const char *model_path, const char *ep,
             Z.api->ReleaseSessionOptions(opts);
             return 0;
         }
+        /* Make a QNN failure FAIL the session instead of silently placing all
+         * nodes on the CPU EP: otherwise CreateSession "succeeds" on CPU (slow,
+         * and it masks whether the NPU device was actually created). With this,
+         * the session opens ONLY if QNN takes the whole graph -> honest signal
+         * per config, and no CPU-fallback that would starve SLAM/render. */
+        ort_ok(Z.api->AddSessionConfigEntry(
+                   opts, "session.disable_cpu_ep_fallback", "1"),
+               "DisableCpuFallback");
     }
     OrtStatus *st = Z.api->CreateSession(Z.env, model_path, opts, &Z.session);
     Z.api->ReleaseSessionOptions(opts);
@@ -153,40 +161,43 @@ static int zd_try_init(const char *model_path) {
     if (qcom) {
         char libdir[512];
         zd_fastrpc_env(libdir, sizeof libdir);
-        char backend[560];
-        if (libdir[0]) snprintf(backend, sizeof backend, "%s/libQnnHtp.so", libdir);
-        else snprintf(backend, sizeof backend, "libQnnHtp.so");
-        /* The HTP device is created inside CreateSession. On-device JIT wants the
-         * HTP to AUTO-DETECT the SoC: passing an explicit soc_model/htp_arch
-         * builds a QnnHtpDevice platform descriptor that this lahaina/V68 rejects
-         * at QnnDevice_create as INVALID_CONFIG (verified: fails with the
-         * descriptor even with libcdsprpc present + both QNN 2.31/2.33; ORT only
-         * pushes that descriptor when soc/arch are set -- qnn_backend_manager.cc
-         * CreateDevice). So try auto-detect FIRST (no soc/arch), then the explicit
-         * variants as fallbacks -- first that opens the model wins. fp16 lets the
-         * FP32 model run on the HTP (the no-calibration alternative to INT8 QDQ);
-         * opt mode 3 = best graph finalization. */
-        const char *k0[] = { "backend_path", "enable_htp_fp16_precision",
+        char htp[560], gpu[560];
+        if (libdir[0]) {
+            snprintf(htp, sizeof htp, "%s/libQnnHtp.so", libdir);
+            snprintf(gpu, sizeof gpu, "%s/libQnnGpu.so", libdir);
+        } else { snprintf(htp, sizeof htp, "libQnnHtp.so");
+                 snprintf(gpu, sizeof gpu, "libQnnGpu.so"); }
+        /* The QNN device is created inside CreateSession. On the HTP (Hexagon
+         * NPU) it kept failing QnnDevice_create INVALID_CONFIG even with the
+         * FastRPC libs bundled AND with an EMPTY device config (auto-detect, no
+         * soc/arch) -- so it is NOT the platform descriptor; the HTP is masking a
+         * deeper DSP/FastRPC failure (very likely unsigned-PD access to the cDSP)
+         * as INVALID_CONFIG. So try the HTP first (auto-detect, then arch=68),
+         * then fall back to the QNN GPU backend (libQnnGpu.so, Adreno via OpenCL)
+         * which needs no DSP/FastRPC/skel at all. First that takes the whole
+         * graph wins (disable_cpu_ep_fallback makes a fail honest). fp16 lets the
+         * FP32 model run on the HTP; opt mode 3 = best graph finalization. */
+        const char *kh[] = { "backend_path", "enable_htp_fp16_precision",
                              "htp_graph_finalization_optimization_mode" };
-        const char *v0[] = { backend, "1", "3" };
-        const char *k1[] = { "backend_path", "htp_arch",
+        const char *vh[] = { htp, "1", "3" };
+        const char *ka[] = { "backend_path", "htp_arch",
                              "enable_htp_fp16_precision",
                              "htp_graph_finalization_optimization_mode" };
-        const char *v1[] = { backend, "68", "1", "3" };
-        const char *k2[] = { "backend_path", "soc_model",
-                             "enable_htp_fp16_precision",
-                             "htp_graph_finalization_optimization_mode" };
-        const char *v2[] = { backend, "30", "1", "3" };
-        LOGI("ZipDepth: QNN HTP init [board='%s'] %s", board, backend);
-        ok = zd_open(model_path, "QNN", k0, v0, 3, "QNN HTP auto-detect fp16")
-          || zd_open(model_path, "QNN", k1, v1, 4, "QNN HTP arch=68 fp16")
-          || zd_open(model_path, "QNN", k2, v2, 4, "QNN HTP soc=30 fp16");
-        if (!ok) LOGE("ZipDepth: all QNN HTP configs failed -> CPU fallback");
+        const char *va[] = { htp, "68", "1", "3" };
+        const char *kg[] = { "backend_path" };
+        const char *vg[] = { gpu };
+        LOGI("ZipDepth: QNN init [board='%s'] htp=%s gpu=%s", board, htp, gpu);
+        ok = zd_open(model_path, "QNN", kh, vh, 3, "QNN HTP auto-detect fp16")
+          || zd_open(model_path, "QNN", ka, va, 4, "QNN HTP arch=68 fp16")
+          || zd_open(model_path, "QNN", kg, vg, 1, "QNN GPU (Adreno/OpenCL)");
+        if (!ok)
+            LOGE("ZipDepth: no QNN backend took the graph -> staying on SGM "
+                 "(CPU ZipDepth starves the pipeline). Capture a FULL logcat "
+                 "(fastrpc/adsprpc/QnnHtp tags) for the DSP-side reason.");
     } else if (mtk) {
         ok = zd_open(model_path, ZD_MTK_EP, NULL, NULL, 0, "MediaTek NeuroPilot");
     }
-    if (!ok && !zd_open(model_path, NULL, NULL, NULL, 0, "CPU"))
-        return 0;
+    if (!ok) return 0;   /* NPU unavailable -> depth worker keeps using SGM */
 
     if (!ort_ok(Z.api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,
                                            &Z.meminfo), "CreateCpuMemoryInfo"))
