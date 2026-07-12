@@ -54,6 +54,7 @@ static struct {
     uint8_t clean[2][XR_OW * XR_OH];        /* equalized, for viewing */
     uint8_t clean_raw[2][XR_OW * XR_OH];    /* non-equalized, for tracking */
     int have[2];
+    int cam_ctr[2];                         /* per-camera hardware pair counter */
 
     /* SLAM worker (research app): rectify + track + depth at sensor rate.
      * The tracker is the live front-end stand-in; Basalt plugs in behind
@@ -439,6 +440,7 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
         }
     }
     S.have[cam] = 1;
+    S.cam_ctr[cam] = xr_counter(S.frame);   /* hardware pair counter */
 
     S.fps_count++;
     int64_t t = now_ms();
@@ -447,6 +449,15 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
         S.fps_x10 = (int)(S.fps_count * 10000 / (t - S.fps_t0));
         S.fps_count = 0;
         S.fps_t0 = t;
+    }
+
+    /* A valid stereo pair shares one hardware counter. If they differ, a
+     * frame was dropped and we are holding two images from different pairs
+     * (e.g. left N with right N+1) — DON'T submit that; drop the older one
+     * (8-bit counter, wrap-safe) and wait for the newer one's true partner. */
+    if (S.have[0] && S.have[1] && S.cam_ctr[0] != S.cam_ctr[1]) {
+        if ((int8_t)(S.cam_ctr[0] - S.cam_ctr[1]) > 0) S.have[1] = 0;
+        else S.have[0] = 0;
     }
 
     if (S.have[0] && S.have[1]) {
