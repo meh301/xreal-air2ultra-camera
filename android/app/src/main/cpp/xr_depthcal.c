@@ -67,6 +67,35 @@ int xr_depthcal_fit(xr_depthcal *c, const float *s, const float *y, int n) {
     return 1;
 }
 
+#define DCAL_MAX_ANCH 1024   /* cap the fit set; plenty for grid + landmarks */
+
+/* bilinear sample of a w*h float map at (fx,fy), clamped to the border */
+static float sample_bilin(const float *m, int w, int h, float fx, float fy) {
+    if (fx < 0) fx = 0; if (fx > w - 1) fx = (float)(w - 1);
+    if (fy < 0) fy = 0; if (fy > h - 1) fy = (float)(h - 1);
+    int x0 = (int)fx, y0 = (int)fy;
+    int x1 = x0 + 1 < w ? x0 + 1 : x0, y1 = y0 + 1 < h ? y0 + 1 : y0;
+    float ax = fx - x0, ay = fy - y0;
+    const float *r0 = m + (size_t)y0 * w, *r1 = m + (size_t)y1 * w;
+    float a = r0[x0] * (1 - ax) + r0[x1] * ax;
+    float b = r1[x0] * (1 - ax) + r1[x1] * ax;
+    return a * (1 - ay) + b * ay;
+}
+
+int xr_depthcal_update(xr_depthcal *c, const float *dense, int w, int h,
+                       const xr_anchor *anchors, int n) {
+    if (!dense || !anchors) return 0;
+    float s[DCAL_MAX_ANCH], y[DCAL_MAX_ANCH];
+    int m = 0;
+    for (int i = 0; i < n && m < DCAL_MAX_ANCH; i++) {
+        if (anchors[i].invz <= 0.0f) continue;      /* skip invalid anchors */
+        s[m] = sample_bilin(dense, w, h, anchors[i].x, anchors[i].y);
+        y[m] = anchors[i].invz;
+        m++;
+    }
+    return xr_depthcal_fit(c, s, y, m);
+}
+
 void xr_depthcal_apply(const xr_depthcal *c, const float *s_in, float *z_out,
                        int n, float zmin, float zmax) {
     if (!c->have) {

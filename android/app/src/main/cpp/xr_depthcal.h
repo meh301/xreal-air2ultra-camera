@@ -15,6 +15,8 @@
 #ifndef XR_DEPTHCAL_H
 #define XR_DEPTHCAL_H
 
+#include "xr_sgrid.h"      /* xr_anchor */
+
 typedef struct {
     float a, b;        /* invz ~= a*s + b (EMA-smoothed, current best) */
     int   have;        /* a usable fit exists */
@@ -27,6 +29,15 @@ typedef struct {
  * Returns 1 if the fit is usable (enough inliers, well-conditioned), else 0 and
  * c is left unchanged (the previous fit keeps driving apply). */
 int xr_depthcal_fit(xr_depthcal *c, const float *s, const float *y, int n);
+
+/* Convenience that ties the anchor producers (xr_sgrid / xr_lm_anchors) to the
+ * fit: bilinearly samples the dense model map at each anchor pixel to form s,
+ * takes y = anchor.invz, and calls xr_depthcal_fit. `dense` must be in an
+ * INVERSE-DEPTH-correlated space (disparity, or 1/depth if the model emits
+ * depth) so the affine fit is valid — the caller converts per the model's
+ * output. Returns the fit result. */
+int xr_depthcal_update(xr_depthcal *c, const float *dense, int w, int h,
+                       const xr_anchor *anchors, int n);
 
 /* Apply the current fit to a dense model map: z_out[i] = metric depth (metres)
  * = 1/(a*s_in[i] + b), clamped to [zmin, zmax]; a non-positive inverse-depth
