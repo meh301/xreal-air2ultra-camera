@@ -153,8 +153,28 @@ typedef struct {
     float lm_uv[XR_MAP_KP_PER_KF][2];
 } xr_kf;
 
-static xr_kf KF[XR_MAP_MAX_KF];        /* .bss */
-static int KF_N;
+static xr_kf KF[XR_MAP_MAX_KF];        /* .bss — physical slot pool */
+static int KF_N;                       /* active keyframe count */
+/* Stable-slot indirection. KF[] is a pool: a keyframe keeps its slot for life
+ * (stable IDs for future cross-references, and eviction no longer memmoves
+ * ~4 MB of structs). KFO[k] is the physical slot of the k-th keyframe in
+ * insertion-time order — exactly what the old contiguous KF[k] meant — so
+ * every reader goes through KFA(k). KF_FREE is a stack of unused slots. */
+static int KFO[XR_MAP_MAX_KF];         /* time order -> physical slot */
+static int KF_FREE[XR_MAP_MAX_KF];     /* free-slot stack */
+static int KF_FREE_N;                  /* free-slot count */
+#define KFA(i) KF[KFO[i]]              /* the i-th keyframe in time order */
+
+/* Empty the map: every slot free, no keyframes. Run at load and on every
+ * clear (reset / descriptor switch) so KF_FREE is always valid before a
+ * store. */
+static void kf_slots_reset(void) {
+    KF_N = 0;
+    KF_FREE_N = XR_MAP_MAX_KF;
+    for (int i = 0; i < XR_MAP_MAX_KF; i++) KF_FREE[i] = i;
+}
+__attribute__((constructor)) static void kf_slots_ctor(void) { kf_slots_reset(); }
+
 static atomic_int KF_COUNT_PUB;
 static struct { uint64_t a, b; int matches; int have; } LAST_CAND;
 /* last verification attempt, for the on-screen panel: no more guessing
@@ -329,7 +349,7 @@ int xr_map_set_use_xfeat(int on) {
     }
     atomic_store(&USE_XFEAT, want);
     pthread_mutex_lock(&MAP_LOCK);
-    KF_N = 0;
+    kf_slots_reset();
     atomic_store(&KF_COUNT_PUB, 0);
     atomic_fetch_add(&RESET_GEN, 1);       /* invalidate any in-flight search */
     LAST_STORE_NS = 0;
@@ -350,7 +370,7 @@ int xr_map_xfeat_ready(void) {
 
 void xr_map_reset(void) {
     pthread_mutex_lock(&MAP_LOCK);
-    KF_N = 0;
+    kf_slots_reset();
     atomic_fetch_add(&RESET_GEN, 1);       /* invalidate any in-flight search */
     LAST_CAND.have = 0;
     LAST_POSE.have = 0;
@@ -549,9 +569,9 @@ static void graph_deform(int anchor, const float qsp[3],
     float total = 0;
     cum[anchor] = 0;
     for (int j = anchor + 1; j < KF_N; j++) {
-        float dx = KF[j].pc[0] - KF[j - 1].pc[0];
-        float dy = KF[j].pc[1] - KF[j - 1].pc[1];
-        float dz = KF[j].pc[2] - KF[j - 1].pc[2];
+        float dx = KFA(j).pc[0] - KFA(j - 1).pc[0];
+        float dy = KFA(j).pc[1] - KFA(j - 1).pc[1];
+        float dz = KFA(j).pc[2] - KFA(j - 1).pc[2];
         total += sqrtf(dx * dx + dy * dy + dz * dz);
         cum[j] = total;
     }
@@ -561,17 +581,17 @@ static void graph_deform(int anchor, const float qsp[3],
      * query rides on the live pose via CORR); otherwise the newest stored
      * portion is over-deformed. */
     if (KF_N > anchor + 1) {
-        float dx = qsp[0] - KF[KF_N - 1].pc[0];
-        float dy = qsp[1] - KF[KF_N - 1].pc[1];
-        float dz = qsp[2] - KF[KF_N - 1].pc[2];
+        float dx = qsp[0] - KFA(KF_N - 1).pc[0];
+        float dy = qsp[1] - KFA(KF_N - 1).pc[1];
+        float dz = qsp[2] - KFA(KF_N - 1).pc[2];
         total += sqrtf(dx * dx + dy * dy + dz * dz);
     }
     for (int j = anchor + 1; j < KF_N; j++) {
         float a = total > 1e-3f ? cum[j] / total : 1.0f;
         float dq_old[4], dp_old[3], dq_new[4], dp_new[3];
-        kf_corr(&KF[j], dq_old, dp_old);   /* this keyframe's current corr */
+        kf_corr(&KFA(j), dq_old, dp_old);  /* this keyframe's current corr */
         corr_interp(dq_old, dp_old, Dq, Dp, a, dq_new, dp_new);
-        pose_compose(dq_new, dp_new, KF[j].q, KF[j].p, KF[j].qc, KF[j].pc);
+        pose_compose(dq_new, dp_new, KFA(j).q, KFA(j).p, KFA(j).qc, KFA(j).pc);
     }
 }
 
@@ -585,9 +605,9 @@ static void cloud_rebuild(void) {
     int n = 0;
     for (int k = KF_N - 1; k >= 0 && n < CLOUD_MAX; k--) {
         float dq[4], dp[3];
-        kf_corr(&KF[k], dq, dp);
-        for (int i = 0; i < KF[k].n_lm && n < CLOUD_MAX; i++) {
-            int32_t id = KF[k].lm_id[i];
+        kf_corr(&KFA(k), dq, dp);
+        for (int i = 0; i < KFA(k).n_lm && n < CLOUD_MAX; i++) {
+            int32_t id = KFA(k).lm_id[i];
             uint32_t h = ((uint32_t)id * 2654435761u) & 8191u;
             int dup = 0;
             for (int s = 0; s < 32; s++) {
@@ -597,7 +617,7 @@ static void cloud_rebuild(void) {
             }
             if (dup) continue;
             float t[3];
-            qrotv(dq, KF[k].lm_xyz[i], t);
+            qrotv(dq, KFA(k).lm_xyz[i], t);
             CLOUD.xyz[n][0] = t[0] + dp[0];
             CLOUD.xyz[n][1] = t[1] + dp[1];
             CLOUD.xyz[n][2] = t[2] + dp[2];
@@ -1197,10 +1217,10 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     for (int s = 0; s < nkf; s++) {    /* SESSION-frame proximity (pc): pool
                                           physically-adjacent keyframes even
                                           across drifted odom epochs */
-        if (s == best_i || KF[s].desc_type != w->desc_type) continue;
-        float dx = KF[s].pc[0] - KF[best_i].pc[0];
-        float dy = KF[s].pc[1] - KF[best_i].pc[1];
-        float dz = KF[s].pc[2] - KF[best_i].pc[2];
+        if (s == best_i || KFA(s).desc_type != w->desc_type) continue;
+        float dx = KFA(s).pc[0] - KFA(best_i).pc[0];
+        float dy = KFA(s).pc[1] - KFA(best_i).pc[1];
+        float dz = KFA(s).pc[2] - KFA(best_i).pc[2];
         float d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > COVIS_R_M * COVIS_R_M) continue;
         nbr[nnb].s = s; nbr[nnb].d2 = d2; nnb++;
@@ -1212,8 +1232,8 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     static float covqd[COVIS_MAX_KF][4], covpd[COVIS_MAX_KF][3];
     for (int c = 0; c < ncov; c++) {
         float qoi[4], poi[3];
-        pose_invert(KF[cov[c]].q, KF[cov[c]].p, qoi, poi);
-        pose_compose(KF[cov[c]].qc, KF[cov[c]].pc, qoi, poi, covqd[c], covpd[c]);
+        pose_invert(KFA(cov[c]).q, KFA(cov[c]).p, qoi, poi);
+        pose_compose(KFA(cov[c]).qc, KFA(cov[c]).pc, qoi, poi, covqd[c], covpd[c]);
     }
 
     /* 1b. candidate correspondences (query kp -> map landmark) with
@@ -1222,16 +1242,16 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     int nc = 0;
     for (int c = 0; c < ncov && nc < COVIS_MAX_CAND; c++) {
         int s = cov[c];
-        int nkp = bad ? anchored_count(&KF[s]) : KF[s].n_kp;
+        int nkp = bad ? anchored_count(&KFA(s)) : KFA(s).n_kp;
         for (int i = 0; i < w->n_kp && nc < COVIS_MAX_CAND; i++) {
             int best = bad ? 999 : -(1 << 30), second = best, bj = -1;
             for (int j = 0; j < nkp; j++) {
                 if (bad) {
-                    int d = hamming256(w->desc.bad[i], KF[s].desc.bad[j]);
+                    int d = hamming256(w->desc.bad[i], KFA(s).desc.bad[j]);
                     if (d < best) { second = best; best = d; bj = j; }
                     else if (d < second) second = d;
                 } else {
-                    int d = dot64_i8(w->desc.xfeat[i], KF[s].desc.xfeat[j]);
+                    int d = dot64_i8(w->desc.xfeat[i], KFA(s).desc.xfeat[j]);
                     if (d > best) { second = best; best = d; bj = j; }
                     else if (d > second) second = d;
                 }
@@ -1241,18 +1261,18 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
                 ? (best <= BAD_MAX_DIST && best + BAD_MARGIN <= second)
                 : (best >= XF_MIN_DOT && best - XF_MARGIN >= second);
             if (!accept) continue;
-            int lk = KF[s].lm_of_kp[bj];
+            int lk = KFA(s).lm_of_kp[bj];
             if (lk < 0) continue;
             float dk2 = 0;
             for (int cc = 0; cc < 3; cc++) {
-                float d = KF[s].lm_xyz[lk][cc] - KF[s].p[cc];
+                float d = KFA(s).lm_xyz[lk][cc] - KFA(s).p[cc];
                 dk2 += d * d;
             }
             if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) continue;
             float ps[3];
-            qrotv(covqd[c], KF[s].lm_xyz[lk], ps);
+            qrotv(covqd[c], KFA(s).lm_xyz[lk], ps);
             cand[nc].qkp = i;
-            cand[nc].id = KF[s].lm_id[lk];
+            cand[nc].id = KFA(s).lm_id[lk];
             cand[nc].kf = s;
             cand[nc].cost = bad ? best : ((1 << 30) - best);
             cand[nc].ps[0] = ps[0] + covpd[c][0];
@@ -1319,16 +1339,16 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
         uint32_t mask = 0;
         for (int c = 0; c < ncov; c++) {
             int s = cov[c];
-            for (int l = 0; l < KF[s].n_lm; l++) {
-                if (KF[s].lm_id[l] != Pid[m]) continue;
+            for (int l = 0; l < KFA(s).n_lm; l++) {
+                if (KFA(s).lm_id[l] != Pid[m]) continue;
                 float dk2 = 0;
                 for (int cc = 0; cc < 3; cc++) {
-                    float d = KF[s].lm_xyz[l][cc] - KF[s].p[cc];
+                    float d = KFA(s).lm_xyz[l][cc] - KFA(s).p[cc];
                     dk2 += d * d;
                 }
                 if (dk2 <= VER_MAX_RANGE_M * VER_MAX_RANGE_M) {
                     float ps[3];
-                    qrotv(covqd[c], KF[s].lm_xyz[l], ps);
+                    qrotv(covqd[c], KFA(s).lm_xyz[l], ps);
                     ps[0] += covpd[c][0];
                     ps[1] += covpd[c][1];
                     ps[2] += covpd[c][2];
@@ -1516,9 +1536,10 @@ static void process_keyframe(void) {
 
     /* ---- candidate search + geometric verification: LOCK-FREE. Only the
      * map thread WRITES the keyframe store; a concurrent reset / descriptor
-     * switch just zeroes KF_N and bumps RESET_GEN. KF[] CONTENTS are never
-     * touched by another thread, so reading them here is safe; KF_N and CORR
-     * ARE written by reset, so we use the DEQUEUE-time snapshots (kfn,
+     * switch clears KF_N (frees the slots) and bumps RESET_GEN, but never
+     * touches KF[] contents or the KFO order array, so reading them here is
+     * safe; KF_N and CORR ARE written by reset, so we use the DEQUEUE-time
+     * snapshots (kfn,
      * snap_corr) instead of reading them unlocked. THIS is the
      * priority-inversion fix: the tens-of-ms brute-force match + top-K PnP
      * no longer runs under the lock the VIO worker needs. */
@@ -1566,13 +1587,13 @@ static void process_keyframe(void) {
     }
     for (int i = 0; i < lim; i++) {
         if (gate) {
-            float gx = wsp[0] - KF[i].pc[0], gy = wsp[1] - KF[i].pc[1],
-                  gz = wsp[2] - KF[i].pc[2];
+            float gx = wsp[0] - KFA(i).pc[0], gy = wsp[1] - KFA(i).pc[1],
+                  gz = wsp[2] - KFA(i).pc[2];
             if (gx * gx + gy * gy + gz * gz > SHORTLIST_R_M * SHORTLIST_R_M)
                 continue;
         }
         searched++;
-        int m = match_count(&work, &KF[i]);
+        int m = match_count(&work, &KFA(i));
         if (m > raw_best_m) { raw_best_m = m; raw_best_i = i; }
         if (m < CAND_MIN_MATCHES) continue;
         /* distinct CLUSTERS, not just distinct keyframes: reloc_pnp already
@@ -1582,9 +1603,9 @@ static void process_keyframe(void) {
          * neighbourhood, so the K slots cover K different places. */
         int near = -1;
         for (int t = 0; t < ncand; t++) {   /* SESSION-frame distance (pc) */
-            float dx = KF[i].pc[0] - KF[cand_i[t]].pc[0];
-            float dy = KF[i].pc[1] - KF[cand_i[t]].pc[1];
-            float dz = KF[i].pc[2] - KF[cand_i[t]].pc[2];
+            float dx = KFA(i).pc[0] - KFA(cand_i[t]).pc[0];
+            float dy = KFA(i).pc[1] - KFA(cand_i[t]).pc[1];
+            float dz = KFA(i).pc[2] - KFA(cand_i[t]).pc[2];
             if (dx * dx + dy * dy + dz * dz < COVIS_R_M * COVIS_R_M) {
                 near = t; break;
             }
@@ -1664,10 +1685,10 @@ static void process_keyframe(void) {
     qrotv(snap_corr_q, work.p, wsp2);
     wsp2[0] += snap_corr_p[0]; wsp2[1] += snap_corr_p[1]; wsp2[2] += snap_corr_p[2];
     for (int i = 0; i < KF_N; i++) {
-        float dx = wsp2[0] - KF[i].pc[0], dy = wsp2[1] - KF[i].pc[1],
-              dz = wsp2[2] - KF[i].pc[2];
+        float dx = wsp2[0] - KFA(i).pc[0], dy = wsp2[1] - KFA(i).pc[1],
+              dz = wsp2[2] - KFA(i).pc[2];
         if (dx * dx + dy * dy + dz * dz < KF_NEAR_M * KF_NEAR_M)
-            KF[i].last_used = work.ts;
+            KFA(i).last_used = work.ts;
     }
 
     /* apply the search result */
@@ -1687,7 +1708,7 @@ static void process_keyframe(void) {
         }
     } else if (ncand > 0) {
         LAST_CAND.a = work.ts;
-        LAST_CAND.b = KF[cand_i[0]].ts;
+        LAST_CAND.b = KFA(cand_i[0]).ts;
         LAST_CAND.matches = cand_m[0];
         LAST_CAND.have = 1;
 
@@ -1711,7 +1732,7 @@ static void process_keyframe(void) {
             memcpy(Dp, bDp, sizeof Dp);
             VER_LAST.pairs = n3;
             VER_LAST.inliers = nin;
-            KF[best_i].last_used = work.ts;   /* geometrically useful */
+            KFA(best_i).last_used = work.ts;   /* geometrically useful */
             /* deviation = how far the VIO has strayed from the map (D vs
              * the live correction, at the current pose) */
             float ns[3], os[3];
@@ -1838,13 +1859,13 @@ static void process_keyframe(void) {
             /* AR flash + panel marker: the winner's landmarks in session */
             {
                 float qoi[4], poi[3], qdi[4], pdi[3];
-                pose_invert(KF[best_i].q, KF[best_i].p, qoi, poi);
-                pose_compose(KF[best_i].qc, KF[best_i].pc, qoi, poi, qdi, pdi);
-                memcpy(LOOP_STATS.pos, KF[best_i].pc, sizeof LOOP_STATS.pos);
-                LOOP_STATS.n_lm = KF[best_i].n_lm;
-                for (int i = 0; i < KF[best_i].n_lm; i++) {
+                pose_invert(KFA(best_i).q, KFA(best_i).p, qoi, poi);
+                pose_compose(KFA(best_i).qc, KFA(best_i).pc, qoi, poi, qdi, pdi);
+                memcpy(LOOP_STATS.pos, KFA(best_i).pc, sizeof LOOP_STATS.pos);
+                LOOP_STATS.n_lm = KFA(best_i).n_lm;
+                for (int i = 0; i < KFA(best_i).n_lm; i++) {
                     float t[3];
-                    qrotv(qdi, KF[best_i].lm_xyz[i], t);
+                    qrotv(qdi, KFA(best_i).lm_xyz[i], t);
                     LOOP_STATS.lm[i][0] = t[0] + pdi[0];
                     LOOP_STATS.lm[i][1] = t[1] + pdi[1];
                     LOOP_STATS.lm[i][2] = t[2] + pdi[2];
@@ -1863,11 +1884,15 @@ static void process_keyframe(void) {
     if (may_store) {
         LAST_STORE_NS = work.ts;
         if (KF_N == XR_MAP_MAX_KF) {
-            int victim = 0;
+            /* evict the least-recently-useful keyframe: free its SLOT and drop
+             * it from the time order. Only the small order array shifts (a few
+             * hundred ints), never the ~4 MB of keyframe structs. */
+            int vpos = 0;
             for (int i = 1; i < KF_N; i++)
-                if (KF[i].last_used < KF[victim].last_used) victim = i;
-            memmove(&KF[victim], &KF[victim + 1],
-                    sizeof(xr_kf) * (size_t)(KF_N - 1 - victim));
+                if (KFA(i).last_used < KFA(vpos).last_used) vpos = i;
+            KF_FREE[KF_FREE_N++] = KFO[vpos];      /* slot returns to the pool */
+            memmove(&KFO[vpos], &KFO[vpos + 1],
+                    sizeof(int) * (size_t)(KF_N - 1 - vpos));
             KF_N--;
         }
         work.last_used = work.ts;
@@ -1875,7 +1900,9 @@ static void process_keyframe(void) {
          * confirmed closure this same pass already deformed the tail and
          * (if recovering) updated CORR, so the new tip lands consistent. */
         pose_compose(CORR.q, CORR.p, work.q, work.p, work.qc, work.pc);
-        KF[KF_N] = work;
+        int slot = KF_FREE[--KF_FREE_N];           /* a stable slot for life */
+        KF[slot] = work;
+        KFO[KF_N] = slot;                          /* append in time order */
         KF_N++;
         atomic_store(&KF_COUNT_PUB, KF_N);
         CLOUD_DIRTY = 1;
