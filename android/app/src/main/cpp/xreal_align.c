@@ -84,6 +84,13 @@ int xr_align_ray_to_display(const xr_eye_calib *eye, int variant,
     return 0;
 }
 
+/* The display rotation used by xr_align_ray_to_display, exposed so the GPU
+ * projection shader can carry it as a (constant per eye) uniform instead of
+ * recomputing the whole ray->display map on the CPU per point. */
+void xr_align_disp_rot(const xr_eye_calib *eye, int variant, float Rd[9]) {
+    quat_to_rot(eye->q_disp, variant & 1, Rd);
+}
+
 void xr_align_build(const xr_eye_calib *eye, int variant, int w, int h,
                     int full_w, int full_h, int32_t *out_idx) {
     float su = (float)full_w / w, sv = (float)full_h / h;

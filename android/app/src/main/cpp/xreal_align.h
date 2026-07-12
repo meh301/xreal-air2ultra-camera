@@ -46,6 +46,10 @@ int xr_align_uv(const xr_eye_calib *eye, int variant,
 int xr_align_ray_to_display(const xr_eye_calib *eye, int variant,
                             const float ray_imu[3], float *u_disp, float *v_disp);
 
+/* The (constant per eye) display rotation matrix quat_to_rot(q_disp), for the
+ * GPU projection shader to carry as a uniform. */
+void xr_align_disp_rot(const xr_eye_calib *eye, int variant, float Rd[9]);
+
 /* Build the sample map for one eye: out_idx[y*w + x] = index into the
  * 480x640 camera image (or -1 for out-of-view). (w, h) is the rendered
  * per-eye size; full_w/full_h the calibrated display resolution the K matrix

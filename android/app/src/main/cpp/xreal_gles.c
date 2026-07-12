@@ -2,6 +2,7 @@
 #include "xreal_gles.h"
 
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,6 +95,13 @@ static struct {
     GLuint prog_pt;
     GLint loc_pt_pos, loc_pt_color;
     GLuint vbo_pt;
+    /* GPU map-cloud projection (VS_MAP) */
+    GLuint prog_map, vbo_map;
+    GLint lm_world, lm_head, lm_rhead, lm_pm, lm_rd, lm_k, lm_half, lm_color;
+    int map_vbo_n;                                  /* points uploaded to vbo_map */
+    int map_dirty;                                  /* cloud changed -> re-upload */
+    float map_disp_R[2][9];                         /* per-eye display rot, const */
+    int map_disp_ready;
     GLuint vbo_eye[2], vbo_quad, ibo;
     int mesh_ready, pair_tex_w, pair_tex_h;
     float mesh_pos[2][VERTS * 2];                   /* static NDC positions */
@@ -140,6 +148,36 @@ static const char *VS_PT =
 static const char *FS_PT =
     "precision mediump float; uniform vec4 uColor;\n"
     "void main(){ gl_FragColor = uColor; }\n";
+/* Map-cloud projection ON THE GPU: the exact math of map_pt_project +
+ * xr_align_ray_to_display, so the world-anchored cloud is uploaded once per
+ * change (raw xyz) and re-projected each present from pose uniforms — no
+ * per-frame CPU loop over 8192 points, no per-frame VBO upload. The matrices
+ * are uploaded as-is (transpose=GL_FALSE): GLSL's column-major mat3*vec then
+ * equals the CPU's R[0]*x+R[3]*y+R[6]*z pattern (i.e. R^T*v), matching
+ * map_pt_project term for term. Culled points collapse off-screen. */
+static const char *VS_MAP =
+    "attribute vec3 aWorld;\n"
+    "uniform vec3 uHead;\n"          /* head position (session frame) */
+    "uniform mat3 uRhead;\n"         /* body->world; uRhead*rel = R^T*rel */
+    "uniform mat3 uPm;\n"            /* timewarp delta (identity if none) */
+    "uniform mat3 uRd;\n"           /* display rot (const per eye) */
+    "uniform vec4 uK;\n"            /* fx, fy, cx, cy */
+    "uniform vec2 uHalf;\n"        /* display half-res: 960, 540 */
+    "void main(){\n"
+    "  vec3 rel = aWorld - uHead;\n"
+    "  vec3 a = uRhead * rel;\n"
+    "  float dist = length(a);\n"
+    "  vec3 d = uPm * a;\n"
+    "  vec3 p = uRd * d;\n"
+    "  if (dist < 0.3 || p.z <= 1e-6) { gl_Position = vec4(2.0);\n"
+    "    gl_PointSize = 0.0; return; }\n"
+    "  float u = uK.x * (p.x / p.z) + uK.z;\n"
+    "  float v = uK.y * (p.y / p.z) + uK.w;\n"
+    "  if (u < 0.0 || u > 2.0*uHalf.x || v < 0.0 || v > 2.0*uHalf.y) {\n"
+    "    gl_Position = vec4(2.0); gl_PointSize = 0.0; return; }\n"
+    "  gl_Position = vec4(u/uHalf.x - 1.0, 1.0 - v/uHalf.y, 0.0, 1.0);\n"
+    "  gl_PointSize = clamp(9.0 / dist, 3.0, 16.0);\n"
+    "}\n";
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -204,6 +242,23 @@ static int gl_objects_init(void) {
     G.loc_pt_pos = glGetAttribLocation(G.prog_pt, "aPos");
     G.loc_pt_color = glGetUniformLocation(G.prog_pt, "uColor");
     glGenBuffers(1, &G.vbo_pt);
+
+    /* GPU map-cloud projection program */
+    GLuint vsm = compile(GL_VERTEX_SHADER, VS_MAP);
+    GLuint fsm = compile(GL_FRAGMENT_SHADER, FS_PT);
+    G.prog_map = glCreateProgram();
+    glAttachShader(G.prog_map, vsm);
+    glAttachShader(G.prog_map, fsm);
+    glLinkProgram(G.prog_map);
+    G.lm_world = glGetAttribLocation(G.prog_map, "aWorld");
+    G.lm_head  = glGetUniformLocation(G.prog_map, "uHead");
+    G.lm_rhead = glGetUniformLocation(G.prog_map, "uRhead");
+    G.lm_pm    = glGetUniformLocation(G.prog_map, "uPm");
+    G.lm_rd    = glGetUniformLocation(G.prog_map, "uRd");
+    G.lm_k     = glGetUniformLocation(G.prog_map, "uK");
+    G.lm_half  = glGetUniformLocation(G.prog_map, "uHalf");
+    G.lm_color = glGetUniformLocation(G.prog_map, "uColor");
+    glGenBuffers(1, &G.vbo_map);
 
     glGenBuffers(2, G.vbo_eye);
     glGenBuffers(1, &G.vbo_quad);
@@ -540,21 +595,46 @@ static void render_frame(int mode, int fresh, const float *dR,
             static float ndc[XR_GLES_MAX_MAP * 3];   /* render thread only */
             int n = 0;
             if (eye_mode == XR_EYE_AR && ar_ready) {
-                for (int i = 0; i < G.map_count; i++) {
-                    float u, v, dist;
-                    if (map_pt_project(e, &G.map_xyz[i * 3], ar_ph, ar_R,
-                                       ar_pm, &u, &v, &dist))
-                        continue;
-                    float size = 9.0f / dist;
-                    if (size < 3.0f) size = 3.0f;
-                    if (size > 16.0f) size = 16.0f;
-                    ndc[n * 3] = u / 960.0f - 1.0f;
-                    ndc[n * 3 + 1] = 1.0f - v / 540.0f;
-                    ndc[n * 3 + 2] = size;
-                    n++;
+                /* MAP CLOUD projected ON THE GPU (VS_MAP): the world xyz is
+                 * uploaded once per change; each present just re-binds it with
+                 * the current pose uniforms. Same math as map_pt_project, so
+                 * the overlay lands identically — no per-frame CPU loop over
+                 * 8192 points, no per-frame VBO upload. */
+                if (!G.map_disp_ready && G.calib_valid) {
+                    xr_align_disp_rot(&G.eyes_calib[0], G.calib_variant,
+                                      G.map_disp_R[0]);
+                    xr_align_disp_rot(&G.eyes_calib[1], G.calib_variant,
+                                      G.map_disp_R[1]);
+                    G.map_disp_ready = 1;
                 }
-                if (n > 0)
-                    pt_draw(n, ndc, 0.35f, 0.78f, 1.0f, 1.0f);
+                if (G.map_dirty) {                  /* re-upload only on change */
+                    int mc = G.map_count;
+                    if (mc > XR_GLES_MAX_MAP) mc = XR_GLES_MAX_MAP;
+                    glBindBuffer(GL_ARRAY_BUFFER, G.vbo_map);
+                    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 3 * (size_t)mc,
+                                 G.map_xyz, GL_STATIC_DRAW);
+                    G.map_vbo_n = mc;
+                    G.map_dirty = 0;
+                }
+                if (G.map_disp_ready && G.map_vbo_n > 0) {
+                    static const float ident[9] = { 1,0,0, 0,1,0, 0,0,1 };
+                    const float *pm = ar_pm ? ar_pm : ident;
+                    const float *K = G.eyes_calib[e].K;
+                    float uk[4] = { K[0], K[4], K[2], K[5] };  /* fx,fy,cx,cy */
+                    glUseProgram(G.prog_map);
+                    glUniform3fv(G.lm_head, 1, ar_ph);
+                    glUniformMatrix3fv(G.lm_rhead, 1, GL_FALSE, ar_R);
+                    glUniformMatrix3fv(G.lm_pm, 1, GL_FALSE, pm);
+                    glUniformMatrix3fv(G.lm_rd, 1, GL_FALSE, G.map_disp_R[e]);
+                    glUniform4fv(G.lm_k, 1, uk);
+                    glUniform2f(G.lm_half, 960.0f, 540.0f);
+                    glUniform4f(G.lm_color, 0.35f, 0.78f, 1.0f, 1.0f);
+                    glBindBuffer(GL_ARRAY_BUFFER, G.vbo_map);
+                    glVertexAttribPointer((GLuint)G.lm_world, 3, GL_FLOAT,
+                                          GL_FALSE, 0, (void *)0);
+                    glEnableVertexAttribArray((GLuint)G.lm_world);
+                    glDrawArrays(GL_POINTS, 0, G.map_vbo_n);
+                }
                 /* loop/reloc flash: the matched keyframe's stored landmarks
                  * in magenta, fading over ~3.5 s — where the session map
                  * believes it recognized. Offset vs the live cyan points of
@@ -840,6 +920,7 @@ void xr_gles_set_map_points(const float *xyz_world, int n) {
     pthread_mutex_lock(&G.lock);
     if (n > 0) memcpy(G.map_xyz, xyz_world, sizeof(float) * (size_t)n * 3);
     G.map_count = n;
+    G.map_dirty = 1;              /* render thread re-uploads vbo_map on next AR present */
     pthread_mutex_unlock(&G.lock);
 }
 
