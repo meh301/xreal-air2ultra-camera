@@ -32,7 +32,9 @@ class PoseMapView @JvmOverloads constructor(
     private var flags = 0
     private var haveState = false
 
-    private val trail = ArrayList<FloatArray>()    // sampled positions
+    private val trail = ArrayList<FloatArray>()    // sampled positions (~2 cm gate)
+    private val TRAIL_MAX = 4096                    // ~80 m+ of path history
+    private val trailScreen = FloatArray(TRAIL_MAX * 4)  // segment endpoints, batched draw
 
     // accumulated landmark cloud (world xyz triplets)
     private var cloud = FloatArray(0)
@@ -110,7 +112,7 @@ class PoseMapView @JvmOverloads constructor(
         }
         if (moved) {
             trail.add(pos.copyOf())
-            if (trail.size > 512) trail.removeAt(0)
+            if (trail.size > TRAIL_MAX) trail.removeAt(0)
         }
         invalidate()
     }
@@ -311,12 +313,19 @@ class PoseMapView @JvmOverloads constructor(
         }
         if (pn > 0) canvas.drawPoints(cloudScreen, 0, pn, cloudPaint)
 
-        // trail
-        for (i in 1 until trail.size) {
-            val a = trail[i - 1]; val b = trail[i]
-            project(a[0], a[1], a[2], pa)
-            project(b[0], b[1], b[2], pb)
-            canvas.drawLine(pa[0], pa[1], pb[0], pb[1], trailPaint)
+        // trail — batched polyline (one drawLines call for the whole path)
+        if (trail.size > 1) {
+            var tn = 0
+            project(trail[0][0], trail[0][1], trail[0][2], pa)
+            for (i in 1 until trail.size) {
+                project(trail[i][0], trail[i][1], trail[i][2], pb)
+                if (tn + 4 <= trailScreen.size) {
+                    trailScreen[tn++] = pa[0]; trailScreen[tn++] = pa[1]
+                    trailScreen[tn++] = pb[0]; trailScreen[tn++] = pb[1]
+                }
+                pa[0] = pb[0]; pa[1] = pb[1]
+            }
+            if (tn > 0) canvas.drawLines(trailScreen, 0, tn, trailPaint)
         }
 
         // headset frustum: body +z is the look direction (camera forward)
