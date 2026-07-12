@@ -102,6 +102,8 @@ static float g_f[XR_OW * XR_OH];   /* shared scratch: single-thread use only */
 static float g_hp[XR_OW * XR_OH];
 static float g_cp[(XR_OH + 1) * XR_OW];  /* column-prefix scratch for the
                                           * cache-friendly vertical high-pass */
+static float g_hpT[XR_OW * XR_OH];       /* blocked transpose of g_hp for the
+                                          * cache-friendly column median */
 
 static float select_kth(float *a, int n, int k) {
     /* Hoare quickselect; a is scratch and gets reordered */
@@ -150,10 +152,22 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
                 hp[x] = row[x] - (pref[hi + 1] - pref[lo]) / (float)(hi - lo + 1);
             }
         }
-        /* column median -> EMA stripe */
+        /* column median -> EMA stripe. Gathering each column straight from
+         * g_hp strides by XR_OW (cache miss per read); instead transpose g_hp
+         * in cache-friendly tiles once, then each column is contiguous for the
+         * median. Same medians, far fewer misses. */
+        enum { CT = 32 };                         /* transpose tile */
+        for (int y0 = 0; y0 < XR_OH; y0 += CT) {
+            int y1 = y0 + CT < XR_OH ? y0 + CT : XR_OH;
+            for (int x0 = 0; x0 < XR_OW; x0 += CT) {
+                int x1 = x0 + CT < XR_OW ? x0 + CT : XR_OW;
+                for (int y = y0; y < y1; y++)
+                    for (int x = x0; x < x1; x++)
+                        g_hpT[(size_t)x * XR_OH + y] = g_hp[(size_t)y * XR_OW + x];
+            }
+        }
         for (int x = 0; x < XR_OW; x++) {
-            for (int y = 0; y < XR_OH; y++) buf[y] = g_hp[y * XR_OW + x];
-            float cur = select_kth(buf, XR_OH, XR_OH / 2);
+            float cur = select_kth(g_hpT + (size_t)x * XR_OH, XR_OH, XR_OH / 2);
             c->stripe[x] = c->have_stripe ? 0.95f * c->stripe[x] + 0.05f * cur : cur;
         }
         c->have_stripe = 1;
