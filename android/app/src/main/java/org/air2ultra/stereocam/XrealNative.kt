@@ -50,7 +50,7 @@ object XrealNative {
     /** Path of the staged XFeat ONNX model (session-map descriptors). */
     external fun nativeSetXfeatModel(path: String)
 
-    /** Runtime descriptor selector: mini-ORB (false) vs XFeat (true).
+    /** Runtime descriptor selector: BAD/TEBLID (false) vs XFeat (true).
      *  Clears the keyframe map on a real change (types can't cross-match). */
     external fun nativeSetUseXfeat(on: Boolean)
 

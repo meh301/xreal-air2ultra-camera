@@ -331,7 +331,7 @@ class MainActivity : Activity() {
             // switch the session-map descriptor; clears the keyframe map
             useXfeat = !useXfeat
             XrealNative.nativeSetUseXfeat(useXfeat)
-            val label = if (!useXfeat) R.string.desc_orb
+            val label = if (!useXfeat) R.string.desc_bad
                         else if (XrealNative.nativeXfeatReady()) R.string.desc_xfeat
                         else R.string.desc_xfeat_na
             descButton.text = getString(label)
@@ -521,7 +521,7 @@ class MainActivity : Activity() {
             android.util.Log.e("xrealcam", "Basalt config staging failed: $e")
         }
         // Always stage the XFeat model so the Desc button can switch to it
-        // at runtime; the descriptor actually used stays mini-ORB until the
+        // at runtime; the descriptor actually used stays BAD/TEBLID until the
         // user selects XFeat (nativeSetUseXfeat).
         try {
             val model = java.io.File(filesDir, "xfeat.onnx")
@@ -531,7 +531,7 @@ class MainActivity : Activity() {
             XrealNative.nativeSetXfeatModel(model.absolutePath)
             android.util.Log.i("xrealcam", "XFeat model staged: ${model.absolutePath}")
         } catch (e: Exception) {
-            android.util.Log.e("xrealcam", "XFeat staging failed (mini-ORB only): $e")
+            android.util.Log.e("xrealcam", "XFeat staging failed (BAD/TEBLID only): $e")
         }
     }
 

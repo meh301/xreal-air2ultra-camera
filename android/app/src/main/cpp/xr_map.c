@@ -1,12 +1,14 @@
 /* xr_map.c — see xr_map.h.
  *
- * Fallback descriptors: compact ORB-style — FAST-9 corners with grid NMS,
- * intensity-centroid orientation, rotated 256-bit BRIEF from a fixed
- * seeded pattern (self-consistent within this system; no OpenCV).
- * Primary descriptors: XFeat via xr_xfeat (int8-quantized 64-D, cosine ~=
- * dot/16129; NEON sdot when available). Brute force matching is fine at
- * session scale — the koide3/GLIM lesson applied here is the bounded
- * incremental store, not fancy search.
+ * Handcrafted descriptors (no inference): BAD/TEBLID — FAST-9 corners with
+ * grid NMS + intensity-centroid orientation, then a 256-bit LEARNED
+ * box-average-difference descriptor off an integral image (Suarez et al.,
+ * RA-L 2021; params in xr_teblid_params.h). Far more robust than the old
+ * mini-ORB BRIEF on these grainy sensors, still binary (Hamming), still CPU.
+ * Learned descriptors: XFeat via xr_xfeat (int8-quantized 64-D, cosine ~=
+ * dot/16129; NEON sdot when available) — heavier (ONNX inference), used when
+ * BAD is not enough. Brute force matching is fine at session scale — the
+ * koide3/GLIM lesson applied here is the bounded incremental store.
  */
 #include "xr_map.h"
 
@@ -21,6 +23,7 @@
 #include <android/log.h>
 
 #include "xr_xfeat.h"
+#include "xr_teblid_params.h"
 #include "xreal_core.h"
 
 #if defined(__ARM_FEATURE_DOTPROD)
@@ -35,12 +38,12 @@
 #define KF_ANGLE_COS 0.99144f      /* cos(15/2 deg) on the quat dot */
 #define KF_NEAR_M 2.0f             /* proximity that keeps a keyframe fresh */
 
-/* mini-ORB */
+/* FAST-9 detector (shared by both descriptors) */
 #define FAST_THRESH 18
 #define NMS_GRID 24
 #define MARGIN 20
-#define ORB_MAX_DIST 60            /* Hamming acceptance */
-#define ORB_MARGIN 10
+#define BAD_MAX_DIST 60            /* Hamming acceptance (256-bit TEBLID) */
+#define BAD_MARGIN 10
 
 /* XFeat int8 cosine: dot of two L2-normalized-then-*127 vectors */
 #define XF_MIN_DOT 13000           /* ~cos 0.81 */
@@ -106,7 +109,7 @@ enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
 #define RELOC_TOPK 3                   /* candidate clusters verified when relocalizing (repetitive scenes hand raw scoring to the wrong keyframe) */
 #define CLOUD_MAX 3000                 /* displayed keyframe-derived cloud cap (SD888 thermal budget) */
 
-enum { DESC_ORB = 0, DESC_XFEAT = 1 };
+enum { DESC_BAD = 0, DESC_XFEAT = 1 };
 
 typedef struct {
     uint64_t ts;
@@ -118,7 +121,7 @@ typedef struct {
     int desc_type;
     int n_kp;
     float kp_uv[XR_MAP_KP_PER_KF][2];
-    int8_t desc[XR_MAP_KP_PER_KF][64];   /* ORB uses the first 32 bytes */
+    int8_t desc[XR_MAP_KP_PER_KF][64];   /* BAD/TEBLID uses the first 32 bytes */
     int lm_of_kp[XR_MAP_KP_PER_KF];      /* kp -> landmark index, or -1 */
     int n_lm;
     int32_t lm_id[XR_MAP_KP_PER_KF];
@@ -250,7 +253,7 @@ int xr_map_recovery_state(void) {
     return atomic_load(&REC_STATE);
 }
 
-/* Switch the keyframe descriptor (0 = mini-ORB, 1 = XFeat). ORB and
+/* Switch the keyframe descriptor (0 = BAD/TEBLID, 1 = XFeat). BAD and
  * XFeat keyframes cannot match each other, so the store is cleared on a
  * real change — the map rebuilds with the selected descriptor. */
 void xr_map_set_use_xfeat(int on) {
@@ -262,7 +265,7 @@ void xr_map_set_use_xfeat(int on) {
     LAST_STORE_NS = 0;
     pthread_mutex_unlock(&MAP_LOCK);
     LOGI("session map: descriptor -> %s (keyframes cleared, rebuilding)",
-         want ? "XFeat" : "mini-ORB");
+         want ? "XFeat" : "BAD/TEBLID");
 }
 
 /* Whether the XFeat model + ONNX Runtime are actually loaded (so the UI
@@ -578,20 +581,42 @@ int xr_map_last_candidate(uint64_t *ts_a, uint64_t *ts_b, int *matches) {
     return have;
 }
 
-/* ---- mini-ORB fallback --------------------------------------------------------- */
+/* ---- BAD / TEBLID descriptor (integral-image box differences) ------------------ */
 
-static int8_t PAT[256][4];
-static int pat_ready;
+/* the 32x32 training patch maps ~1:1 to image pixels — our detector is
+ * single-scale so keypoints carry no size to scale by */
+#define BAD_SCALE 1.0f
 
-static void pat_init(void) {
-    if (pat_ready) return;
-    uint32_t s = 0xC0FFEE01u;
-    for (int i = 0; i < 256; i++)
-        for (int k = 0; k < 4; k++) {
-            s = s * 1664525u + 1013904223u;
-            PAT[i][k] = (int8_t)((int)(s >> 24) % 14 * ((s >> 23 & 1) ? 1 : -1));
+static int32_t INTEG[(XR_OH + 1) * (XR_OW + 1)];   /* map-thread scratch (.bss) */
+
+static void build_integral(const uint8_t *img) {
+    const int IW = XR_OW + 1;
+    for (int x = 0; x <= XR_OW; x++) INTEG[x] = 0;
+    for (int y = 0; y < XR_OH; y++) {
+        int32_t *row = INTEG + (y + 1) * IW;
+        const int32_t *prev = INTEG + y * IW;
+        const uint8_t *irow = img + y * XR_OW;
+        int32_t s = 0;
+        row[0] = 0;
+        for (int x = 0; x < XR_OW; x++) {
+            s += irow[x];
+            row[x + 1] = prev[x + 1] + s;
         }
-    pat_ready = 1;
+    }
+}
+
+/* mean intensity of the (2r+1)-square box centred at (cx,cy), clamped to
+ * the frame (matches OpenCV's computeABWLResponse) */
+static inline float box_avg(int cx, int cy, int r) {
+    const int IW = XR_OW + 1, IH = XR_OH + 1;
+    int x1 = cx - r, x2 = cx + r + 1, y1 = cy - r, y2 = cy + r + 1;
+    if (x1 < 0) x1 = 0; else if (x1 > IW - 2) x1 = IW - 2;
+    if (x2 < 1) x2 = 1; else if (x2 > IW - 1) x2 = IW - 1;
+    if (y1 < 0) y1 = 0; else if (y1 > IH - 2) y1 = IH - 2;
+    if (y2 < 1) y2 = 1; else if (y2 > IH - 1) y2 = IH - 1;
+    int A = INTEG[y1 * IW + x1], B = INTEG[y1 * IW + x2];
+    int C = INTEG[y2 * IW + x1], D = INTEG[y2 * IW + x2];
+    return (float)(A + D - B - C) / (float)((y2 - y1) * (x2 - x1));
 }
 
 static const int8_t CIRC[16][2] = {
@@ -625,37 +650,43 @@ static int fast_score(const uint8_t *img, int x, int y) {
     return best;
 }
 
-/* rotated-BRIEF descriptor with centroid orientation, at (bx, by) */
-static void orb_describe(const uint8_t *img, int bx, int by, int8_t *desc) {
+/* TEBLID-256 descriptor at (cx, cy): intensity-centroid orientation, then
+ * the 256 learned box-average differences read off the integral image.
+ * `img` supplies the small centroid window; INTEG the box sums. */
+static void teblid_describe(const uint8_t *img, int cx, int cy, int8_t *desc) {
     int m10 = 0, m01 = 0;
     for (int dy = -7; dy <= 7; dy++)
         for (int dx = -7; dx <= 7; dx++) {
-            int v = img[(by + dy) * XR_OW + bx + dx];
+            int v = img[(cy + dy) * XR_OW + cx + dx];
             m10 += dx * v;
             m01 += dy * v;
         }
     float ang = atan2f((float)m01, (float)m10);
-    float ca = cosf(ang), sa = sinf(ang);
-    uint64_t d[4] = { 0, 0, 0, 0 };
-    for (int b = 0; b < 256; b++) {
-        int ax = (int)lroundf(ca * PAT[b][0] - sa * PAT[b][1]);
-        int ay = (int)lroundf(sa * PAT[b][0] + ca * PAT[b][1]);
-        int bx2 = (int)lroundf(ca * PAT[b][2] - sa * PAT[b][3]);
-        int by2 = (int)lroundf(sa * PAT[b][2] + ca * PAT[b][3]);
-        if (img[(by + ay) * XR_OW + bx + ax] <
-            img[(by + by2) * XR_OW + bx + bx2])
-            d[b >> 6] |= 1ull << (b & 63);
+    float ca = cosf(ang) * BAD_SCALE, sa = sinf(ang) * BAD_SCALE;
+    uint8_t d[32];
+    memset(d, 0, sizeof d);
+    for (int i = 0; i < 256; i++) {
+        const bad_wl *w = &BAD_WL_256[i];
+        int px1 = w->x1 - 16, py1 = w->y1 - 16;   /* patch coords, centred */
+        int px2 = w->x2 - 16, py2 = w->y2 - 16;
+        int x1 = cx + (int)lroundf(ca * px1 - sa * py1);
+        int y1 = cy + (int)lroundf(sa * px1 + ca * py1);
+        int x2 = cx + (int)lroundf(ca * px2 - sa * py2);
+        int y2 = cy + (int)lroundf(sa * px2 + ca * py2);
+        int r = (int)lroundf(BAD_SCALE * w->boxRadius);
+        if (box_avg(x1, y1, r) - box_avg(x2, y2, r) <= w->th)
+            d[i >> 3] |= (uint8_t)(1u << (7 - (i & 7)));
     }
-    memcpy(desc, d, sizeof d);
+    memcpy(desc, d, 32);
 }
 
-static void orb_extract(const uint8_t *img, xr_kf *kf) {
-    pat_init();
+static void bad_extract(const uint8_t *img, xr_kf *kf) {
+    build_integral(img);
     kf->n_kp = 0;
-    kf->desc_type = DESC_ORB;
+    kf->desc_type = DESC_BAD;
     /* descriptors anchored AT the VIO landmarks first: a descriptor match
-     * then IS a 3D-3D landmark correspondence — what the loop verification
-     * and pose graph consume. Basalt picks corners, so the patches are
+     * then IS a landmark correspondence — what the loop verification and
+     * pose graph consume. Basalt picks corners, so the patches are
      * descriptor-worthy by construction. */
     for (int i = 0; i < kf->n_lm && kf->n_kp < XR_MAP_KP_PER_KF; i++) {
         int x = (int)lroundf(kf->lm_uv[i][0]);
@@ -667,7 +698,7 @@ static void orb_extract(const uint8_t *img, xr_kf *kf) {
         kf->kp_uv[j][0] = (float)x;
         kf->kp_uv[j][1] = (float)y;
         kf->lm_of_kp[j] = i;
-        orb_describe(img, x, y, kf->desc[j]);
+        teblid_describe(img, x, y, kf->desc[j]);
     }
     /* then FAST-grid corners for place-recognition coverage (no 3D) */
     enum { GX = (XR_OW - 2 * MARGIN) / NMS_GRID,
@@ -695,7 +726,7 @@ static void orb_extract(const uint8_t *img, xr_kf *kf) {
             kf->kp_uv[i][0] = (float)bx;
             kf->kp_uv[i][1] = (float)by;
             kf->lm_of_kp[i] = -1;
-            orb_describe(img, bx, by, kf->desc[i]);
+            teblid_describe(img, bx, by, kf->desc[i]);
         }
 }
 
@@ -757,7 +788,7 @@ static int match_pairs_lim(const xr_kf *a, int na, const xr_kf *b, int nb,
                 if (d < best) { second = best; best = d; jb = j; }
                 else if (d < second) second = d;
             }
-            if (best <= ORB_MAX_DIST && best + ORB_MARGIN <= second) {
+            if (best <= BAD_MAX_DIST && best + BAD_MARGIN <= second) {
                 if (pairs && n < max_pairs) {
                     pairs[n][0] = i;
                     pairs[n][1] = jb;
@@ -796,8 +827,8 @@ static int anchored_count(const xr_kf *k) {
  * it in closed form, RANSAC picks the consensus, a linear pass refines
  * the camera center and yaw. */
 #define VER_MIN_PAIRS 8            /* 2D-3D matches needed to try */
-/* bearing inlier tolerance ~4 deg. 2.5 deg was too tight: mini-ORB
- * keypoint noise (~0.5 deg) PLUS the map point's own inverse-depth
+/* bearing inlier tolerance ~4 deg. 2.5 deg was too tight: FAST keypoint
+ * noise (~0.5 deg) PLUS the map point's own inverse-depth
  * position error (a near point off by the 0.35 m cache tolerance is
  * degrees of bearing from a metre away) left genuine revisits one or two
  * inliers short of the floor (the on-device "20 pairs, 7 inliers" near
@@ -1028,7 +1059,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
                      int *out_n3, int *out_nin, int *out_covis) {
     *out_n3 = *out_nin = *out_covis = 0;
     if (!GEOM.have) return 0;
-    int orb = w->desc_type == DESC_ORB;
+    int bad = w->desc_type == DESC_BAD;
 
     /* 1a. covisible keyframe pool: the winning keyframe FIRST, then its
      * nearest same-descriptor neighbours within COVIS_R (distance-sorted).
@@ -1064,11 +1095,11 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
     int nc = 0;
     for (int c = 0; c < ncov && nc < COVIS_MAX_CAND; c++) {
         int s = cov[c];
-        int nkp = orb ? anchored_count(&KF[s]) : KF[s].n_kp;
+        int nkp = bad ? anchored_count(&KF[s]) : KF[s].n_kp;
         for (int i = 0; i < w->n_kp && nc < COVIS_MAX_CAND; i++) {
-            int best = orb ? 999 : -(1 << 30), second = best, bj = -1;
+            int best = bad ? 999 : -(1 << 30), second = best, bj = -1;
             for (int j = 0; j < nkp; j++) {
-                if (orb) {
+                if (bad) {
                     int d = hamming256(w->desc[i], KF[s].desc[j]);
                     if (d < best) { second = best; best = d; bj = j; }
                     else if (d < second) second = d;
@@ -1079,8 +1110,8 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
                 }
             }
             if (bj < 0) continue;
-            int accept = orb
-                ? (best <= ORB_MAX_DIST && best + ORB_MARGIN <= second)
+            int accept = bad
+                ? (best <= BAD_MAX_DIST && best + BAD_MARGIN <= second)
                 : (best >= XF_MIN_DOT && best - XF_MARGIN >= second);
             if (!accept) continue;
             int lk = KF[s].lm_of_kp[bj];
@@ -1096,7 +1127,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
             cand[nc].qkp = i;
             cand[nc].id = KF[s].lm_id[lk];
             cand[nc].kf = s;
-            cand[nc].cost = orb ? best : ((1 << 30) - best);
+            cand[nc].cost = bad ? best : ((1 << 30) - best);
             cand[nc].ps[0] = ps[0] + covpd[c][0];
             cand[nc].ps[1] = ps[1] + covpd[c][1];
             cand[nc].ps[2] = ps[2] + covpd[c][2];
@@ -1295,7 +1326,7 @@ static void process_keyframe(void) {
         return;
     if (do_search) last_search_ns = work.ts;
 
-    /* descriptors: XFeat when selected AND available, mini-ORB otherwise */
+    /* descriptors: XFeat when selected AND available, BAD/TEBLID otherwise */
     if (atomic_load(&USE_XFEAT) && MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);
     if (atomic_load(&USE_XFEAT) && xr_xfeat_available()) {
         int n = xr_xfeat_extract(img, work.kp_uv, work.desc,
@@ -1304,7 +1335,7 @@ static void process_keyframe(void) {
             work.n_kp = n;
             work.desc_type = DESC_XFEAT;
             /* associate XFeat keypoints to landmarks by proximity (the
-             * ORB path anchors descriptors AT the landmarks instead) */
+             * BAD path anchors descriptors AT the landmarks instead) */
             for (int j = 0; j < work.n_kp; j++) {
                 work.lm_of_kp[j] = -1;
                 float bd = 16.0f;              /* 4 px */
@@ -1316,10 +1347,10 @@ static void process_keyframe(void) {
                 }
             }
         } else {
-            orb_extract(img, &work);
+            bad_extract(img, &work);
         }
     } else {
-        orb_extract(img, &work);
+        bad_extract(img, &work);
     }
 
     pthread_mutex_lock(&MAP_LOCK);
@@ -1440,7 +1471,7 @@ static void process_keyframe(void) {
             PENDING_D.have = 0;                /* break any confirmation run */
             LOGI("session map: %s %d cluster(s) best %d matches (%s) — "
                  "unverified (%d pairs)", mapping ? "LOOP" : "RELOC", ncand,
-                 cand_m[0], work.desc_type == DESC_XFEAT ? "xfeat" : "orb",
+                 cand_m[0], work.desc_type == DESC_XFEAT ? "xfeat" : "bad",
                  any_pairs);
         } else {
             int n3 = best_n3, nin = best_nin, covis = best_covis;
