@@ -1,7 +1,7 @@
 # Export the ZipDepth NPU checkpoint to ONNX and stage it as the app asset.
 # Needs the ZipDepth repo cloned at <root>\ZipDepth (gitignored) with its
 # checkpoints, and a Python env with its requirements (torch, onnx, onnxsim).
-# The ONNX is the SAME file for CPU or NPU — the execution provider (QNN /
+# The ONNX is the SAME file for CPU or NPU -- the execution provider (QNN /
 # NeuroPilot / CPU) decides where it runs, not the file.
 #
 #   powershell -File android\build_zipdepth_onnx.ps1
