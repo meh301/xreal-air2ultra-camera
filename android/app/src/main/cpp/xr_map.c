@@ -1082,7 +1082,7 @@ static int rc_nb_cmp(const void *a, const void *b) {
  * counted by GEOMETRIC INLIERS across DISTINCT keyframes, not raw
  * matches. Fills D (odom -> session), the pair/inlier counts, and the
  * inlier-backed covisible-keyframe count; returns 1 on a solved pose. */
-static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
+static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[3],
                      int *out_n3, int *out_nin, int *out_covis) {
     *out_n3 = *out_nin = *out_covis = 0;
     if (!GEOM.have) return 0;
@@ -1096,7 +1096,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, float Dq[4], float Dp[3],
     cov[ncov++] = best_i;
     static struct rc_nb nbr[XR_MAP_MAX_KF];
     int nnb = 0;
-    for (int s = 0; s < KF_N; s++) {   /* SESSION-frame proximity (pc): pool
+    for (int s = 0; s < nkf; s++) {    /* SESSION-frame proximity (pc): pool
                                           physically-adjacent keyframes even
                                           across drifted odom epochs */
         if (s == best_i || KF[s].desc_type != w->desc_type) continue;
@@ -1323,6 +1323,8 @@ static void process_keyframe(void) {
      * abandoned — no stale correction AND no stale/wrong-descriptor store. */
     unsigned rgen0 = atomic_load(&RESET_GEN);
     int kfn = KF_N;
+    uint64_t snap_recovered_ns = RECOVERED_NS;   /* reset writes these under */
+    uint64_t snap_last_store_ns = LAST_STORE_NS;  /* the lock; snapshot here */
     float snap_corr_q[4], snap_corr_p[3];
     memcpy(snap_corr_q, CORR.q, sizeof snap_corr_q);
     memcpy(snap_corr_p, CORR.p, sizeof snap_corr_p);
@@ -1340,16 +1342,16 @@ static void process_keyframe(void) {
      * is the pending same-session-submap work). */
     int shaking = atomic_load(&SHAKING);
     int rstate = atomic_load(&REC_STATE);
-    if (shaking && KF_N >= REC_MIN_MAP) {
+    if (shaking && kfn >= REC_MIN_MAP) {
         rstate = REC_LOST;
     } else if (rstate == REC_RECOVERED) {
-        if (work.ts - RECOVERED_NS > REC_STABLE_NS) rstate = REC_HEALTHY;
+        if (work.ts - snap_recovered_ns > REC_STABLE_NS) rstate = REC_HEALTHY;
     }
     /* REC_LOST is left ONLY by a confirmed recovery (in the apply branch) */
     atomic_store(&REC_STATE, rstate);
     int lost = rstate == REC_LOST;
     /* a shake with too small a map to be "lost" from still briefly freezes */
-    int shake_freeze = shaking && KF_N < REC_MIN_MAP;
+    int shake_freeze = shaking && kfn < REC_MIN_MAP;
 
     /* rate gates (map-thread-only timing). Skip ALL the heavy work when
      * this offer will neither search nor store — what keeps the map thread
@@ -1365,7 +1367,7 @@ static void process_keyframe(void) {
                     work.ts - last_search_ns >= search_iv;
     int may_store = mapping && !q_only && !lost && !shake_freeze &&
                     work.n_lm >= STORE_MIN_LM &&
-                    work.ts - LAST_STORE_NS >= STORE_MIN_INTERVAL_NS;
+                    work.ts - snap_last_store_ns >= STORE_MIN_INTERVAL_NS;
     if (!do_search && !may_store)
         return;
     if (do_search) last_search_ns = work.ts;
@@ -1493,7 +1495,7 @@ static void process_keyframe(void) {
     for (int c = 0; c < ncand; c++) {
         int cn3 = 0, cnin = 0, ccov = 0;
         float cDq[4], cDp[3];
-        int ok = reloc_pnp(&work, cand_i[c], cDq, cDp, &cn3, &cnin, &ccov);
+        int ok = reloc_pnp(&work, cand_i[c], kfn, cDq, cDp, &cn3, &cnin, &ccov);
         if (cn3 > any_pairs) any_pairs = cn3;
         if (ok && ccov >= COVIS_MIN_KF && cnin > best_nin) {
             best_i = cand_i[c]; best_m = cand_m[c];
