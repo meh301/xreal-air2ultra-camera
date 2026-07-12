@@ -830,19 +830,29 @@ void xr_gles_set_show_points(int on) {
     pthread_mutex_unlock(&G.lock);
 }
 
-void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
-                     const float p_base[3], const float v_base[3],
-                     uint64_t ts_ns) {
+/* Publish the map POINT CLOUD (session-frame world xyz). The copy is up to
+ * 96 KB, so the caller gates this on the map's generation counter and only
+ * calls it when the cloud actually changed (a store / deform / evict / reset),
+ * NOT every VIO frame. No cond signal — the pose update below runs right after
+ * and drives the present. */
+void xr_gles_set_map_points(const float *xyz_world, int n) {
     if (n > XR_GLES_MAX_MAP) n = XR_GLES_MAX_MAP;
     pthread_mutex_lock(&G.lock);
-    if (n > 0) {
-        memcpy(G.map_xyz, xyz_world, sizeof(float) * (size_t)n * 3);
-        memcpy(G.map_R, R_base, sizeof G.map_R);
-        memcpy(G.map_p, p_base, sizeof G.map_p);
-        memcpy(G.map_v, v_base, sizeof G.map_v);
-        G.map_ts = ts_ns;
-    }
+    if (n > 0) memcpy(G.map_xyz, xyz_world, sizeof(float) * (size_t)n * 3);
     G.map_count = n;
+    pthread_mutex_unlock(&G.lock);
+}
+
+/* Update just the head pose the cloud is drawn against — cheap (15 floats),
+ * called every VIO frame so world-anchored parallax stays live even when the
+ * cloud itself is unchanged. */
+void xr_gles_set_map_pose(const float R_base[9], const float p_base[3],
+                          const float v_base[3], uint64_t ts_ns) {
+    pthread_mutex_lock(&G.lock);
+    memcpy(G.map_R, R_base, sizeof G.map_R);
+    memcpy(G.map_p, p_base, sizeof G.map_p);
+    memcpy(G.map_v, v_base, sizeof G.map_v);
+    G.map_ts = ts_ns;
     pthread_cond_signal(&G.cond);
     pthread_mutex_unlock(&G.lock);
 }

@@ -1070,8 +1070,13 @@ static void *slam_worker(void *arg) {
                  * is what moves at VIO rate). */
                 int mn = xr_map_get_cloud(map_cloud, XR_GLES_MAX_MAP,
                                           &map_cloud_gen);
-                if (mn >= 0) map_cloud_n = mn;
-                xr_gles_set_map(map_cloud, map_cloud_n, Rw, st.p, st.v, st.ts);
+                if (mn >= 0) {
+                    map_cloud_n = mn;
+                    xr_gles_set_map_points(map_cloud, map_cloud_n);
+                }
+                /* pose every frame for live parallax; the 96 KB point copy
+                 * above only when the graph actually changed */
+                xr_gles_set_map_pose(Rw, st.p, st.v, st.ts);
 
                 /* anchor the 1 kHz head-pose propagator (session frame) */
                 prop_correct(st.q, st.p, st.v, st.ts);
@@ -1785,7 +1790,7 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSlamReset(JNIEnv *env, jclass cls
     pthread_mutex_unlock(&S.lock);
     S.slam_prev_ts = 0;
     xr_gles_set_points(NULL, 0, 0);
-    xr_gles_set_map(NULL, 0, NULL, NULL, NULL, 0);
+    xr_gles_set_map_points(NULL, 0);     /* clear the displayed cloud */
     LOGI("SLAM reset");
 }
 

@@ -70,9 +70,12 @@ void xr_gles_set_points(const float *rays_imu, int n, uint64_t exposure_ts_ns);
  * full 6-DoF parallax — SLAM drift becomes directly visible against the
  * real world. */
 enum { XR_GLES_MAX_MAP = 8192 };
-void xr_gles_set_map(const float *xyz_world, int n, const float R_base[9],
-                     const float p_base[3], const float v_base[3],
-                     uint64_t ts_ns);
+/* Split publication: points change rarely (gate on the map generation and only
+ * republish then — up to a 96 KB copy), the head pose changes every VIO frame
+ * (cheap). Pass n=0 (xyz may be NULL) to clear the cloud. */
+void xr_gles_set_map_points(const float *xyz_world, int n);
+void xr_gles_set_map_pose(const float R_base[9], const float p_base[3],
+                          const float v_base[3], uint64_t ts_ns);
 
 /* Current time on the IMU clock (newest 1 kHz sample), for the position
  * extrapolation above. */
