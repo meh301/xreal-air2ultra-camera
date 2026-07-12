@@ -57,3 +57,6 @@ __pycache__/
 
 # ZipDepth model repo (reference + ONNX export tooling; not a build dep)
 /ZipDepth/
+
+# ZipDepth ONNX (24 MB; regenerate: ZipDepth/scripts/export.py --npu, see build_zipdepth_onnx.ps1)
+android/app/src/xfeat/assets/zipdepth.onnx

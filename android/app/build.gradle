@@ -11,6 +11,14 @@ plugins {
 // behaviour are untouched.
 def leanBuild = project.hasProperty('lean')
 
+// QNN build (./gradlew assembleDebug -Pqnn): use a QNN-enabled ONNX Runtime
+// (built with --use_qnn) + the Qualcomm backend libs staged in jniLibs by
+// android/fetch_qnn.ps1, so ZipDepth runs on the Hexagon NPU. The stock CPU
+// ORT from Maven is dropped to avoid two libonnxruntime.so; everything else
+// (the ONNX asset, xr_zipdepth's EP selection) is unchanged. arm64-only (the
+// NPU backends ship arm64 only).
+def qnnBuild = project.hasProperty('qnn')
+
 android {
     namespace 'org.air2ultra.stereocam'
     compileSdk 34
@@ -24,7 +32,7 @@ android {
         versionName '1.0'
         ndk {
             // x86 omitted: emulators can't see the glasses anyway
-            if (leanBuild) abiFilters 'arm64-v8a'
+            if (leanBuild || qnnBuild) abiFilters 'arm64-v8a'
             else abiFilters 'arm64-v8a', 'armeabi-v7a'
         }
     }
@@ -62,6 +70,7 @@ dependencies {
     // to run the XFeat session-map descriptors (see cpp/xr_xfeat.c). The
     // Java API is unused. Otherwise the app sticks to framework APIs +
     // the Kotlin stdlib (added by the Kotlin plugin). Omitted in the lean
-    // build, which runs BAD/TEBLID descriptors only.
-    if (!leanBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
+    // build (BAD/TEBLID only) and in the qnn build (a QNN-enabled ORT is
+    // supplied via jniLibs instead — see fetch_qnn.ps1).
+    if (!leanBuild && !qnnBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
 }

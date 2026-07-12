@@ -60,10 +60,13 @@ static void zd_append_ep(OrtSessionOptions *opts) {
 
     OrtStatus *st = NULL;
     if (qcom) {
-        const char *k[] = { "backend_path" };
-        const char *v[] = { "libQnnHtp.so" };   /* Hexagon HTP (NPU) backend */
-        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 1);
-        if (!st) { LOGI("ZipDepth: QNN (Hexagon) EP"); return; }
+        /* Hexagon HTP (NPU) backend at burst clocks. The backend .so and the
+         * per-arch V*Stub/V*Skel libs must be packaged in jniLibs (see
+         * android/fetch_qnn.ps1); libcdsprpc.so is a device system lib. */
+        const char *k[] = { "backend_path", "htp_performance_mode" };
+        const char *v[] = { "libQnnHtp.so", "burst" };
+        st = Z.api->SessionOptionsAppendExecutionProvider(opts, "QNN", k, v, 2);
+        if (!st) { LOGI("ZipDepth: QNN (Hexagon HTP, burst) EP"); return; }
     } else if (mtk) {
         st = Z.api->SessionOptionsAppendExecutionProvider(opts, ZD_MTK_EP,
                                                           NULL, NULL, 0);
@@ -98,7 +101,8 @@ static int zd_try_init(const char *model_path) {
     if (!ort_ok(Z.api->CreateSessionOptions(&opts), "CreateSessionOptions"))
         return 0;
     zd_append_ep(opts);                       /* NPU EP or CPU */
-    Z.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL);
+    ort_ok(Z.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL),
+           "SetGraphOpt");
     if (!ort_ok(Z.api->CreateSession(Z.env, model_path, opts, &Z.session),
                 "CreateSession")) {
         Z.api->ReleaseSessionOptions(opts);
@@ -110,7 +114,7 @@ static int zd_try_init(const char *model_path) {
         return 0;
 
     OrtAllocator *alloc = NULL;
-    Z.api->GetAllocatorWithDefaultOptions(&alloc);
+    ort_ok(Z.api->GetAllocatorWithDefaultOptions(&alloc), "GetAllocator");
     char *name = NULL;
     if (!ort_ok(Z.api->SessionGetInputName(Z.session, 0, alloc, &name),
                 "GetInputName"))
