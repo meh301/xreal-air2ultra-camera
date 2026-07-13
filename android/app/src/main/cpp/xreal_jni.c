@@ -1274,11 +1274,12 @@ static void *depth_worker(void *arg) {
                     dinv[i] = 1.0f / dd;
                 }
                 /* sparse metric anchors: stereo grid (near/mid) + VIO
-                 * landmarks (far, from S.vio under the lock) */
+                 * landmarks (far, from S.vio under the lock). Grid anchors go
+                 * first [0,na_grid); landmark anchors follow [na_grid,+na_lm). */
                 static xr_anchor anch[ZD_MAX_ANCH];
-                int na = xr_sgrid_match(st->rect[0], st->rect[1], XS_W, XS_H,
-                                        st->f_rect, st->baseline_m,
-                                        anch, ZD_MAX_ANCH);
+                int na_grid = xr_sgrid_match(st->rect[0], st->rect[1], XS_W, XS_H,
+                                             st->f_rect, st->baseline_m,
+                                             anch, ZD_MAX_ANCH);
                 static float lmxyz[XR_SLAM_MAX_FEATURES][3], lq[4], lp[3];
                 pthread_mutex_lock(&S.lock);
                 int n_lm = S.vio_fresh ? S.vio.n_landmarks : 0;
@@ -1289,11 +1290,24 @@ static void *depth_worker(void *arg) {
                     memcpy(lp, S.vio.p, sizeof lp);
                 }
                 pthread_mutex_unlock(&S.lock);
-                if (n_lm > 0 && na < ZD_MAX_ANCH)
-                    na += xr_lm_anchors(lmxyz, n_lm, lq, lp, st->R_rect_imu,
-                                        st->f_rect, (XS_W - 1) * 0.5f,
-                                        (XS_H - 1) * 0.5f, S.eye_calib[0].p_cam,
-                                        XS_W, XS_H, anch + na, ZD_MAX_ANCH - na);
+                int na_lm = 0;
+                if (n_lm > 0 && na_grid < ZD_MAX_ANCH)
+                    na_lm = xr_lm_anchors(lmxyz, n_lm, lq, lp, st->R_rect_imu,
+                                          st->f_rect, (XS_W - 1) * 0.5f,
+                                          (XS_H - 1) * 0.5f, S.eye_calib[0].p_cam,
+                                          XS_W, XS_H, anch + na_grid,
+                                          ZD_MAX_ANCH - na_grid);
+                /* Calibrate on the STEREO GRID ONLY by default. The grid is the
+                 * validated, dense, uniformly-distributed metric backbone (this is
+                 * exactly what the offline benchmarks fit on). The VIO landmarks
+                 * are sparse, spatially CLUSTERED, and carry VIO scale/pose noise
+                 * of a different character than stereo disparity -- concatenating
+                 * them into the shared (especially deg-3) spatial fit lets a biased
+                 * far-landmark cluster warp the whole surface, a failure mode the
+                 * grid-only offline tests can't see. Flip to 1 to re-include them
+                 * once their per-anchor agreement with the grid is verified. */
+                static const int ZD_CAL_USE_LANDMARKS = 0;
+                int na = ZD_CAL_USE_LANDMARKS ? na_grid + na_lm : na_grid;
                 /* Metric depth from the monocular map via SPATIALLY-VARYING
                  * calibration (xr_depthcal): invz ~= A(u,v)*s + B(u,v), fit
                  * robustly on the anchors above. IR imposes a smooth
@@ -1351,9 +1365,10 @@ static void *depth_worker(void *arg) {
                         }
                         double im = is / NI, rm = rs / N, cm = cn ? cs / cn : 0;
                         LOGI("ZDIAG in[m=%.1f s=%.1f] raw[m=%.3f s=%.3f lo=%.3f hi=%.3f mad=%.4f] "
-                             "anch=%d deg=%d nin=%d rms=%.4f cal[m=%.2f s=%.2f n=%d]",
+                             "grid=%d lm=%d useLM=%d deg=%d nin=%d rms=%.4f cal[m=%.2f s=%.2f n=%d]",
                              im, sqrt(iss / NI - im * im), rm, sqrt(rss / N - rm * rm),
-                             rlo, rhi, mad / N, na, cal.deg, cal.n_in, cal.rms,
+                             rlo, rhi, mad / N, na_grid, na_lm, ZD_CAL_USE_LANDMARKS,
+                             cal.deg, cal.n_in, cal.rms,
                              cm, cn ? sqrt(css / cn - cm * cm) : 0.0, cn);
                     }
                     memcpy(prev_raw, zdepth, sizeof prev_raw);
