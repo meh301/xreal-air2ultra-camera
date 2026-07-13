@@ -253,9 +253,21 @@ static int64_t now_ms(void) {
 
 /* disparity (quarter-pixel) -> color ramp: far/small = deep blue,
  * near/large = red; 0 (invalid) = black */
+/* EMA-smoothed 2/98 disparity percentiles for the adaptive depth colormap. The
+ * old fixed t = d/XS_MAX_OUT mapped color linearly in DISPARITY, so everything
+ * past ~2 m (small disparity) collapsed into blue and it never reached red above
+ * ~0.9 m -- the depth was fine, the render crushed it. Now the ramp stretches to
+ * the live scene's actual disparity range; the depth worker EMA-updates these so
+ * it stays flicker-free. Written by the depth worker, read here cross-thread but
+ * float-benign (a torn read just tweaks one frame's coloring). */
+static float COL_LO = 8.0f, COL_HI = 96.0f;
+
 static void disp_color(uint8_t d, uint8_t px[4]) {
     if (!d) { px[0] = px[1] = px[2] = 0; px[3] = 0xFF; return; }
-    float t = (float)d / (float)XS_MAX_OUT;
+    float lo = COL_LO, hi = COL_HI;
+    float t = (hi > lo + 1.0f) ? ((float)d - lo) / (hi - lo)
+                               : (float)d / (float)XS_MAX_OUT;
+    if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
     float r, g, b;
     if (t < 0.33f)      { float u = t / 0.33f;          r = 0;      g = u;          b = 1; }
@@ -1400,6 +1412,27 @@ static void *depth_worker(void *arg) {
         /* cheap early-out if a disable/re-enable already landed */
         if (job_gen != atomic_load(&DEPTH_GEN) || !atomic_load(&S.depth_on))
             continue;
+
+        /* Adaptive colormap range: EMA'd 2%/98% percentiles of the live disparity
+         * so disp_color stretches to the actual scene depth instead of the fixed
+         * d/XS_MAX_OUT ramp that crushed everything past ~2 m into blue. EMA keeps
+         * it flicker-free; both the glasses and the phone view read COL_LO/HI. */
+        {
+            int hist[256] = { 0 }, nv = 0;
+            for (int i = 0; i < XS_W * XS_H; i++) {
+                uint8_t d = disp_local[i];
+                if (d) { hist[d]++; nv++; }
+            }
+            if (nv > 400) {
+                int tail = nv / 50, acc = 0, lo = 1, hi = 255;   /* 2% each side */
+                for (int d = 1; d < 256; d++) { acc += hist[d]; if (acc >= tail) { lo = d; break; } }
+                acc = 0;
+                for (int d = 255; d >= 1; d--) { acc += hist[d]; if (acc >= tail) { hi = d; break; } }
+                if (hi < lo + 4) hi = lo + 4;
+                COL_LO += 0.1f * ((float)lo - COL_LO);
+                COL_HI += 0.1f * ((float)hi - COL_HI);
+            }
+        }
 
         /* colorized copy for the glasses' depth passthrough (black border so
          * out-of-image samples clamp to black) */
