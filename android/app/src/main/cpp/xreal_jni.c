@@ -1269,16 +1269,19 @@ static void *depth_worker(void *arg) {
             static float zdepth[XS_W * XS_H], dinv[XS_W * XS_H], metric[XS_W * XS_H];
             if (xr_zipdepth_run(st->rect_hi, ZDR_W, ZDR_H, zdepth, XS_W, XS_H) == 0) {
                 for (int i = 0; i < XS_W * XS_H; i++) {
-                    /* ZipDepth emits AFFINE-metric values (~0..0.09 here), NOT
-                     * metres, so the old 0.05 floor clamped 50-80% of every frame
-                     * -- all the mid/far depth -- to one value and destroyed the
-                     * range before calibration (the entire synthetic-vs-device
-                     * gap; the offline benchmarks used a 1e-3 floor). Floor only to
-                     * avoid div-by-zero on ReLU'd exact zeros; xr_depthcal maps the
-                     * result to metric and clamps the sane depth window. */
-                    float dd = zdepth[i];            /* -> inverse-depth space */
-                    dd = dd < 1e-3f ? 1e-3f : dd > 100.0f ? 100.0f : dd;
-                    dinv[i] = 1.0f / dd;
+                    /* ZipDepth's output is already INVERSE-DEPTH-like (near = HIGH
+                     * ~0.09, far = LOW ~0.005; affine-metric, not metres), so feed
+                     * it to xr_depthcal DIRECTLY -- it fits invz ~= A*s + B, the
+                     * matching LINEAR model (corr with true inv-depth is POSITIVE).
+                     * The old code inverted first (dinv = 1/zdepth): that turned it
+                     * depth-like and forced a hyperbola-to-line fit which (a)
+                     * collapsed the near end, so close objects never read close, and
+                     * (b) with 1/zdepth unbounded (~1000 as zdepth->0) handed the
+                     * far pixels enormous least-squares leverage, so the global fit
+                     * lurched frame-to-frame -- the flashing. Bounded [0,~0.09]
+                     * input -> stable + full-range + correct near. Offline
+                     * (DEPTHTEST): delta1 0.78/0.84/0.92 -> 0.80/0.90/0.94. */
+                    dinv[i] = zdepth[i];             /* model out IS ~inverse-depth */
                 }
                 /* sparse metric anchors: stereo grid (near/mid) + VIO
                  * landmarks (far, from S.vio under the lock). Grid anchors go
