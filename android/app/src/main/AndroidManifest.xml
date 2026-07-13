@@ -45,6 +45,31 @@
                 android:resource="@xml/device_filter" />
         </activity>
 
+        <!-- xreal_datarecorder: standalone IR stereo-pair capture tool for
+             gathering training data. Its own launcher icon + USB-attach handler
+             (so it can be chosen on plug); shares libxrealcam.so with MainActivity
+             but runs none of its SLAM/depth code (never calls nativeSetAlignment).
+             Saves to Pictures/xreal_datarecorder. -->
+        <activity
+            android:name=".RecorderActivity"
+            android:label="xreal_datarecorder"
+            android:icon="@android:drawable/ic_menu_gallery"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+
         <!-- QNN NPU/GPU access (Snapdragon). API 31+ hides vendor native libs
              from apps unless explicitly requested; these are listed in the
              device's /vendor/etc/public.libraries.txt, so this loads the REAL
