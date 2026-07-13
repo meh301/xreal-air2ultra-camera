@@ -1269,8 +1269,15 @@ static void *depth_worker(void *arg) {
             static float zdepth[XS_W * XS_H], dinv[XS_W * XS_H], metric[XS_W * XS_H];
             if (xr_zipdepth_run(st->rect_hi, ZDR_W, ZDR_H, zdepth, XS_W, XS_H) == 0) {
                 for (int i = 0; i < XS_W * XS_H; i++) {
+                    /* ZipDepth emits AFFINE-metric values (~0..0.09 here), NOT
+                     * metres, so the old 0.05 floor clamped 50-80% of every frame
+                     * -- all the mid/far depth -- to one value and destroyed the
+                     * range before calibration (the entire synthetic-vs-device
+                     * gap; the offline benchmarks used a 1e-3 floor). Floor only to
+                     * avoid div-by-zero on ReLU'd exact zeros; xr_depthcal maps the
+                     * result to metric and clamps the sane depth window. */
                     float dd = zdepth[i];            /* -> inverse-depth space */
-                    dd = dd < 0.05f ? 0.05f : dd > 100.0f ? 100.0f : dd;
+                    dd = dd < 1e-3f ? 1e-3f : dd > 100.0f ? 100.0f : dd;
                     dinv[i] = 1.0f / dd;
                 }
                 /* sparse metric anchors: stereo grid (near/mid) + VIO
