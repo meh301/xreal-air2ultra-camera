@@ -3,7 +3,9 @@
 
 #include <stdlib.h>
 
-#define SG_STEP     16     /* grid spacing (px) */
+#define SG_STEP     12     /* grid spacing (px): ~20x27 on 240x320 -> ~200-350
+                            * confident anchors, enough to support the deg-3
+                            * spatial calibration (needs >=100) with margin */
 #define SG_HALF     3      /* match window half-size -> 7x7 */
 #define SG_DMAX     47     /* max disparity searched */
 #define SG_DMIN     1      /* d=0 is depth=inf; skip it */

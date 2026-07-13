@@ -25,9 +25,12 @@
 int xr_zipdepth_init(const char *model_path, const char *dsp_dir);
 int xr_zipdepth_available(void);
 
-/* Run on a w*h grayscale rectified image; write w*h affine-metric DEPTH (the
- * model output, resized back to w*h). Returns 0 on success, -1 otherwise. The
- * caller inverts + calibrates (xr_depthcal). */
-int xr_zipdepth_run(const uint8_t *gray, int w, int h, float *depth_out);
+/* Run on an in_w*in_h grayscale rectified image (resized to the model's ZD_IN_*
+ * input); write out_w*out_h affine-metric DEPTH (the model output resized to the
+ * OUTPUT dims). Input and output dims are decoupled so ZipDepth can be fed a
+ * full-res rectified image while the depth map stays at the anchor/display res.
+ * Returns 0 on success, -1 otherwise. The caller inverts + calibrates. */
+int xr_zipdepth_run(const uint8_t *gray, int in_w, int in_h,
+                    float *depth_out, int out_w, int out_h);
 
 #endif

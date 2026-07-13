@@ -73,7 +73,9 @@ static atomic_uint DEPTH_GEN;
  * receives frames, extrinsics and inertial data in one consistent frame. */
 #define XR_ENABLE_BASALT 1
 
-#define ZD_MAX_ANCH 768      /* stereo-grid + landmark anchors per depth frame */
+#define ZD_MAX_ANCH 1024     /* stereo-grid + landmark anchors per depth frame
+                              * (denser SG_STEP=12 grid ~500 + landmarks; matches
+                              * the depthcal fit cap) */
 
 static struct {
     uvc_context_t *ctx;
@@ -1252,6 +1254,7 @@ static void *depth_worker(void *arg) {
         }
         xr_stereo_rectify(st, 0, in0);
         xr_stereo_rectify(st, 1, in1);
+        xr_stereo_rectify_hi(st, in0);          /* full-res left for ZipDepth */
         int64_t t0 = now_ms();
 
         /* Metric depth: ZipDepth (NPU) calibrated to metric via sparse anchors
@@ -1264,7 +1267,7 @@ static void *depth_worker(void *arg) {
         int used_zip = 0;
         if (xr_zipdepth_available()) {
             static float zdepth[XS_W * XS_H], dinv[XS_W * XS_H], metric[XS_W * XS_H];
-            if (xr_zipdepth_run(st->rect[0], XS_W, XS_H, zdepth) == 0) {
+            if (xr_zipdepth_run(st->rect_hi, ZDR_W, ZDR_H, zdepth, XS_W, XS_H) == 0) {
                 for (int i = 0; i < XS_W * XS_H; i++) {
                     float dd = zdepth[i];            /* -> inverse-depth space */
                     dd = dd < 0.05f ? 0.05f : dd > 100.0f ? 100.0f : dd;
@@ -1291,15 +1294,77 @@ static void *depth_worker(void *arg) {
                                         st->f_rect, (XS_W - 1) * 0.5f,
                                         (XS_H - 1) * 0.5f, S.eye_calib[0].p_cam,
                                         XS_W, XS_H, anch + na, ZD_MAX_ANCH - na);
-                static xr_depthcal cal;             /* persists across frames */
-                xr_depthcal_update(&cal, dinv, XS_W, XS_H, anch, na);
-                xr_depthcal_apply(&cal, dinv, metric, XS_W * XS_H, 0.1f, 30.0f);
-                /* metric depth -> quarter-pixel disparity for the display path */
-                float fbs = st->f_rect * st->baseline_m * (float)XS_SCALE;
-                for (int i = 0; i < XS_W * XS_H; i++) {
-                    float z = metric[i];
-                    int dq = z > 0.05f ? (int)(fbs / z + 0.5f) : 0;
-                    disp_local[i] = dq > 255 ? 255 : (uint8_t)dq;
+                /* Metric depth from the monocular map via SPATIALLY-VARYING
+                 * calibration (xr_depthcal): invz ~= A(u,v)*s + B(u,v), fit
+                 * robustly on the anchors above. IR imposes a smooth
+                 * position-dependent scale on ZipDepth that a single global
+                 * affine can't remove (offline: global delta1~0.54 vs spatial
+                 * ~0.83); the stereo grid supplies the spatial anchors to correct
+                 * it. Falls back to deg-1 / global when anchors are sparse.
+                 *
+                 * DEBUG: set ZD_RAW=1 to bypass calibration and colormap the RAW
+                 * ZipDepth inverse-depth (per-frame min/max) -- shows the model's
+                 * unaided output for A/B comparison against the calibrated path. */
+                static const int ZD_RAW = 0;
+                if (ZD_RAW) {
+                    float lo = 1e30f, hi = -1e30f;
+                    for (int i = 0; i < XS_W * XS_H; i++) {
+                        float d = dinv[i];
+                        if (d < lo) lo = d;
+                        if (d > hi) hi = d;
+                    }
+                    float inv_span = (hi - lo) > 1e-6f ? 255.0f / (hi - lo) : 0.0f;
+                    for (int i = 0; i < XS_W * XS_H; i++) {
+                        int v = (int)((dinv[i] - lo) * inv_span + 0.5f);
+                        disp_local[i] = v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
+                    }
+                } else {
+                    static xr_depthcal cal;         /* persists across frames */
+                    xr_depthcal_update(&cal, dinv, XS_W, XS_H, anch, na);
+                    xr_depthcal_apply(&cal, dinv, metric, XS_W, XS_H, 0.1f, 30.0f);
+                    /* ZDIAG: per-frame flicker localization. Hold the camera STILL
+                     * and watch which block moves frame-to-frame:
+                     *   in[]  = input image fed to the model (mean/std of rect[0]);
+                     *           swings => auto-exposure/gain (the raw clean_raw feed)
+                     *   raw[] = the model's OWN depth output pre-calibration; mad =
+                     *           mean|raw_t - raw_{t-1}|, so mad/m large while still =>
+                     *           the model output itself flickers (input/NPU), which no
+                     *           calibration can fix
+                     *   anch/deg = anchor yield + fitted order (churn => cal swings)
+                     *   cal[] = final metric depth (mean/std over valid).
+                     * Every frame on purpose (diagnostic build); grep "ZDIAG". */
+                    static float prev_raw[XS_W * XS_H];
+                    static int have_prev;
+                    {
+                        const int N = XS_W * XS_H;
+                        const int NI = ZDR_W * ZDR_H;   /* the actual model input */
+                        double is = 0, iss = 0, rs = 0, rss = 0, cs = 0, css = 0, mad = 0;
+                        int cn = 0; float rlo = 1e30f, rhi = -1e30f;
+                        for (int i = 0; i < NI; i++) {
+                            double iv = st->rect_hi[i]; is += iv; iss += iv * iv;
+                        }
+                        for (int i = 0; i < N; i++) {
+                            float z = zdepth[i]; rs += z; rss += z * z;
+                            if (z < rlo) rlo = z; if (z > rhi) rhi = z;
+                            if (have_prev) { float d = z - prev_raw[i]; mad += d < 0 ? -d : d; }
+                            float m = metric[i]; if (m > 0.05f) { cs += m; css += m * m; cn++; }
+                        }
+                        double im = is / NI, rm = rs / N, cm = cn ? cs / cn : 0;
+                        LOGI("ZDIAG in[m=%.1f s=%.1f] raw[m=%.3f s=%.3f lo=%.3f hi=%.3f mad=%.4f] "
+                             "anch=%d deg=%d nin=%d rms=%.4f cal[m=%.2f s=%.2f n=%d]",
+                             im, sqrt(iss / NI - im * im), rm, sqrt(rss / N - rm * rm),
+                             rlo, rhi, mad / N, na, cal.deg, cal.n_in, cal.rms,
+                             cm, cn ? sqrt(css / cn - cm * cm) : 0.0, cn);
+                    }
+                    memcpy(prev_raw, zdepth, sizeof prev_raw);
+                    have_prev = 1;
+                    /* metric depth -> quarter-pixel disparity for the display path */
+                    float fbs = st->f_rect * st->baseline_m * (float)XS_SCALE;
+                    for (int i = 0; i < XS_W * XS_H; i++) {
+                        float z = metric[i];
+                        int dq = z > 0.05f ? (int)(fbs / z + 0.5f) : 0;
+                        disp_local[i] = dq > 255 ? 255 : (uint8_t)dq;
+                    }
                 }
                 used_zip = 1;
             }

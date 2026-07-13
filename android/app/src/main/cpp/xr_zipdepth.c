@@ -67,7 +67,10 @@ static void zd_detect_soc(int *qcom, int *mtk, char *board, size_t bn) {
  * are NOT on an app's linker namespace -- so we bundle those libs in the app
  * native-lib dir (pull_dsp_libs.ps1 -> jniLibs) and:
  *   LD_LIBRARY_PATH   -> the linker finds libcdsprpc.so + the QNN CPU libs
- *   ADSP_LIBRARY_PATH -> FastRPC finds the DSP skel (libQnnHtpV68Skel.so)
+ *   ADSP_LIBRARY_PATH -> FastRPC finds the DSP skel (libQnnHtpV68Skel.so); the
+ *                        skel's own Hexagon C++ runtime (libc++.so.1/abi) resolves
+ *                        from device firmware. dsp_dir (assets/qnn_dsp -> files)
+ *                        is currently empty -- reserved for a matched-QAIRT lib set
  * (Bundling in nativeLibraryDir is what actually makes libcdsprpc loadable --
  * it's on libQnnHtp's own namespace; LD_LIBRARY_PATH is belt-and-suspenders.)
  * Writes the app native-lib dir (dladdr on our own code) into `libdir`. */
@@ -98,11 +101,22 @@ static void zd_fastrpc_env(char *libdir, size_t ln) {
  * `label` + the reason and returns 0. */
 static int zd_open(const char *model_path, const char *ep,
                    const char **k, const char **v, int n, int strict,
-                   const char *label) {
+                   const char *label, int log_sev) {
     OrtSessionOptions *opts = NULL;
     if (!ort_ok(Z.api->CreateSessionOptions(&opts), "CreateSessionOptions"))
         return 0;
-    ort_ok(Z.api->SetSessionLogSeverityLevel(opts, 0), "SetLogSeverity");
+    /* log_sev is ORT severity: 2=WARNING (default) keeps the log short; QNN's
+     * per-node op-builder trace is VERBOSE(0)-only, so WARNING drops the ~8000
+     * line flood while preserving genuine warnings/errors and our own LOGI/LOGE
+     * result lines. A VERBOSE(0) diagnostic run (2026-07-13) proved there is
+     * nothing more to extract: even at VERBOSE the QNN backend emits NO error
+     * text for the graphCreate failure -- ORT logs only its own
+     * "qnn_model_wrapper.cc:40 CreateQnnGraph Failed", and it fails on the EMPTY
+     * graph (ComposeGraph -> ParseGraphInputOrOutput -> CreateQnnGraph, with no
+     * AddToModelBuilder in between -> before any node is added, so it is provably
+     * independent of the model/precision). All attempts are back to WARNING;
+     * raise a specific one to 0 only if a future QNN version emits a reason. */
+    ort_ok(Z.api->SetSessionLogSeverityLevel(opts, log_sev), "SetLogSeverity");
     ort_ok(Z.api->SetIntraOpNumThreads(opts, 2), "SetIntraOpNumThreads");
     ort_ok(Z.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL),
            "SetGraphOpt");
@@ -169,37 +183,46 @@ static int zd_try_init(const char *model_path) {
             snprintf(gpu, sizeof gpu, "%s/libQnnGpu.so", libdir);
         } else { snprintf(htp, sizeof htp, "libQnnHtp.so");
                  snprintf(gpu, sizeof gpu, "libQnnGpu.so"); }
-        /* The device creation is fixed (real vendor libcdsprpc via
-         * <uses-native-library> -> unsigned PD on the cDSP -> QnnDevice_create
-         * succeeds). The model is now INT8/A16W8 QDQ, so the WHOLE graph maps to
-         * the V68 HTP -- no fp16 (that was the FP32-model bridge, and V68 has no
-         * HTP fp16 path anyway). soc_model 30 = SM8350, htp_arch 68 = V68, opt
-         * mode 3. Try: (1) FULL HTP (disable_cpu_ep_fallback -> every node on the
-         * NPU or fail -> the honest "it's on the NPU" signal), (2) HTP allowing a
-         * few boundary quantize/dequantize nodes on the CPU (heavy compute still
-         * on the NPU), (3) the Adreno GPU as a last resort. */
-        /* offload_graph_io_quantization=0: keep the input Quantize / output
-         * Dequantize on the NPU too (QNN's default offloads them to the CPU),
-         * so the WHOLE graph is on the Hexagon -> the strict attempt can pass. */
-        const char *kf[] = { "backend_path", "soc_model", "htp_arch",
-                             "htp_graph_finalization_optimization_mode",
-                             "offload_graph_io_quantization" };
-        const char *vf[] = { htp, "30", "68", "3", "0" };
-        const char *kh[] = { "backend_path", "soc_model", "htp_arch",
-                             "htp_graph_finalization_optimization_mode" };
-        const char *vh[] = { htp, "30", "68", "3" };
+        /* Device creation is solved (<uses-native-library> -> real vendor
+         * libcdsprpc -> unsigned PD -> QnnDevice_create + CreateContext succeed).
+         * The wall is QnnGraph_create failing SILENTLY on the empty graph during
+         * ORT's ON-DEVICE online graph-prepare. This is NOT the model: the exact
+         * QDQ graph compiles 100% clean for SM8350/V68 with Qualcomm's own offline
+         * HTP compiler (qairt-converter + qnn-context-binary-generator --htp_socs
+         * sm8350: Optimizations / Sequencing / VTCM Allocation / Finalizing all
+         * pass -> valid 6.9MB context binary). graphCreate failing before any node
+         * is added rules out OPERATOR support ONLY -- NOT HTP-arch/context config,
+         * DSP-runtime ABI, memory config, or an incomplete/mismatched on-device QNN
+         * runtime. Leading suspect (2 audits): the runtime is a MIX -- ORT 1.21.1's
+         * Maven QNN 2.31 skel is not paired with a full single-QAIRT-release lib set
+         * (working V68 apps -- Local Dream, Qualcomm samples -- use ONE exact QAIRT
+         * set + AoT context binaries, never on-device compile). PRODUCTION PATH:
+         * ship an AoT QNN context binary (SM8350/V68) loaded via ORT EPContext ->
+         * QnnContext_createFromBinary, which SKIPS this online graphCreate; every
+         * QNN piece from ONE matched QAIRT version. NOTE: a QCM6490-firmware libc++
+         * was trialed then REMOVED -- it silenced the skel's libc++ fopen warnings
+         * but did NOT change graphCreate, so libc++ was resolving from device
+         * firmware all along; cross-firmware libs are unproven mixing, not for
+         * production. RULED OUT, do NOT re-add: soc_model/htp_arch/opt-mode config,
+         * A16-vs-A8 precision. Pass only backend_path (+ offload_graph_io_quantization
+         * =0 on the strict attempt). Attempts: (1) FULL HTP, (2) HTP+CPU boundary,
+         * (3) Adreno GPU last -- all moot until the AoT/EPContext path lands. */
+        const char *kf[] = { "backend_path", "offload_graph_io_quantization" };
+        const char *vf[] = { htp, "0" };
+        const char *kh[] = { "backend_path" };
+        const char *vh[] = { htp };
         const char *kg[] = { "backend_path" };
         const char *vg[] = { gpu };
         LOGI("ZipDepth: QNN init [board='%s'] htp=%s gpu=%s", board, htp, gpu);
-        ok = zd_open(model_path, "QNN", kf, vf, 5, 1, "QNN HTP full (INT8)")
-          || zd_open(model_path, "QNN", kh, vh, 4, 0, "QNN HTP +cpu-boundary (INT8)")
-          || zd_open(model_path, "QNN", kg, vg, 1, 1, "QNN GPU (Adreno)");
+        ok = zd_open(model_path, "QNN", kf, vf, 2, 1, "QNN HTP full (INT8)", 2)
+          || zd_open(model_path, "QNN", kh, vh, 1, 0, "QNN HTP +cpu-boundary (INT8)", 2)
+          || zd_open(model_path, "QNN", kg, vg, 1, 1, "QNN GPU (Adreno)", 2);
         if (!ok)
             LOGE("ZipDepth: no QNN backend took the graph -> staying on SGM. "
                  "Capture a FULL logcat (onnxruntime/fastrpc tags) -- look for "
                  "which op failed QNN validation (error 3110).");
     } else if (mtk) {
-        ok = zd_open(model_path, ZD_MTK_EP, NULL, NULL, 0, 1, "MediaTek NeuroPilot");
+        ok = zd_open(model_path, ZD_MTK_EP, NULL, NULL, 0, 1, "MediaTek NeuroPilot", 2);
     }
     if (!ok) return 0;   /* NPU unavailable -> depth worker keeps using SGM */
 
@@ -269,16 +292,18 @@ static float samp_f(const float *m, int w, int h, float fx, float fy) {
     return a * (1 - ay) + b * ay;
 }
 
-int xr_zipdepth_run(const uint8_t *gray, int w, int h, float *depth_out) {
+int xr_zipdepth_run(const uint8_t *gray, int in_w, int in_h,
+                    float *depth_out, int out_w, int out_h) {
     if (!atomic_load_explicit(&Z.ready, memory_order_acquire)) return -1;
-    if (!gray || !depth_out || w <= 0 || h <= 0) return -1;
+    if (!gray || !depth_out || in_w <= 0 || in_h <= 0 || out_w <= 0 || out_h <= 0)
+        return -1;
 
     /* preprocess: resize gray -> ZD input, /255, replicate to 3 channels */
     const int plane = ZD_IN_H * ZD_IN_W;
-    const float sx = (float)w / ZD_IN_W, sy = (float)h / ZD_IN_H;
+    const float sx = (float)in_w / ZD_IN_W, sy = (float)in_h / ZD_IN_H;
     for (int yz = 0; yz < ZD_IN_H; yz++) {
         for (int xz = 0; xz < ZD_IN_W; xz++) {
-            float v = samp_u8(gray, w, h, (xz + 0.5f) * sx - 0.5f,
+            float v = samp_u8(gray, in_w, in_h, (xz + 0.5f) * sx - 0.5f,
                               (yz + 0.5f) * sy - 0.5f) * (1.0f / 255.0f);
             Z.input[yz * ZD_IN_W + xz] = v;     /* R */
         }
@@ -304,11 +329,11 @@ int xr_zipdepth_run(const uint8_t *gray, int w, int h, float *depth_out) {
     float *depth = NULL;
     int ok = ort_ok(Z.api->GetTensorMutableData(ov, (void **)&depth), "out data");
     if (ok && depth) {
-        /* resize the ZD_IN depth back to w*h */
-        const float rx = (float)ZD_IN_W / w, ry = (float)ZD_IN_H / h;
-        for (int yo = 0; yo < h; yo++)
-            for (int xo = 0; xo < w; xo++)
-                depth_out[yo * w + xo] =
+        /* resize the ZD_IN depth to the OUTPUT dims */
+        const float rx = (float)ZD_IN_W / out_w, ry = (float)ZD_IN_H / out_h;
+        for (int yo = 0; yo < out_h; yo++)
+            for (int xo = 0; xo < out_w; xo++)
+                depth_out[yo * out_w + xo] =
                     samp_f(depth, ZD_IN_W, ZD_IN_H, (xo + 0.5f) * rx - 0.5f,
                            (yo + 0.5f) * ry - 0.5f);
     }

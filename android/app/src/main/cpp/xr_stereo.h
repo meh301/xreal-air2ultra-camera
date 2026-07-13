@@ -18,7 +18,12 @@
 enum {
     XS_W = 240, XS_H = 320, XS_DISP = 48,
     XS_SCALE = 4,                       /* disparity output: quarter pixels */
-    XS_MAX_OUT = XS_DISP * XS_SCALE     /* largest possible output value */
+    XS_MAX_OUT = XS_DISP * XS_SCALE,    /* largest possible output value */
+    /* Full-resolution LEFT rectify dedicated to ZipDepth: same virtual camera
+     * (FOV) as the 240x320 pair — the rectified focal scales with resolution —
+     * but sampled at the native 480x640 sensor detail, so the depth model is fed
+     * a sharp image instead of a 240x320->384 upscale. */
+    ZDR_W = XS_W * 2, ZDR_H = XS_H * 2  /* 480x640 */
 };
 
 typedef struct {
@@ -30,6 +35,11 @@ typedef struct {
     float f_rect, baseline_m;          /* rectified focal px, baseline */
     float R_rect_imu[9];               /* rectified frame -> IMU frame */
     uint8_t rect[2][XS_W * XS_H];      /* rectified images (kept for tracker) */
+
+    /* full-res LEFT rectify for ZipDepth (mapx_hi==0xFFFF => invalid pixel) */
+    uint16_t mapx_hi[ZDR_W * ZDR_H];
+    uint16_t mapy_hi[ZDR_W * ZDR_H];
+    uint8_t rect_hi[ZDR_W * ZDR_H];
 
     /* scratch (large — the owner should be static/heap, not stack) */
     uint64_t census[2][XS_W * XS_H];
@@ -54,6 +64,11 @@ void xr_stereo_init(xr_stereo *s,
 
 /* Rectify one camera image (cam 0 = left) into s->rect[cam], bilinear. */
 void xr_stereo_rectify(xr_stereo *s, int cam, const uint8_t *src);
+
+/* Rectify the LEFT camera image at full 480x640 resolution into s->rect_hi
+ * (bilinear) — the sharp input for ZipDepth. `src` is the 480x640 descrambled
+ * left image (the same buffer passed as cam 0 to xr_stereo_rectify). */
+void xr_stereo_rectify_hi(xr_stereo *s, const uint8_t *src);
 
 /* Compute the disparity map from the rectified pair (call
  * xr_stereo_rectify for both cameras first).
