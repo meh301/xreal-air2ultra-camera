@@ -68,3 +68,9 @@ android/app/src/xfeat/assets/qnn_dsp/
 # Local IR stereo capture set for offline depth-calibration tuning (~200 pairs);
 # working data, not a build input. Remove this line if you want it in the repo.
 PHOTOPAIRS/
+
+# generated depth cross-check panels
+DEPTHTEST/report/
+DEPTHTEST/report_all/
+DEPTHTEST/report_defom/
+DEPTHTEST/report_defom_all/
