@@ -19,6 +19,16 @@
 #define CAL_MIN_DEG1 20      /* >= this: deg-1 spatial (6 coef) */
 #define CAL_MIN_DEG0 6       /* >= this: plain global affine (2 coef); else no fit */
 
+/* Hard cap on the spatial degree. Scored against a trustworthy DEFOM-Stereo GT,
+ * the spatial terms DEGRADE structure on the live (sparse, noisy) stereo grid --
+ * corr 0.71 -> 0.51 going deg-0 -> deg-2 -- for no delta1 gain (0.64 vs 0.65),
+ * i.e. they warp the already-good raw ZipDepth output. A global affine (deg-0) is
+ * a monotonic scaling of the raw and CANNOT warp it, so we clamp here. The raw's
+ * ceiling with a PERFECT dense spatial fit is delta1~0.90, so the spatial gain is
+ * real but needs dense/clean anchors (a sparse-prompt depth model) -- not the
+ * live grid. Raise CAL_MAX_DEG only when such anchors exist. */
+#define CAL_MAX_DEG  0
+
 /* Feature row for (s,u,v) up to the given degree, matching the coefficient order
  * consumed in xr_depthcal_apply:
  *   [ s, 1,                                             (deg0)
@@ -176,6 +186,7 @@ int xr_depthcal_update(xr_depthcal *c, const float *dense, int w, int h,
               (m >= CAL_MIN_DEG2) ? 2 :
               (m >= CAL_MIN_DEG1) ? 1 :
               (m >= CAL_MIN_DEG0) ? 0 : -1;
+    if (deg > CAL_MAX_DEG) deg = CAL_MAX_DEG;   /* clamp: spatial warps on live anchors */
     if (deg < 0) return 0;
 
     float nc[CAL_NCOEF]; int n_in; float rms;
