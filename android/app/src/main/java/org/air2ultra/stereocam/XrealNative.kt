@@ -61,9 +61,10 @@ object XrealNative {
      *  NPU). Empty/unset keeps the depth worker on SGM. */
     external fun nativeSetZipModel(path: String)
 
-    /** Directory of the device-pulled QNN FastRPC/DSP libs (libcdsprpc.so + the
-     *  DSP HAL, staged from assets/qnn_dsp). Required for QNN's HTP device to be
-     *  created on Snapdragon; empty/unset -> ZipDepth stays on CPU/SGM. */
+    /** Directory (files/qnn_dsp, staged from assets/qnn_dsp) added to
+     *  ADSP_LIBRARY_PATH for any Hexagon DSP libs the QNN skel needs. Currently
+     *  unused (assets/qnn_dsp empty); reserved for a matched-QAIRT-SDK lib set.
+     *  The skel's libc++ resolves from device firmware. */
     external fun nativeSetQnnDspDir(path: String)
 
     /** True when XFeat is actually loaded (model staged + ONNX Runtime). */

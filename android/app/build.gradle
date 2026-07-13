@@ -86,8 +86,20 @@ dependencies {
     // Java API is unused. Otherwise the app sticks to framework APIs +
     // the Kotlin stdlib (added by the Kotlin plugin). Omitted in the lean
     // build (BAD/TEBLID only); swapped for the QNN-enabled ORT in the qnn build.
-    // 1.22.0 (QNN 2.33) fails QnnDevice_create INVALID_CONFIG on lahaina/SD888
-    // (V68) -- a device-creation regression; 1.21.1 pulls an older matched QNN.
-    if (qnnBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android-qnn:1.21.1'
+    // AoT/EPContext path (ZipDepth on the Hexagon): on-device online graph-prepare
+    // fails silently on this lahaina, but the exact QDQ graph compiles clean for
+    // SM8350/V68 offline (QAIRT 2.48), so we ship a PRECOMPILED QNN context binary
+    // wrapped in an EPContext model (assets/zipdepth.onnx) and load it via
+    // contextCreateFromBinary -- no on-device compile. That binary is version-
+    // locked to QNN 2.48, but no ORT release bundles 2.48 (newest = 1.27.0 -> QNN
+    // 2.42), so we take ORT 1.27.0 as the EP driver and EXCLUDE its transitive QNN
+    // 2.42 runtime, shipping the matched QAIRT 2.48 V68 libs ourselves (jniLibs:
+    // libQnnHtp/HtpPrepare/System/HtpV68Stub/HtpV68Skel). ORT's QNN EP drives them
+    // via the stable QnnInterface. (History: 1.22/QNN 2.33 regressed
+    // QnnDevice_create on lahaina; 1.21.1/QNN 2.31 fixed device-create but its
+    // ONLINE graphCreate still failed -- which the AoT binary sidesteps entirely.)
+    if (qnnBuild) implementation('com.microsoft.onnxruntime:onnxruntime-android-qnn:1.27.0') {
+        exclude group: 'com.qualcomm.qti', module: 'qnn-runtime'
+    }
     else if (!leanBuild) implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
 }

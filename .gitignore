@@ -64,3 +64,7 @@ android/app/src/xfeat/assets/zipdepth.onnx
 # QNN FastRPC/DSP libs pulled from the target device (needed for the HTP device;
 # device-specific, not redistributable — regenerate: android/pull_dsp_libs.ps1)
 android/app/src/xfeat/assets/qnn_dsp/
+
+# Local IR stereo capture set for offline depth-calibration tuning (~200 pairs);
+# working data, not a build input. Remove this line if you want it in the repo.
+PHOTOPAIRS/

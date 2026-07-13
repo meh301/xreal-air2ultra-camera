@@ -556,12 +556,15 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.i("xrealcam", "ZipDepth model absent (SGM depth): $e")
         }
-        // Stage the QNN FastRPC/DSP libs (libcdsprpc.so + the DSP HAL, pulled
-        // from THIS device into assets/qnn_dsp — see android/pull_dsp_libs.ps1).
-        // QNN's libQnnHtp.so must dlopen libcdsprpc.so to reach the Hexagon, but
-        // /vendor/lib64 isn't on the app's linker namespace, so without these
-        // QnnDevice_create fails INVALID_CONFIG. Absent (non-qnn build or not
-        // pulled) -> ZipDepth stays on CPU/SGM.
+        // Stage any Hexagon DSP libs from assets/qnn_dsp -> files/qnn_dsp and put
+        // that dir on ADSP_LIBRARY_PATH (nativeSetQnnDspDir). Currently EMPTY: a
+        // QCM6490-firmware libc++.so.1/libc++abi.so.1 was trialed here to satisfy
+        // the V68 skel's DT_NEEDED, but it only silenced the skel's libc++ fopen
+        // warnings without changing QnnGraph_create (the skel resolves libc++ from
+        // device firmware anyway), so it was removed as unproven cross-firmware
+        // mixing. If a future path needs DSP libs, stage them from ONE matched
+        // QAIRT SDK, never device firmware. Device creation is handled by
+        // <uses-native-library>. Empty -> nothing staged (no behavior change).
         try {
             val dspDir = java.io.File(filesDir, "qnn_dsp")
             dspDir.mkdirs()
