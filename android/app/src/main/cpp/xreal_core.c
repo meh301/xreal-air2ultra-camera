@@ -138,9 +138,12 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
 
     for (int i = 0; i < XR_OW * XR_OH; i++) g_f[i] = in[i];
 
-    /* column FPN is static: re-estimate the EMA'd stripe only every 3rd
-     * frame (it converges after ~15 estimates and then barely moves) */
-    if (!c->have_stripe || c->frame_count % 3 == 0) {
+    /* column FPN is static: re-estimate the EMA'd stripe only every 3rd frame,
+     * and FREEZE once converged — it converges after ~15 estimates and then
+     * barely moves, yet the estimator (high-pass + 1.2 MB transpose + 480
+     * column medians, ~1 ms) used to rerun 20x/s per camera forever. 24
+     * estimates (72 frames) of margin, re-armed by xr_cleaner_reset. */
+    if (!c->have_stripe || (c->frame_count < 72 && c->frame_count % 3 == 0)) {
         /* horizontal high-pass */
         for (int y = 0; y < XR_OH; y++) {
             float *row = g_f + y * XR_OW, *hp = g_hp + y * XR_OW;

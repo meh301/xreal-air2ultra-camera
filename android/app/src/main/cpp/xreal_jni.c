@@ -6,6 +6,7 @@
  * writes the composed frame under a mutex; the Kotlin UI thread polls
  * nativeGrabFrame() which copies it out under the same mutex.
  */
+#include <errno.h>
 #include <jni.h>
 #include <math.h>
 #include <pthread.h>
@@ -55,6 +56,12 @@ static atomic_int  BATT_DECIC = -1;  /* battery temp in 0.1 C from Kotlin (the
                                       * PowerManager thermal status stays 0 even
                                       * while throttling). -1 = unknown. Drives
                                       * the depth-worker thermal governor. */
+static atomic_int  DEPTH_WANT = 1;   /* consumer-side gate for the DEPTH_BOX
+                                      * producer: cleared by the depth worker
+                                      * while thermally suspended so the SLAM
+                                      * worker skips the 614 KB copy/signal at
+                                      * 30 Hz (pure waste exactly when the
+                                      * governor is trying to shed heat). */
 
 /* Latest-frame-wins handoff from the SLAM worker to the depth worker: the SLAM
  * thread drops the newest raw stereo pair here and moves on; the depth thread
@@ -283,15 +290,41 @@ static void disp_color(uint8_t d, uint8_t px[4]) {
     px[2] = (uint8_t)(b * 255); px[3] = 0xFF;
 }
 
+/* Colorize LUT: disp_color is ~20 branchy float ops; the phone pane used to call
+ * it 307,200x at 30 Hz on the UVC thread for depth that changes at the (paced)
+ * depth rate. The depth worker rebuilds this 256-entry RGBA table once per pass
+ * (after the COL_LO/HI EMA update); every consumer is then one aligned u32 load/
+ * store per pixel. Cross-thread: u32 stores are atomic on ARM64, and a briefly
+ * mixed old/new palette during rebuild is invisible. */
+static uint32_t DCOL32[256];
+static atomic_int DCOL_READY;
+static void dcol_rebuild(void) {
+    for (int d = 0; d < 256; d++) {
+        uint8_t px[4];
+        disp_color((uint8_t)d, px);
+        DCOL32[d] = (uint32_t)px[0] | ((uint32_t)px[1] << 8) |
+                    ((uint32_t)px[2] << 16) | ((uint32_t)px[3] << 24);
+    }
+    atomic_store_explicit(&DCOL_READY, 1, memory_order_release);
+}
+
 /* Research-app phone view: left pane = left camera + tracked features,
  * right pane = the disparity map colorized and upscaled 2x (240x320 ->
  * 480x640). The glasses passthrough below is untouched by this. */
 static void compose(int counter, uint64_t exposure_ts) {
     int swap = atomic_load(&S.swap_eyes);
+    /* The dual-pane RGBA canvas is DEMO UI (phone preview). In stereo/glasses
+     * mode the glasses sample S.clean directly, so the 2.4 MB pane build is
+     * only needed while the preview is actually being polled — skip it after
+     * ~2 s without a grab (framework mode: an AR app never grabs, cost -> 0).
+     * S.seq still advances so the preview picks back up on the next grab. */
+    int stereo_glasses = atomic_load(&S.stereo_mode) && atomic_load(&S.align_have);
     pthread_mutex_lock(&S.lock);
+    int need_rgba = !stereo_glasses || (S.seq - S.grabbed) < 60;
     S.cw = 2 * XR_OW;
     S.ch = XR_OH;
     S.counter = counter;
+    if (!need_rgba) goto publish;
 
     /* left pane: equalized left camera (cam1) */
     for (int y = 0; y < XR_OH; y++) {
@@ -351,13 +384,13 @@ static void compose(int counter, uint64_t exposure_ts) {
             }
         }
     } else if (atomic_load(&S.depth_on)) {
+        if (!atomic_load_explicit(&DCOL_READY, memory_order_acquire))
+            dcol_rebuild();               /* one-time before the first pass */
         for (int y = 0; y < XR_OH; y++) {
-            uint8_t *dst = S.rgba + ((size_t)y * S.cw + XR_OW) * 4;
+            uint32_t *dst = (uint32_t *)(S.rgba + ((size_t)y * S.cw + XR_OW) * 4);
             const uint8_t *dr = S.disp + (y >> 1) * XS_W;
-            for (int x = 0; x < XR_OW; x++) {
-                disp_color(dr[x >> 1], dst);
-                dst += 4;
-            }
+            for (int x = 0; x < XR_OW; x++)
+                *dst++ = DCOL32[dr[x >> 1]];
         }
     } else {
         for (int y = 0; y < XR_OH; y++) {
@@ -368,6 +401,7 @@ static void compose(int counter, uint64_t exposure_ts) {
             }
         }
     }
+publish:
     S.seq++;
     int cw = S.cw, ch = S.ch;
     pthread_mutex_unlock(&S.lock);
@@ -385,6 +419,12 @@ static void compose(int counter, uint64_t exposure_ts) {
 
 static void frame_cb(uvc_frame_t *frame, void *user) {
     (void)user;
+    /* This libuvc callback thread runs the entire per-frame image pipeline AND
+     * the pair sequencing that feeds VIO, yet libuvc spawns it at nice 0 —
+     * below every tiered worker's intent. Place it above SLAM/depth (10/15)
+     * and just under the IMU thread (-10) so pair timing survives load. */
+    static int prio_set;                              /* uvc thread only */
+    if (!prio_set) { setpriority(PRIO_PROCESS, (id_t)gettid(), -4); prio_set = 1; }
     if (frame->data_bytes < XR_FRAME_BYTES) return;   /* startup runts */
     memcpy(S.frame, frame->data, XR_FRAME_BYTES);
 
@@ -398,10 +438,17 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
     }
     if (S.order == XR_ORDER_SWAPPED) xr_unswap16(S.frame, XR_FRAME_BYTES);
 
-    /* skip all-black frames right after startup (same test as the viewers) */
-    int64_t sum = 0;
-    for (int i = 0; i < XR_IMG_BYTES; i += 7) sum += S.frame[i];
-    if (sum / (XR_IMG_BYTES / 7) < 5) return;
+    /* skip all-black frames right after startup (same test as the viewers) —
+     * disarmed after the first valid frame: it can only matter at startup, and
+     * unguarded it scans 43,886 strided bytes (a cache-line touch each) x60/s
+     * for the life of the stream. */
+    static int stream_live;                           /* uvc thread only */
+    if (!stream_live) {
+        int64_t sum = 0;
+        for (int i = 0; i < XR_IMG_BYTES; i += 7) sum += S.frame[i];
+        if (sum / (XR_IMG_BYTES / 7) < 5) return;
+        stream_live = 1;
+    }
 
     int cam = xr_cam(S.frame);
     static uint8_t dscr[XR_OW * XR_OH];               /* uvc thread only */
@@ -543,10 +590,12 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
         if (t_imu)
             t_exp = t_imu -
                     ((t_imu - (uint64_t)xr_exposure_ts(S.frame)) & 0xFFFFFFFFull);
-        compose(xr_counter(S.frame), t_exp);
 
-        /* feed Basalt directly from this thread (it copies synchronously;
-         * VIT wants cam0=left first, then cam1, same timestamp) */
+        /* VIO first: feed Basalt + wake the SLAM worker BEFORE the preview/
+         * glasses composition — compose() costs 1-3 ms and the pose pipeline
+         * should not age by that per pair (the display tolerates it, Basalt's
+         * IMU-replay window doesn't). Basalt copies synchronously; VIT wants
+         * cam0=left first, then cam1, same timestamp. */
         xr_slam_push_pair(SLAM_FEED[1], SLAM_FEED[0], t_exp);
 
         /* hand the pair to the SLAM worker (it snapshots the buffers) */
@@ -555,6 +604,8 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
         S.pair_ts = t_exp;
         pthread_cond_signal(&S.slam_cond);
         pthread_mutex_unlock(&S.slam_lock);
+
+        compose(xr_counter(S.frame), t_exp);
 
         /* consume the pair: require one FRESH frame from EACH camera before
          * the next submission. Without this the flags stay set and every
@@ -935,7 +986,11 @@ static void *slam_worker(void *arg) {
         memcpy(S.slam_in[0], S.clean_raw[1], sizeof S.slam_in[0]); /* left  = cam1 */
         memcpy(S.slam_in[1], S.clean_raw[0], sizeof S.slam_in[1]); /* right = cam0 */
 
-        xr_stereo_rectify(&ST, 0, S.slam_in[0]);
+        /* ST.rect[0] feeds only the fallback tracker (xr_track_step below),
+         * which never runs while Basalt is live — skip the 76,800-px bilinear
+         * remap in the normal configuration (~10-18 ms/s of worker CPU). */
+        if (!xr_slam_running())
+            xr_stereo_rectify(&ST, 0, S.slam_in[0]);
 
         if (xr_slam_running()) {
             /* Basalt is the front end: publish its pose and features (the
@@ -1217,7 +1272,8 @@ static void *slam_worker(void *arg) {
          * runs behind, the slam side just overwrites the pending pair. */
         static int depth_was_on;
         int depth_on = atomic_load(&S.depth_on);
-        if (depth_on) {
+        if (depth_on && atomic_load(&DEPTH_WANT)) {  /* worker gates the copy off
+                                                      * while thermally suspended */
             pthread_mutex_lock(&DEPTH_BOX.lock);
             memcpy(DEPTH_BOX.in[0], S.slam_in[0], sizeof DEPTH_BOX.in[0]);
             memcpy(DEPTH_BOX.in[1], S.slam_in[1], sizeof DEPTH_BOX.in[1]);
@@ -1225,7 +1281,9 @@ static void *slam_worker(void *arg) {
             DEPTH_BOX.full = 1;
             pthread_cond_signal(&DEPTH_BOX.cond);
             pthread_mutex_unlock(&DEPTH_BOX.lock);
-        } else if (depth_was_on) {          /* on->off: blank the stale depth */
+        } else if (depth_was_on && !depth_on) {   /* on->off: blank stale depth
+                                                   * (thermal suspend keeps the
+                                                   * last map up instead) */
             pthread_mutex_lock(&S.lock);
             memset(S.disp, 0, sizeof S.disp);
             S.depth_ms = 0;
@@ -1247,43 +1305,66 @@ static void *depth_worker(void *arg) {
     static uint8_t in0[XR_OW * XR_OH], in1[XR_OW * XR_OH];   /* depth thread only */
     static uint8_t disp_local[XS_W * XS_H];
     static uint8_t drgba[XS_W * XS_H * 4];
+    static int suspended;                       /* depth thread only */
     for (;;) {
         pthread_mutex_lock(&DEPTH_BOX.lock);
-        while (atomic_load(&S.slam_running) && !DEPTH_BOX.full)
-            pthread_cond_wait(&DEPTH_BOX.cond, &DEPTH_BOX.lock);
+        while (atomic_load(&S.slam_running) && !DEPTH_BOX.full) {
+            if (suspended) {
+                /* producer is gated while suspended (DEPTH_WANT=0), so no
+                 * signal will come: poll the temperature on a 1 s timeout. */
+                struct timespec until;
+                clock_gettime(CLOCK_REALTIME, &until);
+                until.tv_sec += 1;
+                if (pthread_cond_timedwait(&DEPTH_BOX.cond, &DEPTH_BOX.lock,
+                                           &until) == ETIMEDOUT)
+                    break;
+            } else {
+                pthread_cond_wait(&DEPTH_BOX.cond, &DEPTH_BOX.lock);
+            }
+        }
         if (!atomic_load(&S.slam_running)) {
             pthread_mutex_unlock(&DEPTH_BOX.lock);
             break;
         }
-        memcpy(in0, DEPTH_BOX.in[0], sizeof in0);    /* take the latest pair */
-        memcpy(in1, DEPTH_BOX.in[1], sizeof in1);
-        unsigned job_gen = DEPTH_BOX.gen;            /* stamp of this job */
-        DEPTH_BOX.full = 0;
-        pthread_mutex_unlock(&DEPTH_BOX.lock);
-
-        /* Thermal governor: depth runs FULL SPEED while cool (the depth buffer
-         * is future AR-occlusion masking data, so rate = data quality; the
-         * 2026-07-14 meltdown was dominated by the since-removed RPC busy-poll,
-         * not the duty cycle alone) and paces down only when the battery
-         * actually warms. Battery temp is the only signal this vendor reports
-         * (deci-C via nativeSetThermal; PowerManager status is always 0 here).
-         * Above the burn line depth SUSPENDS (VIO/passthrough keep the SoC
-         * budget); unknown temp (-1) runs unpaced. */
+        /* Thermal governor FIRST — before the 614 KB take-copy, so a suspended
+         * worker does no memory traffic at all. Depth runs FULL SPEED while
+         * cool (the depth buffer is future AR-occlusion masking data, so rate
+         * = data quality; the 2026-07-14 meltdown was dominated by the since-
+         * removed RPC busy-poll, not the duty cycle alone) and paces down only
+         * when the battery actually warms. Battery temp is the only signal
+         * this vendor reports (deci-C via nativeSetThermal; PowerManager
+         * status is always 0 here). Above the burn line depth SUSPENDS
+         * (VIO/passthrough keep the SoC budget); unknown temp (-1) = unpaced. */
         int bt = atomic_load(&BATT_DECIC);
         int period_ms = bt >= 440 ? -1 :             /* >=44.0C: suspend      */
                         bt >= 410 ? 400 :            /* 41-43.9C: ~2.5 Hz     */
                         bt >= 380 ? 150 :            /* 38-40.9C: ~6.5 Hz     */
                                     0;               /* cool/unknown: UNPACED */
         static int64_t last_pass_ms;
-        static int suspended;
         if (period_ms < 0) {
+            DEPTH_BOX.full = 0;                      /* drop pair uncopied */
+            pthread_mutex_unlock(&DEPTH_BOX.lock);
+            atomic_store(&DEPTH_WANT, 0);            /* producer stops copying */
             if (!suspended) { suspended = 1;
                 LOGE("depth: SUSPENDED, battery %.1fC >= 44.0C", bt / 10.0); }
-            usleep(500 * 1000);
-            continue;                                /* drop pair, stay cool */
+            continue;                                /* timed wait re-polls temp */
         }
-        if (suspended) { suspended = 0;
-            LOGI("depth: resumed, battery %.1fC", bt / 10.0); }
+        if (suspended) {
+            suspended = 0;
+            atomic_store(&DEPTH_WANT, 1);            /* producer resumes */
+            LOGI("depth: resumed, battery %.1fC", bt / 10.0);
+            if (!DEPTH_BOX.full) {                   /* cooled on a timeout —
+                                                      * no pair yet, wait for
+                                                      * the producer to refill */
+                pthread_mutex_unlock(&DEPTH_BOX.lock);
+                continue;
+            }
+        }
+        memcpy(in0, DEPTH_BOX.in[0], sizeof in0);    /* take the latest pair */
+        memcpy(in1, DEPTH_BOX.in[1], sizeof in1);
+        unsigned job_gen = DEPTH_BOX.gen;            /* stamp of this job */
+        DEPTH_BOX.full = 0;
+        pthread_mutex_unlock(&DEPTH_BOX.lock);
         int64_t since = now_ms() - last_pass_ms;
         if (since < period_ms) {
             usleep((useconds_t)((period_ms - since) * 1000));
@@ -1309,23 +1390,31 @@ static void *depth_worker(void *arg) {
                            S.eye_calib[0].p_cam, S.eye_calib[1].p_cam,
                            atomic_load(&S.align_variant));
         }
-        xr_stereo_rectify(st, 0, in0);
-        xr_stereo_rectify(st, 1, in1);
-        xr_stereo_rectify_hi(st, 0, in0);       /* full-res left  for LiteAnyStereo */
-        xr_stereo_rectify_hi(st, 1, in1);       /* full-res right for LiteAnyStereo */
-        int64_t t0 = now_ms();
-
         /* Metric depth: LiteAnyStereo V2 (NPU) DIRECTLY from the rectified pair
          * -> disparity -> depth = f*baseline/disp. No monocular model, no anchors,
          * no calibration; writes disp_local (quarter-pixel disparity) so the
          * colorize/publish path below is unchanged. Falls back to SGM
          * (xr_stereo_depth) when the NPU/model isn't available. Dormant until the
-         * model is staged (S.zip_model = the staged EPContext .onnx). */
+         * model is staged (S.zip_model = the staged EPContext .onnx).
+         *
+         * Decide the path FIRST and rectify only what it consumes: the NPU path
+         * reads rect_hi only, SGM reads the lo-res rect only — rectifying all
+         * four every pass wasted 0.3-3 ms. t0 covers the full pass (rectify ->
+         * publish) so depthDuty reports the true thermal-relevant cost. */
         static int zd_try;                          /* throttle model re-init */
         if (!xr_las2_available() && S.zip_model[0] && (zd_try++ % 90) == 0)
             xr_las2_init(S.zip_model, S.qnn_dsp_dir);
+        int use_npu = xr_las2_available();
+        int64_t t0 = now_ms();
+        if (use_npu) {
+            xr_stereo_rectify_hi(st, 0, in0);   /* full-res pair for the NPU */
+            xr_stereo_rectify_hi(st, 1, in1);
+        } else {
+            xr_stereo_rectify(st, 0, in0);      /* lo-res pair for SGM */
+            xr_stereo_rectify(st, 1, in1);
+        }
         int used_zip = 0;
-        if (xr_las2_available()) {
+        if (use_npu) {
             static float metric[XS_W * XS_H];
             /* full-res rectified focal (400): the hi-res pair the model consumes */
             float f_hi = st->f_rect * (float)ZDR_W / (float)XS_W;
@@ -1341,13 +1430,21 @@ static void *depth_worker(void *arg) {
                 used_zip = 1;
             }
         }
-        if (!used_zip) xr_stereo_depth(st, disp_local);   /* SGM */
+        if (!used_zip) {
+            if (use_npu) {                  /* NPU refused mid-session: build the
+                                             * SGM inputs it skipped above */
+                xr_stereo_rectify(st, 0, in0);
+                xr_stereo_rectify(st, 1, in1);
+            }
+            xr_stereo_depth(st, disp_local);              /* SGM */
+        }
         float depth_ms = (float)(now_ms() - t0);
-        atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
         last_pass_ms = now_ms();                     /* thermal-governor pacing */
         /* cheap early-out if a disable/re-enable already landed */
-        if (job_gen != atomic_load(&DEPTH_GEN) || !atomic_load(&S.depth_on))
+        if (job_gen != atomic_load(&DEPTH_GEN) || !atomic_load(&S.depth_on)) {
+            atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
             continue;
+        }
 
         /* Adaptive colormap range: EMA'd 2%/98% percentiles of the live disparity
          * so disp_color stretches to the actual scene depth instead of the fixed
@@ -1369,18 +1466,19 @@ static void *depth_worker(void *arg) {
                 COL_HI += 0.1f * ((float)hi - COL_HI);
             }
         }
+        dcol_rebuild();   /* 256 disp_color calls; every consumer is a LUT load */
 
         /* colorized copy for the glasses' depth passthrough (black border so
          * out-of-image samples clamp to black) */
         for (int y = 0; y < XS_H; y++) {
-            int border_y = y == 0 || y == XS_H - 1;
-            for (int x = 0; x < XS_W; x++) {
-                uint8_t *px = drgba + ((size_t)y * XS_W + x) * 4;
-                if (border_y || x == 0 || x == XS_W - 1) {
-                    px[0] = px[1] = px[2] = 0; px[3] = 0xFF;
-                } else {
-                    disp_color(disp_local[y * XS_W + x], px);
-                }
+            uint32_t *px = (uint32_t *)(drgba + (size_t)y * XS_W * 4);
+            if (y == 0 || y == XS_H - 1) {
+                for (int x = 0; x < XS_W; x++) px[x] = 0xFF000000u;
+            } else {
+                const uint8_t *dl = disp_local + (size_t)y * XS_W;
+                px[0] = 0xFF000000u;
+                for (int x = 1; x < XS_W - 1; x++) px[x] = DCOL32[dl[x]];
+                px[XS_W - 1] = 0xFF000000u;
             }
         }
 
@@ -1398,6 +1496,10 @@ static void *depth_worker(void *arg) {
             xr_gles_submit_depth(drgba, XS_W, XS_H);
         }
         pthread_mutex_unlock(&DEPTH_BOX.lock);
+        /* duty covers the FULL pass (rectify -> publish): the governor's own
+         * evidence used to under-count ~2x by bracketing only the model call */
+        atomic_fetch_add(&DEPTH_BUSY_US,
+                         (unsigned)((now_ms() - t0) * 1000));
     }
     free(st);
     return NULL;
