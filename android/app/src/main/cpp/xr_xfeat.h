@@ -4,15 +4,31 @@
  * (~1-2 Hz) on the map thread; the fixed 640x480 export matches the
  * portrait camera raster exactly.
  *
- * Contract of the bundled model (verified against the export on desktop):
- * input "images" [1,3,640,480] float, raw 0..255 (gray replicated x3);
- * outputs keypoints [N,2] float (x,y), descriptors [N,64] float
- * (L2-normalized), scores [N] float sorted descending.
+ * Two paths, one contract (callers cannot tell them apart):
+ *  - NPU: the dense backbone as a QAIRT-native A8W8 HTP context (EPContext
+ *    .onnx, u8 IO: score [1,1,640,480] / desc [1,64,80,60] / reliability
+ *    [1,1,80,60]); NMS + reliability-weighted top-K + bilinear descriptor
+ *    sampling reproduced in C. 3.6 ms on the SD888 HTP.
+ *  - CPU: the original full xfeat.onnx (detect/NMS/top-K in-graph):
+ *    input "images" [1,3,640,480] float, raw 0..255 (gray replicated x3);
+ *    outputs keypoints [N,2] float (x,y), descriptors [N,64] float
+ *    (L2-normalized), scores [N] float sorted descending.
  */
 #ifndef XR_XFEAT_H
 #define XR_XFEAT_H
 
 #include <stdint.h>
+
+/* upper bound on keypoints per extraction (>= xr_map's XR_MAP_KP_PER_KF) */
+#define XR_XFEAT_MAX_KP 256
+
+/* Optional NPU dense path: register the staged EPContext model BEFORE
+ * xr_xfeat_init runs (cheap — stores the path). Init then tries the HTP
+ * first and falls back to the CPU model. */
+void xr_xfeat_set_npu_model(const char *epctx_path);
+
+/* 1 when extraction runs the HTP dense pass (vs the CPU graph). */
+int xr_xfeat_npu_active(void);
 
 /* Load ONNX Runtime + the model; idempotent. Returns 1 when usable. */
 int xr_xfeat_init(const char *model_path);

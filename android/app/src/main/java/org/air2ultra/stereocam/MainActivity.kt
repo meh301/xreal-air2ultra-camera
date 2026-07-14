@@ -557,6 +557,18 @@ class MainActivity : Activity() {
             }
             return true
         }
+        // XFeat NPU dense model (EPContext A8W8 HTP context) FIRST — the path
+        // must be registered before the preload thread spawned by
+        // nativeSetXfeatModel races into xr_xfeat_init. Absent asset or a
+        // non-QNN build simply leaves the CPU path in charge.
+        try {
+            val ctx = java.io.File(filesDir, "xfeat_a8_ctx.onnx")
+            stage("xfeat_a8_ctx.onnx", ctx)
+            XrealNative.nativeSetXfeatNpuModel(ctx.absolutePath)
+            android.util.Log.i("xrealcam", "XFeat NPU model staged: ${ctx.absolutePath}")
+        } catch (e: Exception) {
+            android.util.Log.i("xrealcam", "XFeat NPU model absent (CPU XFeat): $e")
+        }
         // Always stage the XFeat model so the Desc button can switch to it
         // at runtime; the descriptor actually used stays BAD/TEBLID until the
         // user selects XFeat (nativeSetUseXfeat).

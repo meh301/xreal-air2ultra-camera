@@ -33,6 +33,7 @@
 #include "xr_slam.h"
 #include "xr_stereo.h"
 #include "xr_track.h"
+#include "xr_xfeat.h"
 #include "xr_zipdepth.h"
 #include "xr_liteanystereo.h"
 #include "xreal_align.h"
@@ -2494,6 +2495,23 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetXfeatModel(JNIEnv *env, jclass
     const char *p = path ? (*env)->GetStringUTFChars(env, path, NULL) : NULL;
     xr_map_set_model(p);
     if (p) (*env)->ReleaseStringUTFChars(env, path, p);
+}
+
+/* Path of the staged XFeat EPContext model (NPU dense backbone, A8W8 HTP
+ * context). Must be registered BEFORE the XFeat init runs — MainActivity
+ * stages it ahead of xfeat.onnx. Cheap (stores the path); the map thread's
+ * preload does the actual QNN session bring-up. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetXfeatNpuModel(JNIEnv *env,
+                                                                jclass cls,
+                                                                jstring path) {
+    (void)cls;
+    if (!path) return;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (p) {
+        xr_xfeat_set_npu_model(p);
+        (*env)->ReleaseStringUTFChars(env, path, p);
+    }
 }
 
 /* Path of the staged fast-tier (192x256) depth model. Empty/unset -> the depth

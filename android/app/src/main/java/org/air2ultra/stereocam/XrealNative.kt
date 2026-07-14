@@ -56,6 +56,11 @@ object XrealNative {
     /** Path of the staged XFeat ONNX model (session-map descriptors). */
     external fun nativeSetXfeatModel(path: String)
 
+    /** Path of the staged XFeat NPU dense model (EPContext-wrapped A8W8 HTP
+     *  context). Register BEFORE nativeSetXfeatModel so the XFeat preload
+     *  tries the Hexagon first; absent/rejected -> CPU model as before. */
+    external fun nativeSetXfeatNpuModel(path: String)
+
     /** Thermal feed for the depth-worker governor: battery temperature in
      *  deci-Celsius (the vendor never raises PowerManager thermal status, so
      *  battery temp is the working signal) plus that status for the record. */
