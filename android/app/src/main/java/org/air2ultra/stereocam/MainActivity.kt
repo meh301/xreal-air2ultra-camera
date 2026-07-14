@@ -104,7 +104,7 @@ class MainActivity : Activity() {
     private var streaming = false
     private var stereoMode = true       // stereo+aligned vs plain SBS mirror
     private var showPoints = true
-    private var depthOn = false     // matches native default: off (runs off-thread when on)
+    private var depthMode = 0       // 0 off / 1 NPU model / 2 SGM — native default: off
     private var eyeMode = 0             // glasses: 0 cam, 1 depth, 2 AR, 3 off
     private var paneMode = 0            // phone: 0 = L|depth, 1 = L|R
     private var mappingOn = true        // false = localization-only (frozen map)
@@ -353,14 +353,16 @@ class MainActivity : Activity() {
                 else R.string.desc_bad)
             if (useXfeat != prev) poseMap.reset()
         }
+        val depLabels = intArrayOf(R.string.dep_off, R.string.dep_npu,
+                                   R.string.dep_sgm)
         val depButton = findViewById<Button>(R.id.toggle_depth)
-        depButton.text =                 // reflect the native default (off)
-            getString(if (depthOn) R.string.dep_on else R.string.dep_off)
+        depButton.text = getString(depLabels[depthMode])  // native default: off
         depButton.setOnClickListener {
-            depthOn = !depthOn
-            XrealNative.nativeSetDepth(depthOn)
-            depButton.text =
-                getString(if (depthOn) R.string.dep_on else R.string.dep_off)
+            // depth source: off -> NPU model -> SGM -> off. Off does NO depth
+            // processing at all (producer + worker both idle).
+            depthMode = (depthMode + 1) % 3
+            XrealNative.nativeSetDepth(depthMode)
+            depButton.text = getString(depLabels[depthMode])
         }
         val eyeLabels = intArrayOf(R.string.eye_cam, R.string.eye_dep,
                                    R.string.eye_ar, R.string.eye_off)
@@ -369,9 +371,10 @@ class MainActivity : Activity() {
             // glasses view: camera -> depth -> AR points-only -> off
             eyeMode = (eyeMode + 1) % 4
             XrealNative.nativeSetEyeMode(eyeMode)
-            if (eyeMode == 1 && !depthOn) {      // depth view forces SGM on
-                depthOn = true
-                findViewById<Button>(R.id.toggle_depth).text = getString(R.string.dep_on)
+            if (eyeMode == 1 && depthMode == 0) { // depth view forces the NPU
+                depthMode = 1                     // source on (native does too)
+                findViewById<Button>(R.id.toggle_depth).text =
+                    getString(R.string.dep_npu)
             }
             eyeButton.text = getString(eyeLabels[eyeMode])
         }

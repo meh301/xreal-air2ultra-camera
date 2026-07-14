@@ -21,8 +21,10 @@
     <string name="desc_bad">BAD</string>
     <string name="desc_xfeat">XFeat</string>
     <string name="desc_xfeat_na">XFeat!</string>
-    <string name="dep_on">Dep✓</string>
-    <string name="dep_off">Dep✕</string>
+    <!-- depth source cycle (shows the CURRENT source) -->
+    <string name="dep_npu">Dep:NPU</string>
+    <string name="dep_sgm">Dep:SGM</string>
+    <string name="dep_off">Dep:Off</string>
     <!-- glasses eye-view mode (shows the CURRENT mode) -->
     <string name="eye_cam">Eye:Cam</string>
     <string name="eye_dep">Eye:Dep</string>

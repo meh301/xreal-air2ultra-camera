@@ -1401,10 +1401,12 @@ static void *depth_worker(void *arg) {
          * reads rect_hi only, SGM reads the lo-res rect only — rectifying all
          * four every pass wasted 0.3-3 ms. t0 covers the full pass (rectify ->
          * publish) so depthDuty reports the true thermal-relevant cost. */
+        int depth_mode = atomic_load(&S.depth_on);  /* 1 = NPU, 2 = SGM forced */
         static int zd_try;                          /* throttle model re-init */
-        if (!xr_las2_available() && S.zip_model[0] && (zd_try++ % 90) == 0)
+        if (depth_mode == 1 && !xr_las2_available() && S.zip_model[0] &&
+            (zd_try++ % 90) == 0)
             xr_las2_init(S.zip_model, S.qnn_dsp_dir);
-        int use_npu = xr_las2_available();
+        int use_npu = depth_mode == 1 && xr_las2_available();
         int64_t t0 = now_ms();
         if (use_npu) {
             xr_stereo_rectify_hi(st, 0, in0);   /* full-res pair for the NPU */
@@ -2174,13 +2176,16 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetShowPoints(JNIEnv *env, jclass
     if (!on) xr_gles_set_points(NULL, 0, 0);
 }
 
-/* Enable/disable stereo depth computation (the tracker keeps running). */
+/* Stereo depth mode: 0 = OFF (no depth processing at all — the producer skips
+ * the DEPTH_BOX copy and the worker sits in cond_wait), 1 = NPU model
+ * (LiteAnyStereo; falls back to SGM if the model/backend is unavailable),
+ * 2 = SGM forced (classic CPU stereo). The tracker keeps running in all modes. */
 JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetDepth(JNIEnv *env, jclass cls,
-                                                        jboolean on) {
+                                                        jint mode) {
     (void)env; (void)cls;
-    if (on) {
-        atomic_store(&S.depth_on, 1);
+    if (mode > 0) {
+        atomic_store(&S.depth_on, mode > 2 ? 1 : (int)mode);
         atomic_fetch_add(&DEPTH_GEN, 1);   /* cancel any stale in-flight job */
         return;
     }
