@@ -273,6 +273,12 @@ static inline uint64_t map_mono_us(void) {
 
 static void *xfeat_preload_thread(void *arg) {
     (void)arg;
+    /* ORT's intra-op pool threads are created inside CreateSession and
+     * inherit THIS thread's nice value. Left at the default 0 they outrank
+     * the VIO workers during every relocalization inference burst — the
+     * exact window pose is most fragile — defeating the map thread's own
+     * nice-19 demotion. Demote first so the pool lands at 19 too. */
+    setpriority(PRIO_PROCESS, (id_t)gettid(), 19);
     if (MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);   /* dlopen ORT + load model */
     return NULL;
 }
@@ -1498,10 +1504,18 @@ static void process_keyframe(void) {
      * descriptor-aware (see the constants): faster when LOST, and faster in
      * cheap BAD mode than in XFeat mode. */
     static uint64_t last_search_ns;
+    static unsigned last_search_cost_us;   /* previous search's measured cost */
     int xf = atomic_load(&USE_XFEAT) && xr_xfeat_available();
     uint64_t search_iv = lost
         ? (xf ? LOOP_SEARCH_LOST_XFEAT_NS : LOOP_SEARCH_LOST_BAD_NS)
         : (xf ? LOOP_SEARCH_HEALTHY_XFEAT_NS : LOOP_SEARCH_HEALTHY_BAD_NS);
+    /* LOST cost-cap: LOST always full-scans, and as the map grows that scan
+     * (+ top-K PnP) reaches 20-50 ms — at the fixed 150/250 ms cadence the
+     * map thread becomes a 15-30% duty burner exactly while pose is most
+     * fragile. Cap search duty at ~25%: never search more often than 4x the
+     * previous search's measured cost. Small maps are unaffected. */
+    if (lost && (uint64_t)last_search_cost_us * 4000ull > search_iv)
+        search_iv = (uint64_t)last_search_cost_us * 4000ull;  /* us->ns, x4 */
     int do_search = last_search_ns == 0 || q_only ||
                     work.ts - last_search_ns >= search_iv;
     int may_store = mapping && !q_only && !lost && !shake_freeze &&
@@ -1687,6 +1701,7 @@ static void process_keyframe(void) {
         PERF.candidates = ncand;
         PERF.match_us = match_us;
         PERF.lock_us = lock_us;
+        last_search_cost_us = match_us;   /* feeds the LOST cadence cost-cap */
     }
     memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
     memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
