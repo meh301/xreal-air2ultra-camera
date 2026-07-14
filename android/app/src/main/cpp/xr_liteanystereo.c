@@ -30,6 +30,12 @@
  * to LAS_W x LAS_H and rescales the focal for the metric-depth conversion. */
 #define LAS_SRC_W 480
 #define LAS_SRC_H 640
+/* The model is QAIRT-NATIVE quantized (A16W8) — graph I/O is UFIXED_POINT_16, so
+ * the EPContext wrapper declares uint16 tensors and we quantize/dequantize here.
+ * Scales from qnn-context-binary-utility meta of the shipped context (offset 0):
+ * in u16 = gray[0,255] / IN_SCALE (~x257), out disparity = u16 * OUT_SCALE. */
+#define LAS_IN_SCALE  0.0038910505827516317f
+#define LAS_OUT_SCALE 0.001082559465430677f
 
 static struct {
     const OrtApi *api;
@@ -40,8 +46,8 @@ static struct {
     char out_name[64];                /* disparity */
     char dsp_dir[256];
     atomic_int ready;
-    float in_l[3 * LAS_H * LAS_W];    /* NCHW input buffers, init/run-thread only */
-    float in_r[3 * LAS_H * LAS_W];
+    uint16_t in_l[3 * LAS_H * LAS_W]; /* NCHW u16-quantized inputs, run-thread only */
+    uint16_t in_r[3 * LAS_H * LAS_W];
 } Z;
 
 static int ort_ok(OrtStatus *st, const char *what) {
@@ -165,19 +171,19 @@ static int las_try_init(const char *model_path) {
          * bogus/slow CPU placement. Failure now falls straight through to SGM. */
         const char *kf[] = { "backend_path", "offload_graph_io_quantization" };
         const char *vf[] = { htp, "0" };
-        const char *kh[] = { "backend_path" };
-        const char *vh[] = { htp };
         LOGI("LAS2: QNN init [board='%s'] htp=%s", board, htp);
-        /* ONLINE-COMPILE test (ORT #26686 workaround for the HTP-v68 offline-
-         * EPContext defect): the staged model is now the QDQ graph, not an offline
-         * context, so the QNN EP compiles it ON-DEVICE (QnnGraph_create) instead of
-         * QnnContext_createFromBinary. Strict full-HTP first, then a CPU boundary
-         * (a few QDQ I/O nodes may not map to the HTP). */
-        ok = las_open(model_path, "QNN", kf, vf, 2, 1, "QNN HTP full (INT8)")
-          || las_open(model_path, "QNN", kh, vh, 1, 0, "QNN HTP +cpu-boundary (INT8)");
+        /* ONE strict attempt: the model is a single EPContext node carrying a
+         * QAIRT-NATIVE-quantized (A16W8) HTP context compiled --htp_socs sm8350.
+         * That pipeline is the ONLY one whose binaries the v68 skel deserializes:
+         * the v68 op library is INTEGER-ONLY (zero fp16 kernels), and x86 offline
+         * prepare lowers any float graph segment (e.g. ORT-QDQ leftovers) to fp16
+         * op variants v68 lacks -> createFromBinary err 1002. Verified on-device
+         * via qnn-net-run: 32 ms/frame, output corr 0.987 vs fp32 host. Graph I/O
+         * is u16-quantized (LAS_IN_SCALE/LAS_OUT_SCALE). Failure -> SGM. */
+        ok = las_open(model_path, "QNN", kf, vf, 2, 1, "QNN HTP full (A16W8 native)");
         if (!ok)
-            LOGE("LAS2: QNN on-device compile failed -> SGM. Capture logcat "
-                 "(onnxruntime/QnnHtp) for the QnnGraph_create / op-support reason.");
+            LOGE("LAS2: QNN HTP did not take the context binary -> SGM. Enable "
+                 "DSP FARF (<proc>.farf) + logcat QnnDsp for the deserializer op.");
     } else if (mtk) {
         ok = las_open(model_path, "NeuroPilot", NULL, NULL, 0, 1, "MediaTek NeuroPilot");
     }
@@ -244,31 +250,34 @@ int xr_las2_run(const uint8_t *left, const uint8_t *right, float f_hi, float bas
     if (!left || !right || !depth_out || out_w <= 0 || out_h <= 0) return -1;
 
     /* Downsample the 480x640 rectified source to the model's LAS_W x LAS_H, gray
-     * replicated to 3 channels, raw [0,255]. */
+     * replicated to 3 channels, quantized to the graph's u16 input encoding. */
     const int plane = LAS_H * LAS_W;
     const float rx = (float)LAS_SRC_W / LAS_W, ry = (float)LAS_SRC_H / LAS_H;
+    const float qs = 1.0f / LAS_IN_SCALE;
     for (int y = 0; y < LAS_H; y++) {
         float syf = (y + 0.5f) * ry - 0.5f;
         for (int x = 0; x < LAS_W; x++) {
             float sxf = (x + 0.5f) * rx - 0.5f;
-            Z.in_l[y * LAS_W + x] = las_samp_u8(left,  LAS_SRC_W, LAS_SRC_H, sxf, syf);
-            Z.in_r[y * LAS_W + x] = las_samp_u8(right, LAS_SRC_W, LAS_SRC_H, sxf, syf);
+            float vl = las_samp_u8(left,  LAS_SRC_W, LAS_SRC_H, sxf, syf) * qs;
+            float vr = las_samp_u8(right, LAS_SRC_W, LAS_SRC_H, sxf, syf) * qs;
+            Z.in_l[y * LAS_W + x] = vl >= 65535.f ? 65535 : (uint16_t)(vl + 0.5f);
+            Z.in_r[y * LAS_W + x] = vr >= 65535.f ? 65535 : (uint16_t)(vr + 0.5f);
         }
     }
-    memcpy(Z.in_l + plane, Z.in_l, sizeof(float) * plane);
-    memcpy(Z.in_l + 2 * plane, Z.in_l, sizeof(float) * plane);
-    memcpy(Z.in_r + plane, Z.in_r, sizeof(float) * plane);
-    memcpy(Z.in_r + 2 * plane, Z.in_r, sizeof(float) * plane);
+    memcpy(Z.in_l + plane, Z.in_l, sizeof(uint16_t) * plane);
+    memcpy(Z.in_l + 2 * plane, Z.in_l, sizeof(uint16_t) * plane);
+    memcpy(Z.in_r + plane, Z.in_r, sizeof(uint16_t) * plane);
+    memcpy(Z.in_r + 2 * plane, Z.in_r, sizeof(uint16_t) * plane);
 
     const int64_t shape[4] = { 1, 3, LAS_H, LAS_W };
     OrtValue *inL = NULL, *inR = NULL;
     if (!ort_ok(Z.api->CreateTensorWithDataAsOrtValue(
                     Z.meminfo, Z.in_l, sizeof Z.in_l, shape, 4,
-                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &inL), "CreateL"))
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16, &inL), "CreateL"))
         return -1;
     if (!ort_ok(Z.api->CreateTensorWithDataAsOrtValue(
                     Z.meminfo, Z.in_r, sizeof Z.in_r, shape, 4,
-                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &inR), "CreateR")) {
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16, &inR), "CreateR")) {
         Z.api->ReleaseValue(inL); return -1;
     }
 
@@ -282,20 +291,21 @@ int xr_las2_run(const uint8_t *left, const uint8_t *right, float f_hi, float bas
     Z.api->ReleaseValue(inR);
     if (!ort_ok(st, "Run")) return -1;
 
-    float *disp = NULL;
+    uint16_t *disp = NULL;
     int ok = ort_ok(Z.api->GetTensorMutableData(ov, (void **)&disp), "out data");
     if (ok && disp) {
-        /* disparity is (1,1,LAS_H,LAS_W) at the MODEL resolution. f_hi is the focal
-         * at the 480-wide rectified source, so scale it to the model width — f and
-         * disp must share a resolution: f_las = f_hi * LAS_W / LAS_SRC_W. Depth is
-         * then subsampled straight to the out_w*out_h publish grid. */
+        /* disparity is (1,1,LAS_H,LAS_W) u16-quantized at the MODEL resolution:
+         * d = u16 * LAS_OUT_SCALE. f_hi is the focal at the 480-wide rectified
+         * source, so scale it to the model width — f and disp must share a
+         * resolution: f_las = f_hi * LAS_W / LAS_SRC_W. Depth is then subsampled
+         * straight to the out_w*out_h publish grid. */
         const float f_las = f_hi * (float)LAS_W / (float)LAS_SRC_W;
         const float sx = (float)LAS_W / out_w, sy = (float)LAS_H / out_h;
         for (int oy = 0; oy < out_h; oy++) {
             int yy = (int)((oy + 0.5f) * sy); if (yy >= LAS_H) yy = LAS_H - 1;
             for (int ox = 0; ox < out_w; ox++) {
                 int xx = (int)((ox + 0.5f) * sx); if (xx >= LAS_W) xx = LAS_W - 1;
-                float d = disp[yy * LAS_W + xx]; if (d < 0.0f) d = -d;
+                float d = disp[yy * LAS_W + xx] * LAS_OUT_SCALE;
                 depth_out[oy * out_w + ox] =
                     (d > 0.3f) ? (f_las * base / d) : 0.0f;
             }
