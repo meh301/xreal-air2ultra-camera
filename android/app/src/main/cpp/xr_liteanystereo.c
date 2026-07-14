@@ -45,6 +45,7 @@ static struct {
     const OrtApi *api;
     OrtEnv *env;
     OrtSession *session;
+    OrtRunOptions *run_opts;          /* per-run DSP clock vote (see init) */
     OrtMemoryInfo *meminfo;
     char in_name[2][64];              /* left, right */
     char out_name[64];                /* disparity */
@@ -173,17 +174,15 @@ static int las_try_init(const char *model_path) {
          * "libQnnGpu.so not found", "not compatible with any EP"). Strict (disable
          * CPU-EP fallback) so a QNN failure drops us cleanly to SGM rather than a
          * bogus/slow CPU placement. Failure now falls straight through to SGM. */
-        /* htp_performance_mode: without it the DSP clock governor ramps per
-         * inference -> 30-50 ms jitter + stalls seen live (qnn-net-run 'burst'
-         * measured a steady 32 ms). sustained_high_performance pins clocks at a
-         * thermally sustainable level. NO rpc_control_latency: the 100us busy-
-         * poll burned a CPU core for the whole 32 ms of every inference and
-         * co-caused the thermal runaway; default polling costs ~1 ms latency.
-         * Total heat is governed by the depth worker's thermal pacing
-         * (xreal_jni depth_worker, battery-temp ladder). */
-        const char *kf[] = { "backend_path", "offload_graph_io_quantization",
-                             "htp_performance_mode" };
-        const char *vf[] = { htp, "0", "sustained_high_performance" };
+        /* DSP clock vote is scoped PER RUN (see the OrtRunOptions below), not
+         * per session: a session-level htp_performance_mode is held for the
+         * session's whole life — including thermal suspend and every paced
+         * idle gap — burning 50-200 mW of cDSP rail for nothing. NO
+         * rpc_control_latency either: the 100us busy-poll burned a CPU core
+         * for the whole 32 ms of every inference and co-caused the thermal
+         * runaway; default polling costs ~1 ms latency. */
+        const char *kf[] = { "backend_path", "offload_graph_io_quantization" };
+        const char *vf[] = { htp, "0" };
         LOGI("LAS2: QNN init [board='%s'] htp=%s", board, htp);
         /* ONE strict attempt: the model is a single EPContext node carrying a
          * QAIRT-NATIVE-quantized (A16W8) HTP context compiled --htp_socs sm8350.
@@ -193,7 +192,7 @@ static int las_try_init(const char *model_path) {
          * op variants v68 lacks -> createFromBinary err 1002. Verified on-device
          * via qnn-net-run: 32 ms/frame, output corr 0.987 vs fp32 host. Graph I/O
          * is u16-quantized (LAS_IN_SCALE/LAS_OUT_SCALE). Failure -> SGM. */
-        ok = las_open(model_path, "QNN", kf, vf, 3, 1, "QNN HTP full (A16W8 native)");
+        ok = las_open(model_path, "QNN", kf, vf, 2, 1, "QNN HTP full (A16W8 native)");
         if (!ok)
             LOGE("LAS2: QNN HTP did not take the context binary -> SGM. Enable "
                  "DSP FARF (<proc>.farf) + logcat QnnDsp for the deserializer op.");
@@ -205,6 +204,19 @@ static int las_try_init(const char *model_path) {
     if (!ort_ok(Z.api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,
                                            &Z.meminfo), "CreateCpuMemoryInfo"))
         return 0;
+
+    /* Per-run DSP clock vote: pin clocks for the inference, release to
+     * default after — the DSP idles cold between paced runs and during
+     * thermal suspend instead of holding a session-lifetime high vote.
+     * A failed entry just leaves Z.run_opts usable with default perf. */
+    if (ort_ok(Z.api->CreateRunOptions(&Z.run_opts), "CreateRunOptions")) {
+        ort_ok(Z.api->AddRunConfigEntry(Z.run_opts, "qnn.htp_perf_mode",
+                                        "sustained_high_performance"),
+               "RunCfg perf_mode");
+        ort_ok(Z.api->AddRunConfigEntry(Z.run_opts, "qnn.htp_perf_mode_post_run",
+                                        "default"),
+               "RunCfg perf_post");
+    }
 
     OrtAllocator *alloc = NULL;
     ort_ok(Z.api->GetAllocatorWithDefaultOptions(&alloc), "GetAllocator");
@@ -306,7 +318,7 @@ int xr_las2_run(const uint8_t *left, const uint8_t *right, float f_hi, float bas
     const OrtValue *invals[2] = { inL, inR };
     const char *outs[1] = { Z.out_name };
     OrtValue *ov = NULL;
-    OrtStatus *st = Z.api->Run(Z.session, NULL, ins,
+    OrtStatus *st = Z.api->Run(Z.session, Z.run_opts, ins,
                                (const OrtValue *const *)invals, 2, outs, 1, &ov);
     Z.api->ReleaseValue(inL);
     Z.api->ReleaseValue(inR);

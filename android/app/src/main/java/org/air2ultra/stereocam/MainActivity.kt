@@ -538,14 +538,27 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "Basalt config staging failed: $e")
         }
+        // Model staging: ~12.2 MB of deflate-compressed assets copied to filesDir
+        // on the MAIN thread. Skip when already staged by THIS apk install (the
+        // marker carries lastUpdateTime, which changes on every reinstall) —
+        // saves 100-500 ms of launch and 12 MB of flash writes per start.
+        val apkStamp = packageManager.getPackageInfo(packageName, 0).lastUpdateTime
+        val stageMarker = java.io.File(filesDir, ".models_staged")
+        val alreadyStaged = stageMarker.exists() &&
+            stageMarker.readText() == apkStamp.toString()
+        fun stage(assetName: String, dst: java.io.File): Boolean {
+            if (alreadyStaged && dst.exists()) return true
+            assets.open(assetName).use { src ->
+                dst.outputStream().use { out -> src.copyTo(out) }
+            }
+            return true
+        }
         // Always stage the XFeat model so the Desc button can switch to it
         // at runtime; the descriptor actually used stays BAD/TEBLID until the
         // user selects XFeat (nativeSetUseXfeat).
         try {
             val model = java.io.File(filesDir, "xfeat.onnx")
-            assets.open("xfeat.onnx").use { src ->
-                model.outputStream().use { dst -> src.copyTo(dst) }
-            }
+            stage("xfeat.onnx", model)
             XrealNative.nativeSetXfeatModel(model.absolutePath)
             android.util.Log.i("xrealcam", "XFeat model staged: ${model.absolutePath}")
         } catch (e: Exception) {
@@ -557,14 +570,13 @@ class MainActivity : Activity() {
         // LAS2, which replaced the ZipDepth stack — see memory las2-deployment).
         try {
             val model = java.io.File(filesDir, "las2_s_ctx.onnx")
-            assets.open("las2_s_ctx.onnx").use { src ->
-                model.outputStream().use { dst -> src.copyTo(dst) }
-            }
+            stage("las2_s_ctx.onnx", model)
             XrealNative.nativeSetZipModel(model.absolutePath)
             android.util.Log.i("xrealcam", "LiteAnyStereo model staged: ${model.absolutePath}")
         } catch (e: Exception) {
             android.util.Log.i("xrealcam", "LiteAnyStereo model absent (SGM depth): $e")
         }
+        try { stageMarker.writeText(apkStamp.toString()) } catch (_: Exception) {}
         // Stage any Hexagon DSP libs from assets/qnn_dsp -> files/qnn_dsp and put
         // that dir on ADSP_LIBRARY_PATH (nativeSetQnnDspDir). Currently EMPTY: a
         // QCM6490-firmware libc++.so.1/libc++abi.so.1 was trialed here to satisfy
