@@ -1261,18 +1261,19 @@ static void *depth_worker(void *arg) {
         DEPTH_BOX.full = 0;
         pthread_mutex_unlock(&DEPTH_BOX.lock);
 
-        /* Thermal governor: unpaced, the worker reruns as fast as the model
-         * finishes (~12 Hz x 32 ms = ~39% duty) and the sustained DSP+CPU load
-         * thermal-throttles the whole SoC (VIO IMU queue overruns, device-wide
-         * frame drops). Pace by battery temperature — the only signal this
-         * vendor reports (deci-C via nativeSetThermal; PowerManager status is
-         * always 0 here). Above the burn line depth SUSPENDS (VIO/passthrough
-         * keep the SoC budget); unknown temp (-1) uses the cool period. */
+        /* Thermal governor: depth runs FULL SPEED while cool (the depth buffer
+         * is future AR-occlusion masking data, so rate = data quality; the
+         * 2026-07-14 meltdown was dominated by the since-removed RPC busy-poll,
+         * not the duty cycle alone) and paces down only when the battery
+         * actually warms. Battery temp is the only signal this vendor reports
+         * (deci-C via nativeSetThermal; PowerManager status is always 0 here).
+         * Above the burn line depth SUSPENDS (VIO/passthrough keep the SoC
+         * budget); unknown temp (-1) runs unpaced. */
         int bt = atomic_load(&BATT_DECIC);
         int period_ms = bt >= 440 ? -1 :             /* >=44.0C: suspend      */
-                        bt >= 410 ? 700 :            /* 41-43.9C: ~1.4 Hz     */
-                        bt >= 380 ? 300 :            /* 38-40.9C: ~3 Hz       */
-                                    150;             /* cool/unknown: ~6.5 Hz */
+                        bt >= 410 ? 400 :            /* 41-43.9C: ~2.5 Hz     */
+                        bt >= 380 ? 150 :            /* 38-40.9C: ~6.5 Hz     */
+                                    0;               /* cool/unknown: UNPACED */
         static int64_t last_pass_ms;
         static int suspended;
         if (period_ms < 0) {
