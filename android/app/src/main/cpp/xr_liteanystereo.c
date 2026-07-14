@@ -24,18 +24,22 @@
  * The model runs at a REDUCED resolution (192x256) to fit the unsigned-PD DSP
  * memory budget (480x640 needs ~244 MB, far past the PD ration; 192x256 ~35 MB).
  * max_disp is locked at 192 by the trained weights, so 192 wide is the floor. */
-#define LAS_W 192
-#define LAS_H 256
-/* The rectified source (xr_stereo rect_hi) is 480x640; xr_las2_run downsamples it
- * to LAS_W x LAS_H and rescales the focal for the metric-depth conversion. */
+#define LAS_W 480
+#define LAS_H 640
+/* The rectified source (xr_stereo rect_hi) is 480x640; when the model runs at a
+ * REDUCED resolution xr_las2_run downsamples + rescales the focal. At FULL res
+ * (LAS == SRC, current 480x640 experiment: ~140 ms/frame on HVX = ~7 Hz depth)
+ * the input feeds straight through. */
 #define LAS_SRC_W 480
 #define LAS_SRC_H 640
 /* The model is QAIRT-NATIVE quantized (A16W8) — graph I/O is UFIXED_POINT_16, so
  * the EPContext wrapper declares uint16 tensors and we quantize/dequantize here.
- * Scales from qnn-context-binary-utility meta of the shipped context (offset 0):
- * in u16 = gray[0,255] / IN_SCALE (~x257), out disparity = u16 * OUT_SCALE. */
+ * Scales from qnn-context-binary-utility meta of the STAGED context (offset 0) —
+ * MUST match assets/las2_s_ctx.onnx: in u16 = gray[0,255] / IN_SCALE (~x257),
+ * out disparity = u16 * OUT_SCALE. 480x640 ctx: out 0.00269206; (192x256 ctx
+ * used 0.00108256 — restore if reverting to the 192 model). */
 #define LAS_IN_SCALE  0.0038910505827516317f
-#define LAS_OUT_SCALE 0.001082559465430677f
+#define LAS_OUT_SCALE 0.0026920558884739876f
 
 static struct {
     const OrtApi *api;
@@ -169,8 +173,14 @@ static int las_try_init(const char *model_path) {
          * "libQnnGpu.so not found", "not compatible with any EP"). Strict (disable
          * CPU-EP fallback) so a QNN failure drops us cleanly to SGM rather than a
          * bogus/slow CPU placement. Failure now falls straight through to SGM. */
-        const char *kf[] = { "backend_path", "offload_graph_io_quantization" };
-        const char *vf[] = { htp, "0" };
+        /* htp_performance_mode: without it the DSP clock governor ramps per
+         * inference -> 30-50 ms jitter + stalls seen live (qnn-net-run 'burst'
+         * measured a steady 32 ms). sustained_high_performance pins clocks at a
+         * thermally sustainable level; rpc_control_latency=100us keeps the RPC
+         * polling tight so Run() doesn't sleep between HTP completions. */
+        const char *kf[] = { "backend_path", "offload_graph_io_quantization",
+                             "htp_performance_mode", "rpc_control_latency" };
+        const char *vf[] = { htp, "0", "sustained_high_performance", "100" };
         LOGI("LAS2: QNN init [board='%s'] htp=%s", board, htp);
         /* ONE strict attempt: the model is a single EPContext node carrying a
          * QAIRT-NATIVE-quantized (A16W8) HTP context compiled --htp_socs sm8350.
@@ -180,7 +190,7 @@ static int las_try_init(const char *model_path) {
          * op variants v68 lacks -> createFromBinary err 1002. Verified on-device
          * via qnn-net-run: 32 ms/frame, output corr 0.987 vs fp32 host. Graph I/O
          * is u16-quantized (LAS_IN_SCALE/LAS_OUT_SCALE). Failure -> SGM. */
-        ok = las_open(model_path, "QNN", kf, vf, 2, 1, "QNN HTP full (A16W8 native)");
+        ok = las_open(model_path, "QNN", kf, vf, 4, 1, "QNN HTP full (A16W8 native)");
         if (!ok)
             LOGE("LAS2: QNN HTP did not take the context binary -> SGM. Enable "
                  "DSP FARF (<proc>.farf) + logcat QnnDsp for the deserializer op.");
@@ -249,19 +259,27 @@ int xr_las2_run(const uint8_t *left, const uint8_t *right, float f_hi, float bas
     if (!atomic_load_explicit(&Z.ready, memory_order_acquire)) return -1;
     if (!left || !right || !depth_out || out_w <= 0 || out_h <= 0) return -1;
 
-    /* Downsample the 480x640 rectified source to the model's LAS_W x LAS_H, gray
-     * replicated to 3 channels, quantized to the graph's u16 input encoding. */
+    /* Resample the 480x640 rectified source to the model's LAS_W x LAS_H (direct
+     * quantize at full res), gray replicated to 3 channels, u16 input encoding. */
     const int plane = LAS_H * LAS_W;
-    const float rx = (float)LAS_SRC_W / LAS_W, ry = (float)LAS_SRC_H / LAS_H;
     const float qs = 1.0f / LAS_IN_SCALE;
-    for (int y = 0; y < LAS_H; y++) {
-        float syf = (y + 0.5f) * ry - 0.5f;
-        for (int x = 0; x < LAS_W; x++) {
-            float sxf = (x + 0.5f) * rx - 0.5f;
-            float vl = las_samp_u8(left,  LAS_SRC_W, LAS_SRC_H, sxf, syf) * qs;
-            float vr = las_samp_u8(right, LAS_SRC_W, LAS_SRC_H, sxf, syf) * qs;
-            Z.in_l[y * LAS_W + x] = vl >= 65535.f ? 65535 : (uint16_t)(vl + 0.5f);
-            Z.in_r[y * LAS_W + x] = vr >= 65535.f ? 65535 : (uint16_t)(vr + 0.5f);
+    if (LAS_W == LAS_SRC_W && LAS_H == LAS_SRC_H) {
+        for (int i = 0; i < plane; i++) {
+            float vl = left[i] * qs, vr = right[i] * qs;
+            Z.in_l[i] = vl >= 65535.f ? 65535 : (uint16_t)(vl + 0.5f);
+            Z.in_r[i] = vr >= 65535.f ? 65535 : (uint16_t)(vr + 0.5f);
+        }
+    } else {
+        const float rx = (float)LAS_SRC_W / LAS_W, ry = (float)LAS_SRC_H / LAS_H;
+        for (int y = 0; y < LAS_H; y++) {
+            float syf = (y + 0.5f) * ry - 0.5f;
+            for (int x = 0; x < LAS_W; x++) {
+                float sxf = (x + 0.5f) * rx - 0.5f;
+                float vl = las_samp_u8(left,  LAS_SRC_W, LAS_SRC_H, sxf, syf) * qs;
+                float vr = las_samp_u8(right, LAS_SRC_W, LAS_SRC_H, sxf, syf) * qs;
+                Z.in_l[y * LAS_W + x] = vl >= 65535.f ? 65535 : (uint16_t)(vl + 0.5f);
+                Z.in_r[y * LAS_W + x] = vr >= 65535.f ? 65535 : (uint16_t)(vr + 0.5f);
+            }
         }
     }
     memcpy(Z.in_l + plane, Z.in_l, sizeof(uint16_t) * plane);
