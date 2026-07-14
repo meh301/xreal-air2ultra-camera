@@ -21,6 +21,9 @@
 /* largest slot (MID 288x384) sizes the shared input staging buffers */
 #define LAS_MAX_PX (288 * 384)
 
+/* see xr_liteanystereo.h — serializes all HTP session creation + Run() */
+pthread_mutex_t XR_NPU_GATE = PTHREAD_MUTEX_INITIALIZER;
+
 /* Per-slot model state. Inputs are NCHW (1,1,h,w), 1-CHANNEL (first conv +
  * ImageNet norm folded in — host-verified exact vs the 3-ch original), raw
  * [0,255] quantized here to the graph's UFIXED_POINT_16 encoding. */
@@ -117,7 +120,9 @@ static int las_open(las_model *m, const char *model_path, const char *ep,
                        opts, "session.disable_cpu_ep_fallback", "1"),
                    "DisableCpuFallback");
     }
+    pthread_mutex_lock(&XR_NPU_GATE);         /* context deserialize hits the HTP */
     OrtStatus *st = Z.api->CreateSession(Z.env, model_path, opts, &m->session);
+    pthread_mutex_unlock(&XR_NPU_GATE);
     Z.api->ReleaseSessionOptions(opts);
     if (st) {
         LOGE("LAS2: [%s] open failed: %s", label, Z.api->GetErrorMessage(st));
@@ -280,8 +285,10 @@ int xr_las2_run(int slot, const uint8_t *left, const uint8_t *right,
     const OrtValue *invals[2] = { inL, inR };
     const char *outs[1] = { m->out_name };
     OrtValue *ov = NULL;
+    pthread_mutex_lock(&XR_NPU_GATE);         /* exclusive HTP (see header) */
     OrtStatus *st = Z.api->Run(m->session, Z.run_opts, ins,
                                (const OrtValue *const *)invals, 2, outs, 1, &ov);
+    pthread_mutex_unlock(&XR_NPU_GATE);
     Z.api->ReleaseValue(inL);
     Z.api->ReleaseValue(inR);
     if (!ort_ok(st, "Run")) return -1;

@@ -13,9 +13,21 @@
 #ifndef XR_LITEANYSTEREO_H
 #define XR_LITEANYSTEREO_H
 
+#include <pthread.h>
 #include <stdint.h>
 
 enum { XR_LAS2_FAST = 0, XR_LAS2_MID = 1, XR_LAS2_SLOTS = 2 };
+
+/* Process-wide HTP gate. The v68 has NO graph preemption: concurrent
+ * submissions (depth worker vs the XFeat map path) queue in the driver and
+ * smear each other's latency, and the per-run DSP clock votes interleave —
+ * one client's post-run "default" vote can land mid-flight in the other's
+ * inference and let DCVS collapse the clocks under it (observed as jittery,
+ * wildly inconsistent depth timings). EVERY QNN session creation and Run()
+ * in this process must hold this mutex: runs never overlap, votes only
+ * transition while the other client is idle. Costs the loser one run's
+ * wait (<= ~40 ms at keyframe rate) — noise next to the variance it kills. */
+extern pthread_mutex_t XR_NPU_GATE;
 
 /* Load ORT + the EPContext model into `slot` and pick the QNN HTP execution
  * provider. w/h = the model's input size; in_scale/out_scale = the context's

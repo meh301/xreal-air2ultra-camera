@@ -23,7 +23,10 @@
 
 #include <android/log.h>
 
+#include <time.h>
+
 #include "ort/onnxruntime_c_api.h"
+#include "xr_liteanystereo.h"   /* XR_NPU_GATE — process-wide HTP serializer */
 #include "xreal_core.h"
 
 #define TAG "xrealcam"
@@ -180,7 +183,9 @@ static int xfeat_try_init_npu(void) {
     ort_ok(X.api->AddSessionConfigEntry(
                opts, "session.disable_cpu_ep_fallback", "1"),
            "DisableCpuFallback");
+    pthread_mutex_lock(&XR_NPU_GATE);      /* context deserialize hits the HTP */
     st = X.api->CreateSession(X.env, X.npu_path, opts, &X.npu_session);
+    pthread_mutex_unlock(&XR_NPU_GATE);
     X.api->ReleaseSessionOptions(opts);
     if (st) {
         LOGE("XFeat NPU: HTP did not take the context (%s) — CPU model",
@@ -252,8 +257,15 @@ static int xfeat_try_init_npu(void) {
  * sampling + L2 norm + int8 quantization. */
 typedef struct { float sc; uint16_t x, y; } xfn_peak;
 
+static int64_t xfn_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
 static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
                              int8_t (*desc)[64], int max) {
+    const int64_t t_all = xfn_us();
     const int64_t shape[4] = { 1, 1, IMG_H, IMG_W };
     OrtValue *in = NULL;
     /* the raw gray frame is already the quantized u8 tensor (scale ~1.0) */
@@ -266,8 +278,12 @@ static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
     const char *ins[1] = { X.npu_in };
     const char *outs[3] = { X.npu_out[0], X.npu_out[1], X.npu_out[2] };
     OrtValue *ov[3] = { NULL, NULL, NULL };
+    pthread_mutex_lock(&XR_NPU_GATE);         /* exclusive HTP (see header) */
+    const int64_t t_run = xfn_us();           /* gate wait vs run time split */
     OrtStatus *st = X.api->Run(X.npu_session, X.run_opts, ins,
                                (const OrtValue *const *)&in, 1, outs, 3, ov);
+    pthread_mutex_unlock(&XR_NPU_GATE);
+    const int64_t t_done = xfn_us();
     X.api->ReleaseValue(in);
     if (!ort_ok(st, "npu Run")) return -1;
 
@@ -395,6 +411,15 @@ static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
 
     for (int i = 0; i < 3; i++)
         if (ov[i]) X.api->ReleaseValue(ov[i]);
+
+    /* cadence telemetry: first few + every 32nd extract, with the gate-wait
+     * vs HTP-run vs CPU-tail split so contention shows up in logcat */
+    static int xfn_n;
+    if (xfn_n < 3 || (xfn_n & 31) == 0)
+        LOGI("XFeat NPU extract #%d: %d kp, wait %.1f + run %.1f + tail %.1f ms",
+             xfn_n, hn, (t_run - t_all) / 1000.0f, (t_done - t_run) / 1000.0f,
+             (xfn_us() - t_done) / 1000.0f);
+    xfn_n++;
     return hn;
 }
 
