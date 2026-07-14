@@ -6,7 +6,9 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -126,7 +128,14 @@ static struct {
  * XR_EYE_CAM is 0, so it needs no explicit set. */
 __attribute__((constructor)) static void g_init(void) {
     pthread_mutex_init(&G.lock, NULL);
-    pthread_cond_init(&G.cond, NULL);
+    /* MONOTONIC condvar: ATW pacing uses absolute deadlines, and on the
+     * default CLOCK_REALTIME a backwards wall-clock step (NTP/user) parks the
+     * deadline in the future — warp stalls until the next camera frame. */
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&G.cond, &ca);
+    pthread_condattr_destroy(&ca);
     G.calib_variant = XR_ALIGN_VARIANT_DEFAULT;
     G.timewarp = 1;
     G.show_points = 1;
@@ -515,11 +524,18 @@ static void pt_draw(int n, const float *ndc, float r, float g, float b,
     if (a < 1.0f) glDisable(GL_BLEND);
 }
 
+/* Surface dimensions only change on rebind: cache them instead of two
+ * eglQuerySurface driver round-trips per present at 72-144 Hz. Reset in the
+ * render loop's window-change branch. */
+static EGLint SURF_W, SURF_H;
+
 static void render_frame(int mode, int fresh, const float *dR,
                          const float *dR_pts) {
-    EGLint w = 0, h = 0;
-    eglQuerySurface(G.dpy, G.surf, EGL_WIDTH, &w);
-    eglQuerySurface(G.dpy, G.surf, EGL_HEIGHT, &h);
+    if (SURF_W <= 0) {
+        eglQuerySurface(G.dpy, G.surf, EGL_WIDTH, &SURF_W);
+        eglQuerySurface(G.dpy, G.surf, EGL_HEIGHT, &SURF_H);
+    }
+    EGLint w = SURF_W, h = SURF_H;
     glUseProgram(G.prog);
     glUniform1i(G.loc_tex, 0);
     glActiveTexture(GL_TEXTURE0);
@@ -742,9 +758,13 @@ static void render_frame(int mode, int fresh, const float *dR,
 
 static void *render_thread(void *arg) {
     (void)arg;
+    /* The 72 Hz front-buffer present loop is the latency-critical consumer of
+     * the whole pipeline; place it above default-priority producers (Basalt
+     * pool, UI) but below the IMU thread (-10) and the UVC callback (-4). */
+    setpriority(PRIO_PROCESS, (id_t)gettid(), -2);
     uint32_t done_seq = 0;
     int warps = 0;
-    int64_t next_tick_ns = 0;      /* absolute ATW pacing, CLOCK_REALTIME */
+    int64_t next_tick_ns = 0;      /* absolute ATW pacing, CLOCK_MONOTONIC */
     for (;;) {
         pthread_mutex_lock(&G.lock);
         /* asynchronous timewarp: once an eyes frame is on screen, wake at
@@ -755,7 +775,7 @@ static void *render_thread(void *arg) {
                       G.surf != EGL_NO_SURFACE && done_seq != 0;
         if (can_atw) {
             struct timespec until;
-            clock_gettime(CLOCK_REALTIME, &until);
+            clock_gettime(CLOCK_MONOTONIC, &until);   /* matches the condvar */
             /* camera/depth modes re-warp at the panel rate — faster only
              * burns a big core on mesh reprojection and heats the SoC
              * into throttling. The AR point pass has no mesh and is
@@ -824,6 +844,7 @@ static void *render_thread(void *arg) {
         pthread_mutex_unlock(&G.lock);
 
         if (win_changed) {
+            SURF_W = SURF_H = 0;           /* re-query dims on the new surface */
             egl_teardown_surface();
             if (new_win && egl_bind_window(new_win) != 0) {
                 LOGE("glasses renderer unavailable on this surface");
@@ -852,6 +873,24 @@ static void *render_thread(void *arg) {
         if (mode == MODE_EYES && tw && pose_fn && pt_ts &&
             pose_fn(pt_ts, dRp) == 0)
             pdRp = dRp;
+
+        /* Still-head ATW skip (CAM passthrough only — its present depends on
+         * nothing but the frame texture and dR): pose_delta returns a bitwise
+         * identical matrix inside its deadband, so an unchanged dR on a stale
+         * frame means the exact image already on the front buffer. Skipping
+         * saves the full mesh reprojection + VBO upload + GPU raster at 72 Hz
+         * whenever the head is still (~8% of a big core + GPU). AR/DEPTH modes
+         * keep presenting (their content moves at VIO/depth rate). */
+        if (!fresh && mode == MODE_EYES && G.eye_mode == XR_EYE_CAM && pdR) {
+            static float still_dR[9];
+            static int still_have;
+            if (still_have && memcmp(still_dR, dR, sizeof dR) == 0) {
+                warps++;                       /* count it: it IS the warp rate */
+                continue;
+            }
+            memcpy(still_dR, dR, sizeof dR);
+            still_have = 1;
+        }
 
         int64_t t0 = now_ms64();
         render_frame(mode, fresh, pdR, pdRp);

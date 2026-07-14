@@ -2,6 +2,7 @@
 #include "xreal_align.h"
 
 #include <math.h>
+#include <string.h>
 
 #include "xreal_core.h"
 
@@ -50,8 +51,30 @@ void xr_align_ray(const xr_eye_calib *eye, int variant,
 
 int xr_align_project(const xr_eye_calib *eye, int variant,
                      const float ray_imu[3], float *u_cam, float *v_cam) {
+    /* Rc is constant per (eye, variant) but this is called once per mesh
+     * vertex — 4810x per present at 72 Hz (~346k quat_to_rot/s, each with a
+     * sqrtf + 4 divides). Cache the last matrix per eye slot; thread-local so
+     * concurrent callers can't race (the render thread is the hot caller). */
+    static __thread struct {
+        const xr_eye_calib *eye;
+        int conj;
+        float q[4];
+        float R[9];
+    } rc_cache[2];
+    int conj = (variant >> 1) & 1;
+    int slot = eye->q_cam[3] < 0 ? 0 : 1;   /* cheap 2-way split; correctness
+                                             * comes from the full key check */
     float Rc[9];
-    quat_to_rot(eye->q_cam, (variant >> 1) & 1, Rc);
+    if (rc_cache[slot].eye == eye && rc_cache[slot].conj == conj &&
+        memcmp(rc_cache[slot].q, eye->q_cam, sizeof rc_cache[slot].q) == 0) {
+        memcpy(Rc, rc_cache[slot].R, sizeof Rc);
+    } else {
+        quat_to_rot(eye->q_cam, conj, Rc);
+        rc_cache[slot].eye = eye;
+        rc_cache[slot].conj = conj;
+        memcpy(rc_cache[slot].q, eye->q_cam, sizeof rc_cache[slot].q);
+        memcpy(rc_cache[slot].R, Rc, sizeof rc_cache[slot].R);
+    }
     /* IMU -> camera: Rc maps cam->imu, so multiply by its transpose */
     float p[3] = {
         Rc[0] * ray_imu[0] + Rc[3] * ray_imu[1] + Rc[6] * ray_imu[2],
