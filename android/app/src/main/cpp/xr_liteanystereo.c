@@ -176,11 +176,14 @@ static int las_try_init(const char *model_path) {
         /* htp_performance_mode: without it the DSP clock governor ramps per
          * inference -> 30-50 ms jitter + stalls seen live (qnn-net-run 'burst'
          * measured a steady 32 ms). sustained_high_performance pins clocks at a
-         * thermally sustainable level; rpc_control_latency=100us keeps the RPC
-         * polling tight so Run() doesn't sleep between HTP completions. */
+         * thermally sustainable level. NO rpc_control_latency: the 100us busy-
+         * poll burned a CPU core for the whole 32 ms of every inference and
+         * co-caused the thermal runaway; default polling costs ~1 ms latency.
+         * Total heat is governed by the depth worker's thermal pacing
+         * (xreal_jni depth_worker, battery-temp ladder). */
         const char *kf[] = { "backend_path", "offload_graph_io_quantization",
-                             "htp_performance_mode", "rpc_control_latency" };
-        const char *vf[] = { htp, "0", "sustained_high_performance", "100" };
+                             "htp_performance_mode" };
+        const char *vf[] = { htp, "0", "sustained_high_performance" };
         LOGI("LAS2: QNN init [board='%s'] htp=%s", board, htp);
         /* ONE strict attempt: the model is a single EPContext node carrying a
          * QAIRT-NATIVE-quantized (A16W8) HTP context compiled --htp_socs sm8350.
@@ -190,7 +193,7 @@ static int las_try_init(const char *model_path) {
          * op variants v68 lacks -> createFromBinary err 1002. Verified on-device
          * via qnn-net-run: 32 ms/frame, output corr 0.987 vs fp32 host. Graph I/O
          * is u16-quantized (LAS_IN_SCALE/LAS_OUT_SCALE). Failure -> SGM. */
-        ok = las_open(model_path, "QNN", kf, vf, 4, 1, "QNN HTP full (A16W8 native)");
+        ok = las_open(model_path, "QNN", kf, vf, 3, 1, "QNN HTP full (A16W8 native)");
         if (!ok)
             LOGE("LAS2: QNN HTP did not take the context binary -> SGM. Enable "
                  "DSP FARF (<proc>.farf) + logcat QnnDsp for the deserializer op.");

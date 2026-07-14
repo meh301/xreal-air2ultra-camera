@@ -160,7 +160,11 @@ class MainActivity : Activity() {
                 poseMap.setImuDebug(imuA, imuG)
             }
 
-            // lag forensics: thermal state vs native-heap growth, every 10 s
+            // lag forensics: thermal state vs native-heap growth, every 10 s.
+            // PowerManager thermal status is USELESS on this vendor (stays 0
+            // while the SoC visibly throttles), so the working signal is the
+            // battery temperature (sticky ACTION_BATTERY_CHANGED, deci-C) —
+            // logged here and fed to the native depth-worker thermal governor.
             if (now - lastHealthLog > 10_000) {
                 lastHealthLog = now
                 val heapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576
@@ -168,13 +172,16 @@ class MainActivity : Activity() {
                 if (Build.VERSION.SDK_INT >= 29) {
                     val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
                     thermal = pm.currentThermalStatus
-                    thermalMark = if (thermal >= android.os.PowerManager.THERMAL_STATUS_MODERATE)
-                        " [hot:$thermal]" else ""
                 }
+                val battDeciC = registerReceiver(null,
+                    android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+                    ?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
+                XrealNative.nativeSetThermal(battDeciC, thermal)
+                thermalMark = if (battDeciC >= 410) " [hot:${battDeciC / 10.0}C]" else ""
                 XrealNative.nativeSlamPerf(slamPerf)
                 android.util.Log.i("xrealcam",
-                    "health: nativeHeap=${heapMb}MB thermal=$thermal " +
-                    "(0=none 1=light 2=moderate 3=severe) | " +
+                    "health: nativeHeap=${heapMb}MB batt=${battDeciC / 10.0}C " +
+                    "thermalStatus=$thermal | " +
                     "search: ${slamPerf[0]}kf ${slamPerf[1]}cand " +
                     "${slamPerf[2]}us match ${slamPerf[3]}us lock | " +
                     "pairDrops=${slamPerf[4]} depthDuty=${slamPerf[5] / 10.0}%")

@@ -50,6 +50,11 @@ object XrealNative {
     /** Path of the staged XFeat ONNX model (session-map descriptors). */
     external fun nativeSetXfeatModel(path: String)
 
+    /** Thermal feed for the depth-worker governor: battery temperature in
+     *  deci-Celsius (the vendor never raises PowerManager thermal status, so
+     *  battery temp is the working signal) plus that status for the record. */
+    external fun nativeSetThermal(deciCelsius: Int, status: Int)
+
     /** Runtime descriptor selector: BAD/TEBLID (false) vs XFeat (true).
      *  Clears the keyframe map on a real change (types can't cross-match). */
     /** Returns the descriptor actually in effect afterwards: false = BAD/TEBLID,

@@ -50,6 +50,11 @@ static atomic_uint PAIR_DROPS;
 static atomic_uint DEPTH_BUSY_US;    /* accumulated depth compute microseconds;
                                       * the reader divides by its own measured
                                       * wall interval to get the duty cycle */
+static atomic_int  BATT_DECIC = -1;  /* battery temp in 0.1 C from Kotlin (the
+                                      * only thermal signal this vendor reports;
+                                      * PowerManager thermal status stays 0 even
+                                      * while throttling). -1 = unknown. Drives
+                                      * the depth-worker thermal governor. */
 
 /* Latest-frame-wins handoff from the SLAM worker to the depth worker: the SLAM
  * thread drops the newest raw stereo pair here and moves on; the depth thread
@@ -1256,6 +1261,44 @@ static void *depth_worker(void *arg) {
         DEPTH_BOX.full = 0;
         pthread_mutex_unlock(&DEPTH_BOX.lock);
 
+        /* Thermal governor: unpaced, the worker reruns as fast as the model
+         * finishes (~12 Hz x 32 ms = ~39% duty) and the sustained DSP+CPU load
+         * thermal-throttles the whole SoC (VIO IMU queue overruns, device-wide
+         * frame drops). Pace by battery temperature — the only signal this
+         * vendor reports (deci-C via nativeSetThermal; PowerManager status is
+         * always 0 here). Above the burn line depth SUSPENDS (VIO/passthrough
+         * keep the SoC budget); unknown temp (-1) uses the cool period. */
+        int bt = atomic_load(&BATT_DECIC);
+        int period_ms = bt >= 440 ? -1 :             /* >=44.0C: suspend      */
+                        bt >= 410 ? 700 :            /* 41-43.9C: ~1.4 Hz     */
+                        bt >= 380 ? 300 :            /* 38-40.9C: ~3 Hz       */
+                                    150;             /* cool/unknown: ~6.5 Hz */
+        static int64_t last_pass_ms;
+        static int suspended;
+        if (period_ms < 0) {
+            if (!suspended) { suspended = 1;
+                LOGE("depth: SUSPENDED, battery %.1fC >= 44.0C", bt / 10.0); }
+            usleep(500 * 1000);
+            continue;                                /* drop pair, stay cool */
+        }
+        if (suspended) { suspended = 0;
+            LOGI("depth: resumed, battery %.1fC", bt / 10.0); }
+        int64_t since = now_ms() - last_pass_ms;
+        if (since < period_ms) {
+            usleep((useconds_t)((period_ms - since) * 1000));
+            pthread_mutex_lock(&DEPTH_BOX.lock);     /* re-take the newest pair
+                                                      * that landed while asleep
+                                                      * so we never process a
+                                                      * period-old frame */
+            if (DEPTH_BOX.full) {
+                memcpy(in0, DEPTH_BOX.in[0], sizeof in0);
+                memcpy(in1, DEPTH_BOX.in[1], sizeof in1);
+                job_gen = DEPTH_BOX.gen;
+                DEPTH_BOX.full = 0;
+            }
+            pthread_mutex_unlock(&DEPTH_BOX.lock);
+        }
+
         if (!atomic_load_explicit(&S.stereo_ready, memory_order_acquire))
             continue;                                /* calib not built yet */
         if (!st) {
@@ -1300,6 +1343,7 @@ static void *depth_worker(void *arg) {
         if (!used_zip) xr_stereo_depth(st, disp_local);   /* SGM */
         float depth_ms = (float)(now_ms() - t0);
         atomic_fetch_add(&DEPTH_BUSY_US, (unsigned)(depth_ms * 1000.0f));
+        last_pass_ms = now_ms();                     /* thermal-governor pacing */
         /* cheap early-out if a disable/re-enable already landed */
         if (job_gen != atomic_load(&DEPTH_GEN) || !atomic_load(&S.depth_on))
             continue;
@@ -2156,6 +2200,17 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetZipModel(JNIEnv *env, jclass c
         strncpy(S.zip_model, p, sizeof S.zip_model - 1);
         (*env)->ReleaseStringUTFChars(env, path, p);
     }
+}
+
+/* Battery temperature in deci-Celsius from the Kotlin health loop (sticky
+ * ACTION_BATTERY_CHANGED) — the depth worker's thermal-governor input. The
+ * PowerManager thermal status is ALSO passed but this vendor never raises it
+ * (stays 0 while visibly throttling), so battery temp is the working signal. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetThermal(JNIEnv *env, jclass cls,
+                                                          jint deci_c, jint status) {
+    (void)env; (void)cls; (void)status;
+    atomic_store(&BATT_DECIC, (int)deci_c);
 }
 
 /* Directory of the device-pulled QNN FastRPC/DSP libs (libcdsprpc.so + the DSP
