@@ -29,9 +29,13 @@ object XrealNative {
     external fun nativeSetShowPoints(on: Boolean)
 
     /** Enable/disable stereo depth computation (tracking keeps running). */
-    /** Depth mode: 0 = off (no depth processing at all), 1 = NPU model
-     *  (LiteAnyStereo, SGM fallback if unavailable), 2 = SGM forced. */
+    /** Depth mode: 0 = off (no depth processing at all), 1 = NPU fast
+     *  (192x256, ~30 ms), 2 = NPU MID (288x384, ~70 ms demo tier),
+     *  3 = SGM forced. NPU modes fall back to SGM if unavailable. */
     external fun nativeSetDepth(mode: Int)
+
+    /** Path of the staged MID-tier (288x384) depth model. */
+    external fun nativeSetZipModelMid(path: String)
 
     /**
      * Glasses eye-view mode: 0 = camera passthrough, 1 = depth passthrough

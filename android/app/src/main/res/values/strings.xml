@@ -23,6 +23,7 @@
     <string name="desc_xfeat_na">XFeat!</string>
     <!-- depth source cycle (shows the CURRENT source) -->
     <string name="dep_npu">Dep:NPU</string>
+    <string name="dep_npu_mid">Dep:NPU+</string>
     <string name="dep_sgm">Dep:SGM</string>
     <string name="dep_off">Dep:Off</string>
     <!-- glasses eye-view mode (shows the CURRENT mode) -->

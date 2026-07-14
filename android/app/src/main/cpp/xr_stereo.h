@@ -25,7 +25,11 @@ enum {
      * old rectify-to-480x640 + bilinear-downsample two-step: ~2-3.5 ms/pass
      * cheaper, sharper (single filtering), and it exactly matches how the
      * quantization calibration data was rectified. */
-    ZDR_W = (XS_W * 4) / 5, ZDR_H = (XS_H * 4) / 5  /* 192x256 */
+    ZDR_W = (XS_W * 4) / 5, ZDR_H = (XS_H * 4) / 5,  /* 192x256 */
+    /* MID depth-net rectify (demo quality tier): same virtual camera at
+     * 288x384 (f=240) for the NPU+ model — ~2.25x the pixels of the fast
+     * tier, ~65-72 ms/pass on the HTP. */
+    ZDR2_W = (XS_W * 6) / 5, ZDR2_H = (XS_H * 6) / 5  /* 288x384 */
 };
 
 typedef struct {
@@ -43,6 +47,11 @@ typedef struct {
     uint16_t mapx_hi[2][ZDR_W * ZDR_H];
     uint16_t mapy_hi[2][ZDR_W * ZDR_H];
     uint8_t rect_hi[2][ZDR_W * ZDR_H];
+
+    /* MID-tier rectify (288x384) for the NPU+ model */
+    uint16_t mapx_mid[2][ZDR2_W * ZDR2_H];
+    uint16_t mapy_mid[2][ZDR2_W * ZDR2_H];
+    uint8_t rect_mid[2][ZDR2_W * ZDR2_H];
 
     /* scratch (large — the owner should be static/heap, not stack) */
     uint64_t census[2][XS_W * XS_H];
@@ -72,6 +81,9 @@ void xr_stereo_rectify(xr_stereo *s, int cam, const uint8_t *src);
  * into s->rect_hi[cam] (bilinear) — the direct inputs for the stereo depth net.
  * `src` is that camera's 480x640 descrambled image (same buffer as rectify). */
 void xr_stereo_rectify_hi(xr_stereo *s, int cam, const uint8_t *src);
+
+/* Same at the MID tier (ZDR2_W x ZDR2_H) into s->rect_mid[cam]. */
+void xr_stereo_rectify_mid(xr_stereo *s, int cam, const uint8_t *src);
 
 /* Compute the disparity map from the rectified pair (call
  * xr_stereo_rectify for both cameras first).

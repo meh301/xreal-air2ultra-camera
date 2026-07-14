@@ -112,7 +112,8 @@ static struct {
      * the same data flow (see docs/VSLAM.md). */
     pthread_t slam_thread;
     pthread_t depth_thread;                 /* SGM / ZipDepth, off the SLAM thread */
-    char zip_model[256];                    /* ZipDepth ONNX path (empty = SGM) */
+    char zip_model[256];                    /* LAS2 fast-tier model path (empty = SGM) */
+    char zip_model_mid[256];                /* LAS2 MID-tier (288x384) model path */
     char qnn_dsp_dir[256];                  /* device FastRPC/DSP libs (QNN HTP) */
     atomic_int slam_running;
     pthread_mutex_t slam_lock;
@@ -1453,23 +1454,35 @@ static void *depth_worker(void *arg) {
          * -> disparity -> depth = f*baseline/disp. No monocular model, no anchors,
          * no calibration; writes disp_local (quarter-pixel disparity) so the
          * colorize/publish path below is unchanged. Falls back to SGM
-         * (xr_stereo_depth) when the NPU/model isn't available. Dormant until the
-         * model is staged (S.zip_model = the staged EPContext .onnx).
+         * (xr_stereo_depth) when the NPU/model isn't available. TWO NPU tiers
+         * (demo quality ladder): mode 1 = fast 192x256 (~28-32 ms), mode 2 =
+         * MID 288x384 (~65-72 ms), mode 3 = SGM forced. Per-model u16 quant
+         * scales come from each context's qnn-context-binary-utility meta.
          *
-         * Decide the path FIRST and rectify only what it consumes: the NPU path
-         * reads rect_hi only, SGM reads the lo-res rect only — rectifying all
-         * four every pass wasted 0.3-3 ms. t0 covers the full pass (rectify ->
-         * publish) so depthDuty reports the true thermal-relevant cost. */
-        int depth_mode = atomic_load(&S.depth_on);  /* 1 = NPU, 2 = SGM forced */
+         * Decide the path FIRST and rectify only what it consumes; t0 covers
+         * the full pass (rectify -> publish) so depthDuty reports true cost. */
+        int depth_mode = atomic_load(&S.depth_on); /* 1 NPU / 2 NPU+ / 3 SGM */
+        int slot = depth_mode == 2 ? XR_LAS2_MID : XR_LAS2_FAST;
+        const char *mpath = slot == XR_LAS2_MID ? S.zip_model_mid : S.zip_model;
         static int zd_try;                          /* throttle model re-init */
-        if (depth_mode == 1 && !xr_las2_available() && S.zip_model[0] &&
+        if (depth_mode <= 2 && !xr_las2_available(slot) && mpath[0] &&
             (zd_try++ % 90) == 0)
-            xr_las2_init(S.zip_model, S.qnn_dsp_dir);
-        int use_npu = depth_mode == 1 && xr_las2_available();
+            xr_las2_init(slot, mpath, S.qnn_dsp_dir,
+                         slot == XR_LAS2_MID ? ZDR2_W : ZDR_W,
+                         slot == XR_LAS2_MID ? ZDR2_H : ZDR_H,
+                         0.0038910505827516317f,    /* in: raw/255-range u16 */
+                         slot == XR_LAS2_MID ? 0.0016926401294767857f
+                                             : 0.0010810059029608965f);
+        int use_npu = depth_mode <= 2 && xr_las2_available(slot);
         int64_t t0 = now_ms();
         if (use_npu) {
-            xr_stereo_rectify_hi(st, 0, in0);   /* full-res pair for the NPU */
-            xr_stereo_rectify_hi(st, 1, in1);
+            if (slot == XR_LAS2_MID) {
+                xr_stereo_rectify_mid(st, 0, in0);  /* 288x384 pair */
+                xr_stereo_rectify_mid(st, 1, in1);
+            } else {
+                xr_stereo_rectify_hi(st, 0, in0);   /* 192x256 pair */
+                xr_stereo_rectify_hi(st, 1, in1);
+            }
         } else {
             xr_stereo_rectify(st, 0, in0);      /* lo-res pair for SGM */
             xr_stereo_rectify(st, 1, in1);
@@ -1477,10 +1490,14 @@ static void *depth_worker(void *arg) {
         int used_zip = 0;
         if (use_npu) {
             static float metric[XS_W * XS_H];
-            /* model-res rectified focal (160): rect_hi is built directly at the
-             * model's 192x256 input size, one resample from the sensor */
-            float f_hi = st->f_rect * (float)ZDR_W / (float)XS_W;
-            if (xr_las2_run(st->rect_hi[0], st->rect_hi[1], f_hi,
+            const uint8_t *L = slot == XR_LAS2_MID ? st->rect_mid[0]
+                                                   : st->rect_hi[0];
+            const uint8_t *Rr = slot == XR_LAS2_MID ? st->rect_mid[1]
+                                                    : st->rect_hi[1];
+            /* rectified focal at the model resolution (160 fast / 240 mid) */
+            float f_model = st->f_rect *
+                (float)(slot == XR_LAS2_MID ? ZDR2_W : ZDR_W) / (float)XS_W;
+            if (xr_las2_run(slot, L, Rr, f_model,
                             st->baseline_m, metric, XS_W, XS_H) == 0) {
                 /* metric depth -> quarter-pixel disparity for the display path */
                 float fbs = st->f_rect * st->baseline_m * (float)XS_SCALE;
@@ -2334,15 +2351,16 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetShowPoints(JNIEnv *env, jclass
 }
 
 /* Stereo depth mode: 0 = OFF (no depth processing at all — the producer skips
- * the DEPTH_BOX copy and the worker sits in cond_wait), 1 = NPU model
- * (LiteAnyStereo; falls back to SGM if the model/backend is unavailable),
- * 2 = SGM forced (classic CPU stereo). The tracker keeps running in all modes. */
+ * the DEPTH_BOX copy and the worker sits in cond_wait), 1 = NPU fast model
+ * (LiteAnyStereo 192x256, ~28-32 ms), 2 = NPU MID model (288x384, ~65-72 ms,
+ * demo quality tier), 3 = SGM forced (classic CPU stereo). NPU modes fall back
+ * to SGM if the model/backend is unavailable. Tracker runs in all modes. */
 JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetDepth(JNIEnv *env, jclass cls,
                                                         jint mode) {
     (void)env; (void)cls;
     if (mode > 0) {
-        atomic_store(&S.depth_on, mode > 2 ? 1 : (int)mode);
+        atomic_store(&S.depth_on, mode > 3 ? 1 : (int)mode);
         atomic_fetch_add(&DEPTH_GEN, 1);   /* cancel any stale in-flight job */
         return;
     }
@@ -2452,8 +2470,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetXfeatModel(JNIEnv *env, jclass
     if (p) (*env)->ReleaseStringUTFChars(env, path, p);
 }
 
-/* Path of the staged ZipDepth ONNX model. Empty/unset -> the depth worker
- * stays on SGM. The depth worker inits it (off the UI thread) on first use. */
+/* Path of the staged fast-tier (192x256) depth model. Empty/unset -> the depth
+ * worker stays on SGM. The worker inits it (off the UI thread) on first use. */
 JNIEXPORT void JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeSetZipModel(JNIEnv *env, jclass cls,
                                                            jstring path) {
@@ -2463,6 +2481,21 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetZipModel(JNIEnv *env, jclass c
     const char *p = (*env)->GetStringUTFChars(env, path, NULL);
     if (p) {
         strncpy(S.zip_model, p, sizeof S.zip_model - 1);
+        (*env)->ReleaseStringUTFChars(env, path, p);
+    }
+}
+
+/* Path of the staged MID-tier (288x384) depth model for the Dep:NPU+ mode. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetZipModelMid(JNIEnv *env,
+                                                              jclass cls,
+                                                              jstring path) {
+    (void)cls;
+    S.zip_model_mid[0] = 0;
+    if (!path) return;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (p) {
+        strncpy(S.zip_model_mid, p, sizeof S.zip_model_mid - 1);
         (*env)->ReleaseStringUTFChars(env, path, p);
     }
 }

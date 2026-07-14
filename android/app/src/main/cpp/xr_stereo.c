@@ -101,33 +101,38 @@ void xr_stereo_init(xr_stereo *s,
         }
     }
 
-    /* Model-res rectify maps for the stereo depth net: BOTH cameras DIRECTLY
-     * at ZDR_W x ZDR_H (192x256), same virtual camera as the 240x320 pair
-     * (focal scales with resolution so the FOV is identical). One resample
-     * from the sensor — replaces the old 480x640 rectify + downsample two-step
-     * and matches the quantization calibration exactly. [0]=left=cams[0],
-     * [1]=right=cams[1]. mapx_hi==0xFFFF marks an invalid (out-of-fisheye)
-     * pixel -- valid u*16 tops out at 479*16=7664, well clear. */
-    float f_hi = F_RECT * (float)ZDR_W / (float)XS_W;   /* = 160, FOV-preserving */
-    float cx_hi = (ZDR_W - 1) * 0.5f, cy_hi = (ZDR_H - 1) * 0.5f;
-    for (int c = 0; c < 2; c++) {
-        for (int y = 0; y < ZDR_H; y++) {
-            for (int x = 0; x < ZDR_W; x++) {
-                float rr[3] = { (x - cx_hi) / f_hi, (y - cy_hi) / f_hi, 1.0f };
-                float ray_imu[3] = {
-                    s->R_rect_imu[0] * rr[0] + s->R_rect_imu[1] * rr[1] + s->R_rect_imu[2] * rr[2],
-                    s->R_rect_imu[3] * rr[0] + s->R_rect_imu[4] * rr[1] + s->R_rect_imu[5] * rr[2],
-                    s->R_rect_imu[6] * rr[0] + s->R_rect_imu[7] * rr[1] + s->R_rect_imu[8] * rr[2],
-                };
-                size_t i = (size_t)y * ZDR_W + x;
-                float u, v;
-                s->mapx_hi[c][i] = 0xFFFF;
-                s->mapy_hi[c][i] = 0;
-                if (xr_align_project(cams[c], variant, ray_imu, &u, &v) == 0 &&
-                    u >= 0.0f && u < XR_OW - 1.001f &&
-                    v >= 0.0f && v < XR_OH - 1.001f) {
-                    s->mapx_hi[c][i] = (uint16_t)(u * 16.0f);
-                    s->mapy_hi[c][i] = (uint16_t)(v * 16.0f);
+    /* Model-res rectify maps for the stereo depth nets: BOTH cameras DIRECTLY
+     * at each net's input size (192x256 fast tier, 288x384 MID tier), same
+     * virtual camera as the 240x320 pair (focal scales with resolution so the
+     * FOV is identical). One resample from the sensor — no downsample
+     * two-step — and it matches the quantization calibration exactly.
+     * [0]=left=cams[0], [1]=right=cams[1]. mapx==0xFFFF marks an invalid
+     * (out-of-fisheye) pixel -- valid u*16 tops out at 479*16=7664. */
+    for (int tier = 0; tier < 2; tier++) {
+        int w = tier ? ZDR2_W : ZDR_W, h = tier ? ZDR2_H : ZDR_H;
+        float f_net = F_RECT * (float)w / (float)XS_W;   /* 160 / 240 */
+        float cx = (w - 1) * 0.5f, cy = (h - 1) * 0.5f;
+        for (int c = 0; c < 2; c++) {
+            uint16_t *mapx = tier ? s->mapx_mid[c] : s->mapx_hi[c];
+            uint16_t *mapy = tier ? s->mapy_mid[c] : s->mapy_hi[c];
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    float rr[3] = { (x - cx) / f_net, (y - cy) / f_net, 1.0f };
+                    float ray_imu[3] = {
+                        s->R_rect_imu[0] * rr[0] + s->R_rect_imu[1] * rr[1] + s->R_rect_imu[2] * rr[2],
+                        s->R_rect_imu[3] * rr[0] + s->R_rect_imu[4] * rr[1] + s->R_rect_imu[5] * rr[2],
+                        s->R_rect_imu[6] * rr[0] + s->R_rect_imu[7] * rr[1] + s->R_rect_imu[8] * rr[2],
+                    };
+                    size_t i = (size_t)y * w + x;
+                    float u, v;
+                    mapx[i] = 0xFFFF;
+                    mapy[i] = 0;
+                    if (xr_align_project(cams[c], variant, ray_imu, &u, &v) == 0 &&
+                        u >= 0.0f && u < XR_OW - 1.001f &&
+                        v >= 0.0f && v < XR_OH - 1.001f) {
+                        mapx[i] = (uint16_t)(u * 16.0f);
+                        mapy[i] = (uint16_t)(v * 16.0f);
+                    }
                 }
             }
         }
@@ -148,19 +153,29 @@ void xr_stereo_rectify(xr_stereo *s, int c, const uint8_t *src) {
     }
 }
 
-/* full-res rectify of camera `cam` for the stereo depth net (0xFFFF = invalid) */
-void xr_stereo_rectify_hi(xr_stereo *s, int cam, const uint8_t *src) {
-    uint8_t *dst = s->rect_hi[cam];
-    for (size_t i = 0; i < (size_t)ZDR_W * ZDR_H; i++) {
-        uint32_t mx = s->mapx_hi[cam][i];
+/* model-res rectify for the stereo depth nets (0xFFFF = invalid) */
+static void rectify_net(const uint16_t *mapx, const uint16_t *mapy,
+                        size_t n, const uint8_t *src, uint8_t *dst) {
+    for (size_t i = 0; i < n; i++) {
+        uint32_t mx = mapx[i];
         if (mx == 0xFFFF) { dst[i] = 0; continue; }
-        uint32_t my = s->mapy_hi[cam][i];
+        uint32_t my = mapy[i];
         uint32_t fx = mx & 15, fy = my & 15;
         const uint8_t *p = src + (my >> 4) * XR_OW + (mx >> 4);
         uint32_t a = p[0] * (16 - fx) + p[1] * fx;
         uint32_t b = p[XR_OW] * (16 - fx) + p[XR_OW + 1] * fx;
         dst[i] = (uint8_t)((a * (16 - fy) + b * fy + 128) >> 8);
     }
+}
+
+void xr_stereo_rectify_hi(xr_stereo *s, int cam, const uint8_t *src) {
+    rectify_net(s->mapx_hi[cam], s->mapy_hi[cam],
+                (size_t)ZDR_W * ZDR_H, src, s->rect_hi[cam]);
+}
+
+void xr_stereo_rectify_mid(xr_stereo *s, int cam, const uint8_t *src) {
+    rectify_net(s->mapx_mid[cam], s->mapy_mid[cam],
+                (size_t)ZDR2_W * ZDR2_H, src, s->rect_mid[cam]);
 }
 
 /* 9x7 census transform (62 neighbours -> 62-bit signature); border rows and

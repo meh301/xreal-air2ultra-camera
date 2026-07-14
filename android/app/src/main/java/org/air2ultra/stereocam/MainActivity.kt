@@ -354,13 +354,14 @@ class MainActivity : Activity() {
             if (useXfeat != prev) poseMap.reset()
         }
         val depLabels = intArrayOf(R.string.dep_off, R.string.dep_npu,
-                                   R.string.dep_sgm)
+                                   R.string.dep_npu_mid, R.string.dep_sgm)
         val depButton = findViewById<Button>(R.id.toggle_depth)
         depButton.text = getString(depLabels[depthMode])  // native default: off
         depButton.setOnClickListener {
-            // depth source: off -> NPU model -> SGM -> off. Off does NO depth
-            // processing at all (producer + worker both idle).
-            depthMode = (depthMode + 1) % 3
+            // depth source ladder: off -> NPU fast (192, ~30ms) -> NPU+ mid
+            // (288, ~70ms) -> SGM (CPU) -> off. Off does NO depth processing
+            // at all (producer + worker both idle).
+            depthMode = (depthMode + 1) % 4
             XrealNative.nativeSetDepth(depthMode)
             depButton.text = getString(depLabels[depthMode])
         }
@@ -578,6 +579,15 @@ class MainActivity : Activity() {
             android.util.Log.i("xrealcam", "LiteAnyStereo model staged: ${model.absolutePath}")
         } catch (e: Exception) {
             android.util.Log.i("xrealcam", "LiteAnyStereo model absent (SGM depth): $e")
+        }
+        // MID-tier (288x384) depth model for the Dep:NPU+ demo mode
+        try {
+            val model = java.io.File(filesDir, "las2_mid_ctx.onnx")
+            stage("las2_mid_ctx.onnx", model)
+            XrealNative.nativeSetZipModelMid(model.absolutePath)
+            android.util.Log.i("xrealcam", "LiteAnyStereo MID model staged: ${model.absolutePath}")
+        } catch (e: Exception) {
+            android.util.Log.i("xrealcam", "LiteAnyStereo MID model absent: $e")
         }
         try { stageMarker.writeText(apkStamp.toString()) } catch (_: Exception) {}
         // Stage any Hexagon DSP libs from assets/qnn_dsp -> files/qnn_dsp and put
