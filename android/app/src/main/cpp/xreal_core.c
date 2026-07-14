@@ -3,6 +3,12 @@
 
 #include <string.h>
 
+#if defined(__aarch64__)
+#include <arm_neon.h>   /* hot loops vectorized below; scalar fallback kept.
+                         * Row width 480 and totals are multiples of 16, so
+                         * no tail handling is needed anywhere. */
+#endif
+
 /* block reorder table, discovered by github.com/mazeasdamien/myXreal */
 static const uint8_t REORDER[XR_NB] = {
     119, 54, 21, 0, 108, 22, 51, 63, 93, 99, 67, 7, 32, 112, 52, 43,
@@ -46,7 +52,12 @@ xr_order xr_classify(const uint8_t *flat) {
 }
 
 void xr_unswap16(uint8_t *flat, size_t n) {
-    for (size_t i = 0; i + 1 < n; i += 2) {
+    size_t i = 0;
+#if defined(__aarch64__)
+    for (; i + 16 <= n; i += 16)
+        vst1q_u8(flat + i, vrev16q_u8(vld1q_u8(flat + i)));
+#endif
+    for (; i + 1 < n; i += 2) {
         uint8_t a = flat[i];
         flat[i] = flat[i + 1];
         flat[i + 1] = a;
@@ -136,7 +147,18 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
     float pref[XR_OH + 1];   /* fits the longer axis */
     float buf[XR_OH];
 
+#if defined(__aarch64__)
+    for (int i = 0; i < XR_OW * XR_OH; i += 16) {   /* u8 -> f32, 16 px/iter */
+        uint8x16_t b = vld1q_u8(in + i);
+        uint16x8_t lo = vmovl_u8(vget_low_u8(b)), hi = vmovl_u8(vget_high_u8(b));
+        vst1q_f32(g_f + i,      vcvtq_f32_u32(vmovl_u16(vget_low_u16(lo))));
+        vst1q_f32(g_f + i + 4,  vcvtq_f32_u32(vmovl_u16(vget_high_u16(lo))));
+        vst1q_f32(g_f + i + 8,  vcvtq_f32_u32(vmovl_u16(vget_low_u16(hi))));
+        vst1q_f32(g_f + i + 12, vcvtq_f32_u32(vmovl_u16(vget_high_u16(hi))));
+    }
+#else
     for (int i = 0; i < XR_OW * XR_OH; i++) g_f[i] = in[i];
+#endif
 
     /* column FPN is static: re-estimate the EMA'd stripe only every 3rd frame,
      * and FREEZE once converged — it converges after ~15 estimates and then
@@ -178,7 +200,13 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
     c->frame_count++;
     for (int y = 0; y < XR_OH; y++) {
         float *row = g_f + y * XR_OW;
+#if defined(__aarch64__)
+        for (int x = 0; x < XR_OW; x += 4)
+            vst1q_f32(row + x, vsubq_f32(vld1q_f32(row + x),
+                                         vld1q_f32(c->stripe + x)));
+#else
         for (int x = 0; x < XR_OW; x++) row[x] -= c->stripe[x];
+#endif
     }
 
     /* vertical high-pass. The naive form loops columns-outer and strides down
@@ -193,7 +221,14 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
         const float *row = g_f + (size_t)y * XR_OW;
         const float *pp = g_cp + (size_t)y * XR_OW;          /* g_cp[y]   */
         float *pc = g_cp + (size_t)(y + 1) * XR_OW;          /* g_cp[y+1] */
+#if defined(__aarch64__)
+        for (int x = 0; x < XR_OW; x += 4)                   /* columns are
+            independent: lanes keep the per-column accumulation order, so the
+            sums stay bit-identical to the scalar loop */
+            vst1q_f32(pc + x, vaddq_f32(vld1q_f32(pp + x), vld1q_f32(row + x)));
+#else
         for (int x = 0; x < XR_OW; x++) pc[x] = pp[x] + row[x];
+#endif
     }
     for (int y = 0; y < XR_OH; y++) {
         int lo = y - R < 0 ? 0 : y - R;
@@ -203,19 +238,49 @@ void xr_clean(xr_cleaner *c, const uint8_t *in, uint8_t *out,
         const float *row = g_f + (size_t)y * XR_OW;
         float *hp = g_hp + (size_t)y * XR_OW;
         float denom = (float)(hi - lo + 1);
+#if defined(__aarch64__)
+        float32x4_t vd = vdupq_n_f32(denom);                 /* true division
+            (vdivq), not reciprocal-multiply: bit-identical to scalar */
+        for (int x = 0; x < XR_OW; x += 4)
+            vst1q_f32(hp + x,
+                      vsubq_f32(vld1q_f32(row + x),
+                                vdivq_f32(vsubq_f32(vld1q_f32(phi + x),
+                                                    vld1q_f32(plo + x)), vd)));
+#else
         for (int x = 0; x < XR_OW; x++)
             hp[x] = row[x] - (phi[x] - plo[x]) / denom;
+#endif
     }
     for (int y = 0; y < XR_OH; y++) {
         memcpy(buf, g_hp + y * XR_OW, XR_OW * sizeof(float));
         float m = select_kth(buf, XR_OW, XR_OW / 2);
         float *row = g_f + y * XR_OW;
+#if defined(__aarch64__)
+        float32x4_t vm = vdupq_n_f32(m);
+        for (int x = 0; x < XR_OW; x += 4)
+            vst1q_f32(row + x, vsubq_f32(vld1q_f32(row + x), vm));
+#else
         for (int x = 0; x < XR_OW; x++) row[x] -= m;
+#endif
     }
 
+#if defined(__aarch64__)
+    for (int i = 0; i < XR_OW * XR_OH; i += 16) {  /* clamp+narrow, 16 px/iter:
+            vcvtq_u32_f32 truncates toward zero exactly like the C cast */
+        float32x4_t z = vdupq_n_f32(0.0f), m255 = vdupq_n_f32(255.0f);
+        uint32x4_t a = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vld1q_f32(g_f + i),      z), m255));
+        uint32x4_t b = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vld1q_f32(g_f + i + 4),  z), m255));
+        uint32x4_t c2 = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vld1q_f32(g_f + i + 8), z), m255));
+        uint32x4_t d = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vld1q_f32(g_f + i + 12), z), m255));
+        uint16x8_t lo16 = vcombine_u16(vmovn_u32(a), vmovn_u32(b));
+        uint16x8_t hi16 = vcombine_u16(vmovn_u32(c2), vmovn_u32(d));
+        vst1q_u8(out + i, vcombine_u8(vmovn_u16(lo16), vmovn_u16(hi16)));
+    }
+#else
     for (int i = 0; i < XR_OW * XR_OH; i++) {
         float v = g_f[i];
         out[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
     }
+#endif
     if (do_equalize) xr_equalize(out, out, XR_OW * XR_OH);
 }

@@ -10,6 +10,10 @@
 #include <jni.h>
 #include <math.h>
 #include <pthread.h>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -330,11 +334,19 @@ static void compose(int counter, uint64_t exposure_ts) {
     for (int y = 0; y < XR_OH; y++) {
         uint8_t *dst = S.rgba + (size_t)y * S.cw * 4;
         const uint8_t *s = S.clean[1] + y * XR_OW;
+#if defined(__aarch64__)
+        for (int x = 0; x < XR_OW; x += 16) {   /* gray -> RGBA, 16 px/iter */
+            uint8x16_t v = vld1q_u8(s + x);
+            uint8x16x4_t px = { { v, v, v, vdupq_n_u8(0xFF) } };
+            vst4q_u8(dst + (size_t)x * 4, px);
+        }
+#else
         for (int x = 0; x < XR_OW; x++) {
             uint8_t v = s[x];
             dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 0xFF;
             dst += 4;
         }
+#endif
     }
     /* tracked features: green = Basalt's own optical-flow keypoints,
      * orange = the built-in fallback tracker (Basalt not loaded) */
@@ -361,11 +373,19 @@ static void compose(int counter, uint64_t exposure_ts) {
         for (int y = 0; y < XR_OH; y++) {
             uint8_t *dst = S.rgba + ((size_t)y * S.cw + XR_OW) * 4;
             const uint8_t *sr = S.clean[0] + y * XR_OW;
+#if defined(__aarch64__)
+            for (int x = 0; x < XR_OW; x += 16) {
+                uint8x16_t v = vld1q_u8(sr + x);
+                uint8x16x4_t px = { { v, v, v, vdupq_n_u8(0xFF) } };
+                vst4q_u8(dst + (size_t)x * 4, px);
+            }
+#else
             for (int x = 0; x < XR_OW; x++) {
                 uint8_t v = sr[x];
                 dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 0xFF;
                 dst += 4;
             }
+#endif
         }
         /* the same landmarks as observed by the right camera */
         if (atomic_load(&S.show_pts) && S.pts_src) {
@@ -864,20 +884,59 @@ static void prop_correct(const float q[4], const float p[3],
         pthread_mutex_unlock(&S.imu_lock);
         return;
     }
+    /* Replay OUTSIDE the lock: the ring replay is up to 1024 trig-heavy
+     * dead_reckon steps (~100-500 us) and used to run entirely inside
+     * S.imu_lock at 30 Hz, stalling the 1 kHz IMU producer (a non-PI mutex —
+     * a preempted holder blocks the -10 thread). Snapshot the prop clock,
+     * gravity, and the ring span under the lock (entries are append-only, so
+     * a copied span can't be wrap-clobbered mid-replay), drop the lock for
+     * the trig, then re-acquire and finish the few samples that landed while
+     * we computed — bounded, so the result matches the locked version. */
+    uint64_t prop_ts = S.prop.ts;
+    float g_snap[3];
+    memcpy(g_snap, S.prop.g, sizeof g_snap);
+    static xr_imu_sample snap[1024];           /* slam worker thread only */
+    uint32_t head = S.ring_head;
+    uint32_t n = head - S.ring_tail;
+    if (n > 1024) n = 1024;
+    for (uint32_t i = 0; i < n; i++)
+        snap[i] = S.ring[(head - n + i) % 1024];
+    pthread_mutex_unlock(&S.imu_lock);
+
     float qv[4], pv[3], vv[3];
     memcpy(qv, q, sizeof qv);
     memcpy(pv, p, sizeof pv);
     memcpy(vv, v, sizeof vv);
     uint64_t t_prev = ts;
-    uint32_t n = S.ring_head - S.ring_tail;
-    if (n > 1024) n = 1024;
-    for (uint32_t k = S.ring_head - n; k != S.ring_head; k++) {
-        const xr_imu_sample *sp = &S.ring[k % 1024];
-        if (sp->ts_ns <= t_prev || sp->ts_ns > S.prop.ts) continue;
+    for (uint32_t i = 0; i < n; i++) {
+        const xr_imu_sample *sp = &snap[i];
+        if (sp->ts_ns <= t_prev || sp->ts_ns > prop_ts) continue;
         float dt = (float)(sp->ts_ns - t_prev) * 1e-9f;
         t_prev = sp->ts_ns;
         if (dt > 0.05f) continue;              /* gap: skip, keep time */
-        dead_reckon(qv, pv, vv, S.prop.g, sp, dt);
+        dead_reckon(qv, pv, vv, g_snap, sp, dt);
+    }
+
+    pthread_mutex_lock(&S.imu_lock);
+    if (!S.prop.valid) {                       /* reset raced us: drop */
+        pthread_mutex_unlock(&S.imu_lock);
+        return;
+    }
+    /* catch-up: replay the handful of samples the 1 kHz producer appended
+     * while we were unlocked (prop_ts .. current S.prop.ts) — a few steps at
+     * most, so the lock hold stays microseconds. */
+    if (S.prop.ts > prop_ts) {
+        uint32_t h2 = S.ring_head;
+        uint32_t n2 = h2 - S.ring_tail;
+        if (n2 > 1024) n2 = 1024;
+        for (uint32_t i = 0; i < n2; i++) {
+            const xr_imu_sample *sp = &S.ring[(h2 - n2 + i) % 1024];
+            if (sp->ts_ns <= t_prev || sp->ts_ns > S.prop.ts) continue;
+            float dt = (float)(sp->ts_ns - t_prev) * 1e-9f;
+            t_prev = sp->ts_ns;
+            if (dt > 0.05f) continue;
+            dead_reckon(qv, pv, vv, S.prop.g, sp, dt);
+        }
     }
     /* world-side difference vs the propagated state */
     float qi[4] = { S.prop.q[0], -S.prop.q[1], -S.prop.q[2], -S.prop.q[3] };
@@ -1715,6 +1774,57 @@ static int imu_enable(void) {
     return rc;
 }
 
+/* ---- async IMU delivery --------------------------------------------------
+ * The old synchronous libusb_interrupt_transfer kept exactly ONE URB in
+ * flight: after each completion the endpoint had nothing queued until the
+ * worker looped back, and completions were serviced by libusb's nice-0 event
+ * thread — the -10 worker priority never covered the DELIVERY path. Result:
+ * the logged 9.8 ms IMU arrival gaps (= frozen AR pose during rotation).
+ * Now IMU_URBS interrupt transfers are always queued at the endpoint; the
+ * event-thread callback copies each report into a SPSC ring and re-submits
+ * immediately, and the worker consumes at -10. The callback also one-shot
+ * raises the event thread itself to -6 (it delivers the camera stream too). */
+enum { IMU_URBS = 4, IMU_RAWN = 128 };
+static struct libusb_transfer *IMU_XFER[IMU_URBS];  /* alloc once, refilled */
+static uint8_t IMU_XBUF[IMU_URBS][XR_IMU_REPORT];
+static struct { uint8_t d[XR_IMU_REPORT]; int len; } IMU_RAWQ[IMU_RAWN];
+static atomic_uint IMU_RAW_HEAD, IMU_RAW_TAIL;      /* event thread -> worker */
+static atomic_int IMU_XFER_ERR;
+static pthread_mutex_t IMU_RAW_MX = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t IMU_RAW_CV = PTHREAD_COND_INITIALIZER;
+
+static void imu_xfer_cb(struct libusb_transfer *t) {
+    static int prio_set;                             /* event thread only */
+    if (!prio_set) {
+        if (setpriority(PRIO_PROCESS, (id_t)gettid(), -6) == 0)
+            LOGI("USB event thread priority raised (-6)");
+        prio_set = 1;
+    }
+    if (!atomic_load(&S.imu_running)) return;        /* stopping: no resubmit */
+    if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0) {
+        uint32_t h = atomic_load_explicit(&IMU_RAW_HEAD, memory_order_relaxed);
+        if (h - atomic_load_explicit(&IMU_RAW_TAIL, memory_order_acquire)
+                < IMU_RAWN) {
+            int n = t->actual_length > XR_IMU_REPORT ? XR_IMU_REPORT
+                                                     : t->actual_length;
+            memcpy(IMU_RAWQ[h % IMU_RAWN].d, t->buffer, (size_t)n);
+            IMU_RAWQ[h % IMU_RAWN].len = n;
+            atomic_store_explicit(&IMU_RAW_HEAD, h + 1, memory_order_release);
+            pthread_mutex_lock(&IMU_RAW_MX);
+            pthread_cond_signal(&IMU_RAW_CV);
+            pthread_mutex_unlock(&IMU_RAW_MX);
+        }                                            /* ring full: drop */
+    } else if (t->status != LIBUSB_TRANSFER_TIMED_OUT) {
+        atomic_store(&IMU_XFER_ERR, (int)t->status); /* fatal: park this URB */
+        pthread_mutex_lock(&IMU_RAW_MX);
+        pthread_cond_signal(&IMU_RAW_CV);
+        pthread_mutex_unlock(&IMU_RAW_MX);
+        return;
+    }
+    if (libusb_submit_transfer(t) != 0)
+        atomic_store(&IMU_XFER_ERR, LIBUSB_ERROR_IO);
+}
+
 static void *imu_worker(void *arg) {
     (void)arg;
     uint8_t buf[XR_IMU_REPORT];
@@ -1730,10 +1840,31 @@ static void *imu_worker(void *arg) {
     double tel_sum = 0, tel_max = 0;
     int tel_n = 0, tel_bursts = 0;
     while (atomic_load(&S.imu_running)) {
-        int got = 0;
-        int rc = libusb_interrupt_transfer(S.usb, S.imu_ep_in, buf, sizeof buf,
-                                           &got, 500);
-        if (rc == LIBUSB_ERROR_TIMEOUT || (rc == 0 && got == 0)) {
+        /* consume from the async delivery ring; 500 ms without a report is
+         * the old sync-timeout stall path, preserved exactly */
+        uint32_t tail = atomic_load_explicit(&IMU_RAW_TAIL, memory_order_relaxed);
+        if (atomic_load_explicit(&IMU_RAW_HEAD, memory_order_acquire) == tail) {
+            struct timespec until;
+            clock_gettime(CLOCK_REALTIME, &until);
+            until.tv_nsec += 500000000L;
+            if (until.tv_nsec >= 1000000000L) {
+                until.tv_sec++;
+                until.tv_nsec -= 1000000000L;
+            }
+            pthread_mutex_lock(&IMU_RAW_MX);
+            while (atomic_load_explicit(&IMU_RAW_HEAD, memory_order_acquire)
+                       == tail &&
+                   !atomic_load(&IMU_XFER_ERR) &&
+                   atomic_load(&S.imu_running)) {
+                if (pthread_cond_timedwait(&IMU_RAW_CV, &IMU_RAW_MX, &until)
+                        == ETIMEDOUT)
+                    break;
+            }
+            pthread_mutex_unlock(&IMU_RAW_MX);
+        }
+        int xerr = atomic_load(&IMU_XFER_ERR);
+        if (xerr) { LOGE("IMU transfer failed: %d", xerr); break; }
+        if (atomic_load_explicit(&IMU_RAW_HEAD, memory_order_acquire) == tail) {
             stalls++;
             /* one cautious re-enable, then give up quietly — never risk
              * disturbing the camera stream with repeated commands */
@@ -1745,7 +1876,9 @@ static void *imu_worker(void *arg) {
             }
             continue;
         }
-        if (rc < 0) { LOGE("IMU transfer failed: %d", rc); break; }
+        int got = IMU_RAWQ[tail % IMU_RAWN].len;
+        memcpy(buf, IMU_RAWQ[tail % IMU_RAWN].d, (size_t)got);
+        atomic_store_explicit(&IMU_RAW_TAIL, tail + 1, memory_order_release);
         xr_imu_sample s;
         if (xr_imu_parse(buf, (size_t)got, &s) != 0) continue;
         stalls = 0;
@@ -1907,14 +2040,37 @@ static void imu_start(void) {
     memset(&S.prop, 0, sizeof S.prop);
     imu_enable();
     atomic_store(&S.imu_running, 1);
+    /* async URBs: keep IMU_URBS interrupt transfers queued at the endpoint so
+     * a report can always land regardless of worker scheduling (timeout 0 —
+     * the worker's 500 ms ring wait provides the stall detection). */
+    atomic_store(&IMU_RAW_HEAD, 0);
+    atomic_store(&IMU_RAW_TAIL, 0);
+    atomic_store(&IMU_XFER_ERR, 0);
+    for (int i = 0; i < IMU_URBS; i++) {
+        if (!IMU_XFER[i]) IMU_XFER[i] = libusb_alloc_transfer(0);
+        libusb_fill_interrupt_transfer(IMU_XFER[i], S.usb, S.imu_ep_in,
+                                       IMU_XBUF[i], XR_IMU_REPORT,
+                                       imu_xfer_cb, NULL, 0);
+        int src = libusb_submit_transfer(IMU_XFER[i]);
+        if (src != 0) {
+            LOGE("IMU: URB %d submit failed: %d", i, src);
+            atomic_store(&IMU_XFER_ERR, src);   /* worker will log + exit */
+            break;
+        }
+    }
     pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
     imu_started = 1;
 }
 
 static void imu_stop(void) {
     if (imu_started) {
-        atomic_store(&S.imu_running, 0);
+        atomic_store(&S.imu_running, 0);    /* callbacks stop resubmitting */
         pthread_join(S.imu_thread, NULL);   /* fine if the worker already left */
+        for (int i = 0; i < IMU_URBS; i++)
+            if (IMU_XFER[i]) libusb_cancel_transfer(IMU_XFER[i]);
+        usleep(20000);                      /* let cancel callbacks drain on the
+                                             * event thread (they early-return
+                                             * on !imu_running) */
         libusb_release_interface(S.usb, XR_IMU_INTERFACE);
         imu_started = 0;
     }
