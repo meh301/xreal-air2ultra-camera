@@ -544,17 +544,19 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "XFeat staging failed (BAD/TEBLID only): $e")
         }
-        // Stage the ZipDepth model if present; absent -> the depth worker stays
-        // on SGM (the .onnx is dropped in once exported — see zipdepth-plan).
+        // Stage the LiteAnyStereo depth model (an EPContext-wrapped QNN HTP context
+        // binary) if present; absent -> the depth worker stays on SGM. nativeSetZip
+        // Model / S.zip_model just holds "the staged depth-model path" (reused for
+        // LAS2, which replaced the ZipDepth stack — see memory las2-deployment).
         try {
-            val zd = java.io.File(filesDir, "zipdepth.onnx")
-            assets.open("zipdepth.onnx").use { src ->
-                zd.outputStream().use { dst -> src.copyTo(dst) }
+            val model = java.io.File(filesDir, "las2_s_ctx.onnx")
+            assets.open("las2_s_ctx.onnx").use { src ->
+                model.outputStream().use { dst -> src.copyTo(dst) }
             }
-            XrealNative.nativeSetZipModel(zd.absolutePath)
-            android.util.Log.i("xrealcam", "ZipDepth model staged: ${zd.absolutePath}")
+            XrealNative.nativeSetZipModel(model.absolutePath)
+            android.util.Log.i("xrealcam", "LiteAnyStereo model staged: ${model.absolutePath}")
         } catch (e: Exception) {
-            android.util.Log.i("xrealcam", "ZipDepth model absent (SGM depth): $e")
+            android.util.Log.i("xrealcam", "LiteAnyStereo model absent (SGM depth): $e")
         }
         // Stage any Hexagon DSP libs from assets/qnn_dsp -> files/qnn_dsp and put
         // that dir on ADSP_LIBRARY_PATH (nativeSetQnnDspDir). Currently EMPTY: a

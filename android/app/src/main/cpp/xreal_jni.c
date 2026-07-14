@@ -29,6 +29,7 @@
 #include "xr_stereo.h"
 #include "xr_track.h"
 #include "xr_zipdepth.h"
+#include "xr_liteanystereo.h"
 #include "xreal_align.h"
 #include "xreal_core.h"
 #include "xreal_gles.h"
@@ -1266,142 +1267,32 @@ static void *depth_worker(void *arg) {
         }
         xr_stereo_rectify(st, 0, in0);
         xr_stereo_rectify(st, 1, in1);
-        xr_stereo_rectify_hi(st, in0);          /* full-res left for ZipDepth */
+        xr_stereo_rectify_hi(st, 0, in0);       /* full-res left  for LiteAnyStereo */
+        xr_stereo_rectify_hi(st, 1, in1);       /* full-res right for LiteAnyStereo */
         int64_t t0 = now_ms();
 
-        /* Metric depth: ZipDepth (NPU) calibrated to metric via sparse anchors
-         * when the model + ORT are present, else SGM. Both write disp_local
-         * (quarter-pixel disparity) so the colorize/publish path is identical.
-         * Dormant until a model is staged -> today this always runs SGM. */
+        /* Metric depth: LiteAnyStereo V2 (NPU) DIRECTLY from the rectified pair
+         * -> disparity -> depth = f*baseline/disp. No monocular model, no anchors,
+         * no calibration; writes disp_local (quarter-pixel disparity) so the
+         * colorize/publish path below is unchanged. Falls back to SGM
+         * (xr_stereo_depth) when the NPU/model isn't available. Dormant until the
+         * model is staged (S.zip_model = the staged EPContext .onnx). */
         static int zd_try;                          /* throttle model re-init */
-        if (!xr_zipdepth_available() && S.zip_model[0] && (zd_try++ % 90) == 0)
-            xr_zipdepth_init(S.zip_model, S.qnn_dsp_dir);
+        if (!xr_las2_available() && S.zip_model[0] && (zd_try++ % 90) == 0)
+            xr_las2_init(S.zip_model, S.qnn_dsp_dir);
         int used_zip = 0;
-        if (xr_zipdepth_available()) {
-            static float zdepth[XS_W * XS_H], dinv[XS_W * XS_H], metric[XS_W * XS_H];
-            if (xr_zipdepth_run(st->rect_hi, ZDR_W, ZDR_H, zdepth, XS_W, XS_H) == 0) {
+        if (xr_las2_available()) {
+            static float metric[XS_W * XS_H];
+            /* full-res rectified focal (400): the hi-res pair the model consumes */
+            float f_hi = st->f_rect * (float)ZDR_W / (float)XS_W;
+            if (xr_las2_run(st->rect_hi[0], st->rect_hi[1], f_hi,
+                            st->baseline_m, metric, XS_W, XS_H) == 0) {
+                /* metric depth -> quarter-pixel disparity for the display path */
+                float fbs = st->f_rect * st->baseline_m * (float)XS_SCALE;
                 for (int i = 0; i < XS_W * XS_H; i++) {
-                    /* ZipDepth's output is already INVERSE-DEPTH-like (near = HIGH
-                     * ~0.09, far = LOW ~0.005; affine-metric, not metres), so feed
-                     * it to xr_depthcal DIRECTLY -- it fits invz ~= A*s + B, the
-                     * matching LINEAR model (corr with true inv-depth is POSITIVE).
-                     * The old code inverted first (dinv = 1/zdepth): that turned it
-                     * depth-like and forced a hyperbola-to-line fit which (a)
-                     * collapsed the near end, so close objects never read close, and
-                     * (b) with 1/zdepth unbounded (~1000 as zdepth->0) handed the
-                     * far pixels enormous least-squares leverage, so the global fit
-                     * lurched frame-to-frame -- the flashing. Bounded [0,~0.09]
-                     * input -> stable + full-range + correct near. Offline
-                     * (DEPTHTEST): delta1 0.78/0.84/0.92 -> 0.80/0.90/0.94. */
-                    dinv[i] = zdepth[i];             /* model out IS ~inverse-depth */
-                }
-                /* sparse metric anchors: stereo grid (near/mid) + VIO
-                 * landmarks (far, from S.vio under the lock). Grid anchors go
-                 * first [0,na_grid); landmark anchors follow [na_grid,+na_lm). */
-                static xr_anchor anch[ZD_MAX_ANCH];
-                int na_grid = xr_sgrid_match(st->rect[0], st->rect[1], XS_W, XS_H,
-                                             st->f_rect, st->baseline_m,
-                                             anch, ZD_MAX_ANCH);
-                static float lmxyz[XR_SLAM_MAX_FEATURES][3], lq[4], lp[3];
-                pthread_mutex_lock(&S.lock);
-                int n_lm = S.vio_fresh ? S.vio.n_landmarks : 0;
-                if (n_lm > XR_SLAM_MAX_FEATURES) n_lm = XR_SLAM_MAX_FEATURES;
-                if (n_lm > 0) {
-                    memcpy(lmxyz, S.vio.lm_xyz, sizeof(float) * 3 * (size_t)n_lm);
-                    memcpy(lq, S.vio.q, sizeof lq);
-                    memcpy(lp, S.vio.p, sizeof lp);
-                }
-                pthread_mutex_unlock(&S.lock);
-                int na_lm = 0;
-                if (n_lm > 0 && na_grid < ZD_MAX_ANCH)
-                    na_lm = xr_lm_anchors(lmxyz, n_lm, lq, lp, st->R_rect_imu,
-                                          st->f_rect, (XS_W - 1) * 0.5f,
-                                          (XS_H - 1) * 0.5f, S.eye_calib[0].p_cam,
-                                          XS_W, XS_H, anch + na_grid,
-                                          ZD_MAX_ANCH - na_grid);
-                /* Calibrate on the STEREO GRID ONLY by default. The grid is the
-                 * validated, dense, uniformly-distributed metric backbone (this is
-                 * exactly what the offline benchmarks fit on). The VIO landmarks
-                 * are sparse, spatially CLUSTERED, and carry VIO scale/pose noise
-                 * of a different character than stereo disparity -- concatenating
-                 * them into the shared (especially deg-3) spatial fit lets a biased
-                 * far-landmark cluster warp the whole surface, a failure mode the
-                 * grid-only offline tests can't see. Flip to 1 to re-include them
-                 * once their per-anchor agreement with the grid is verified. */
-                static const int ZD_CAL_USE_LANDMARKS = 0;
-                int na = ZD_CAL_USE_LANDMARKS ? na_grid + na_lm : na_grid;
-                /* Metric depth from the monocular map via SPATIALLY-VARYING
-                 * calibration (xr_depthcal): invz ~= A(u,v)*s + B(u,v), fit
-                 * robustly on the anchors above. IR imposes a smooth
-                 * position-dependent scale on ZipDepth that a single global
-                 * affine can't remove (offline: global delta1~0.54 vs spatial
-                 * ~0.83); the stereo grid supplies the spatial anchors to correct
-                 * it. Falls back to deg-1 / global when anchors are sparse.
-                 *
-                 * DEBUG: set ZD_RAW=1 to bypass calibration and colormap the RAW
-                 * ZipDepth inverse-depth (per-frame min/max) -- shows the model's
-                 * unaided output for A/B comparison against the calibrated path. */
-                static const int ZD_RAW = 0;
-                if (ZD_RAW) {
-                    float lo = 1e30f, hi = -1e30f;
-                    for (int i = 0; i < XS_W * XS_H; i++) {
-                        float d = dinv[i];
-                        if (d < lo) lo = d;
-                        if (d > hi) hi = d;
-                    }
-                    float inv_span = (hi - lo) > 1e-6f ? 255.0f / (hi - lo) : 0.0f;
-                    for (int i = 0; i < XS_W * XS_H; i++) {
-                        int v = (int)((dinv[i] - lo) * inv_span + 0.5f);
-                        disp_local[i] = v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
-                    }
-                } else {
-                    static xr_depthcal cal;         /* persists across frames */
-                    xr_depthcal_update(&cal, dinv, XS_W, XS_H, anch, na);
-                    xr_depthcal_apply(&cal, dinv, metric, XS_W, XS_H, 0.1f, 30.0f);
-                    /* ZDIAG: per-frame flicker localization. Hold the camera STILL
-                     * and watch which block moves frame-to-frame:
-                     *   in[]  = input image fed to the model (mean/std of rect[0]);
-                     *           swings => auto-exposure/gain (the raw clean_raw feed)
-                     *   raw[] = the model's OWN depth output pre-calibration; mad =
-                     *           mean|raw_t - raw_{t-1}|, so mad/m large while still =>
-                     *           the model output itself flickers (input/NPU), which no
-                     *           calibration can fix
-                     *   anch/deg = anchor yield + fitted order (churn => cal swings)
-                     *   cal[] = final metric depth (mean/std over valid).
-                     * Every frame on purpose (diagnostic build); grep "ZDIAG". */
-                    static float prev_raw[XS_W * XS_H];
-                    static int have_prev;
-                    {
-                        const int N = XS_W * XS_H;
-                        const int NI = ZDR_W * ZDR_H;   /* the actual model input */
-                        double is = 0, iss = 0, rs = 0, rss = 0, cs = 0, css = 0, mad = 0;
-                        int cn = 0; float rlo = 1e30f, rhi = -1e30f;
-                        for (int i = 0; i < NI; i++) {
-                            double iv = st->rect_hi[i]; is += iv; iss += iv * iv;
-                        }
-                        for (int i = 0; i < N; i++) {
-                            float z = zdepth[i]; rs += z; rss += z * z;
-                            if (z < rlo) rlo = z; if (z > rhi) rhi = z;
-                            if (have_prev) { float d = z - prev_raw[i]; mad += d < 0 ? -d : d; }
-                            float m = metric[i]; if (m > 0.05f) { cs += m; css += m * m; cn++; }
-                        }
-                        double im = is / NI, rm = rs / N, cm = cn ? cs / cn : 0;
-                        LOGI("ZDIAG in[m=%.1f s=%.1f] raw[m=%.3f s=%.3f lo=%.3f hi=%.3f mad=%.4f] "
-                             "grid=%d lm=%d useLM=%d deg=%d nin=%d rms=%.4f cal[m=%.2f s=%.2f n=%d]",
-                             im, sqrt(iss / NI - im * im), rm, sqrt(rss / N - rm * rm),
-                             rlo, rhi, mad / N, na_grid, na_lm, ZD_CAL_USE_LANDMARKS,
-                             cal.deg, cal.n_in, cal.rms,
-                             cm, cn ? sqrt(css / cn - cm * cm) : 0.0, cn);
-                    }
-                    memcpy(prev_raw, zdepth, sizeof prev_raw);
-                    have_prev = 1;
-                    /* metric depth -> quarter-pixel disparity for the display path */
-                    float fbs = st->f_rect * st->baseline_m * (float)XS_SCALE;
-                    for (int i = 0; i < XS_W * XS_H; i++) {
-                        float z = metric[i];
-                        int dq = z > 0.05f ? (int)(fbs / z + 0.5f) : 0;
-                        disp_local[i] = dq > 255 ? 255 : (uint8_t)dq;
-                    }
+                    float z = metric[i];
+                    int dq = z > 0.05f ? (int)(fbs / z + 0.5f) : 0;
+                    disp_local[i] = dq > 255 ? 255 : (uint8_t)dq;
                 }
                 used_zip = 1;
             }

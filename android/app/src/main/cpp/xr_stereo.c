@@ -101,29 +101,32 @@ void xr_stereo_init(xr_stereo *s,
         }
     }
 
-    /* Full-res LEFT rectify map for ZipDepth: same virtual camera as the
-     * 240x320 pair (focal scales with resolution so the FOV is identical) but at
-     * native 480x640 detail. Left = cams[0]. mapx_hi==0xFFFF marks an invalid
-     * (out-of-fisheye) pixel — valid u*16 tops out at 479*16=7664, well clear. */
+    /* Full-res rectify maps for the stereo depth net: BOTH cameras at 480x640,
+     * same virtual camera as the 240x320 pair (focal scales with resolution so
+     * the FOV is identical) but at native 480x640 detail. [0]=left=cams[0],
+     * [1]=right=cams[1]. mapx_hi==0xFFFF marks an invalid (out-of-fisheye) pixel
+     * -- valid u*16 tops out at 479*16=7664, well clear. */
     float f_hi = F_RECT * (float)ZDR_W / (float)XS_W;   /* = 400, FOV-preserving */
     float cx_hi = (ZDR_W - 1) * 0.5f, cy_hi = (ZDR_H - 1) * 0.5f;
-    for (int y = 0; y < ZDR_H; y++) {
-        for (int x = 0; x < ZDR_W; x++) {
-            float rr[3] = { (x - cx_hi) / f_hi, (y - cy_hi) / f_hi, 1.0f };
-            float ray_imu[3] = {
-                s->R_rect_imu[0] * rr[0] + s->R_rect_imu[1] * rr[1] + s->R_rect_imu[2] * rr[2],
-                s->R_rect_imu[3] * rr[0] + s->R_rect_imu[4] * rr[1] + s->R_rect_imu[5] * rr[2],
-                s->R_rect_imu[6] * rr[0] + s->R_rect_imu[7] * rr[1] + s->R_rect_imu[8] * rr[2],
-            };
-            size_t i = (size_t)y * ZDR_W + x;
-            float u, v;
-            s->mapx_hi[i] = 0xFFFF;
-            s->mapy_hi[i] = 0;
-            if (xr_align_project(left, variant, ray_imu, &u, &v) == 0 &&
-                u >= 0.0f && u < XR_OW - 1.001f &&
-                v >= 0.0f && v < XR_OH - 1.001f) {
-                s->mapx_hi[i] = (uint16_t)(u * 16.0f);
-                s->mapy_hi[i] = (uint16_t)(v * 16.0f);
+    for (int c = 0; c < 2; c++) {
+        for (int y = 0; y < ZDR_H; y++) {
+            for (int x = 0; x < ZDR_W; x++) {
+                float rr[3] = { (x - cx_hi) / f_hi, (y - cy_hi) / f_hi, 1.0f };
+                float ray_imu[3] = {
+                    s->R_rect_imu[0] * rr[0] + s->R_rect_imu[1] * rr[1] + s->R_rect_imu[2] * rr[2],
+                    s->R_rect_imu[3] * rr[0] + s->R_rect_imu[4] * rr[1] + s->R_rect_imu[5] * rr[2],
+                    s->R_rect_imu[6] * rr[0] + s->R_rect_imu[7] * rr[1] + s->R_rect_imu[8] * rr[2],
+                };
+                size_t i = (size_t)y * ZDR_W + x;
+                float u, v;
+                s->mapx_hi[c][i] = 0xFFFF;
+                s->mapy_hi[c][i] = 0;
+                if (xr_align_project(cams[c], variant, ray_imu, &u, &v) == 0 &&
+                    u >= 0.0f && u < XR_OW - 1.001f &&
+                    v >= 0.0f && v < XR_OH - 1.001f) {
+                    s->mapx_hi[c][i] = (uint16_t)(u * 16.0f);
+                    s->mapy_hi[c][i] = (uint16_t)(v * 16.0f);
+                }
             }
         }
     }
@@ -143,13 +146,13 @@ void xr_stereo_rectify(xr_stereo *s, int c, const uint8_t *src) {
     }
 }
 
-/* full-res LEFT rectify for ZipDepth (see xr_stereo_rectify; 0xFFFF = invalid) */
-void xr_stereo_rectify_hi(xr_stereo *s, const uint8_t *src) {
-    uint8_t *dst = s->rect_hi;
+/* full-res rectify of camera `cam` for the stereo depth net (0xFFFF = invalid) */
+void xr_stereo_rectify_hi(xr_stereo *s, int cam, const uint8_t *src) {
+    uint8_t *dst = s->rect_hi[cam];
     for (size_t i = 0; i < (size_t)ZDR_W * ZDR_H; i++) {
-        uint32_t mx = s->mapx_hi[i];
+        uint32_t mx = s->mapx_hi[cam][i];
         if (mx == 0xFFFF) { dst[i] = 0; continue; }
-        uint32_t my = s->mapy_hi[i];
+        uint32_t my = s->mapy_hi[cam][i];
         uint32_t fx = mx & 15, fy = my & 15;
         const uint8_t *p = src + (my >> 4) * XR_OW + (mx >> 4);
         uint32_t a = p[0] * (16 - fx) + p[1] * fx;

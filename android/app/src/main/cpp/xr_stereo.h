@@ -36,10 +36,11 @@ typedef struct {
     float R_rect_imu[9];               /* rectified frame -> IMU frame */
     uint8_t rect[2][XS_W * XS_H];      /* rectified images (kept for tracker) */
 
-    /* full-res LEFT rectify for ZipDepth (mapx_hi==0xFFFF => invalid pixel) */
-    uint16_t mapx_hi[ZDR_W * ZDR_H];
-    uint16_t mapy_hi[ZDR_W * ZDR_H];
-    uint8_t rect_hi[ZDR_W * ZDR_H];
+    /* full-res rectify for the stereo depth net: BOTH cameras at 480x640
+     * ([0]=left, [1]=right). mapx_hi==0xFFFF => invalid pixel. */
+    uint16_t mapx_hi[2][ZDR_W * ZDR_H];
+    uint16_t mapy_hi[2][ZDR_W * ZDR_H];
+    uint8_t rect_hi[2][ZDR_W * ZDR_H];
 
     /* scratch (large — the owner should be static/heap, not stack) */
     uint64_t census[2][XS_W * XS_H];
@@ -65,10 +66,10 @@ void xr_stereo_init(xr_stereo *s,
 /* Rectify one camera image (cam 0 = left) into s->rect[cam], bilinear. */
 void xr_stereo_rectify(xr_stereo *s, int cam, const uint8_t *src);
 
-/* Rectify the LEFT camera image at full 480x640 resolution into s->rect_hi
- * (bilinear) — the sharp input for ZipDepth. `src` is the 480x640 descrambled
- * left image (the same buffer passed as cam 0 to xr_stereo_rectify). */
-void xr_stereo_rectify_hi(xr_stereo *s, const uint8_t *src);
+/* Rectify camera `cam` (0=left, 1=right) at full 480x640 into s->rect_hi[cam]
+ * (bilinear) — the sharp inputs for the stereo depth net. `src` is that camera's
+ * 480x640 descrambled image (the same buffer passed to xr_stereo_rectify). */
+void xr_stereo_rectify_hi(xr_stereo *s, int cam, const uint8_t *src);
 
 /* Compute the disparity map from the rectified pair (call
  * xr_stereo_rectify for both cameras first).
