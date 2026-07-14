@@ -1386,20 +1386,46 @@ static void *depth_worker(void *arg) {
             pthread_mutex_unlock(&DEPTH_BOX.lock);
             break;
         }
-        /* Thermal governor FIRST — before the 614 KB take-copy, so a suspended
-         * worker does no memory traffic at all. Depth runs FULL SPEED while
-         * cool (the depth buffer is future AR-occlusion masking data, so rate
-         * = data quality; the 2026-07-14 meltdown was dominated by the since-
-         * removed RPC busy-poll, not the duty cycle alone) and paces down only
-         * when the battery actually warms. Battery temp is the only signal
-         * this vendor reports (deci-C via nativeSetThermal; PowerManager
-         * status is always 0 here). Above the burn line depth SUSPENDS
-         * (VIO/passthrough keep the SoC budget); unknown temp (-1) = unpaced. */
+        /* Governor FIRST — before the 614 KB take-copy, so a suspended worker
+         * does no memory traffic at all. FRAMERATE-DRIVEN (user-tuned): depth
+         * is the expendable consumer, the core pipeline's camera rate is the
+         * goal variable — so depth runs FULL SPEED until the UVC callback
+         * rate (nominal 60 fps) actually drops below 56, then backs off by
+         * doubling its period (100 ms floor, 700 ms cap) once per second,
+         * and recovers by halving once the rate is back above 58 (hysteresis
+         * band so it can't oscillate). The old pre-emptive battery-temp tiers
+         * throttled depth long before anything was wrong; battery temp keeps
+         * only the >=44.0 C hand-comfort SUSPEND (a wearable limit the OS
+         * doesn't model). Unknown fps (startup) = unpaced. */
         int bt = atomic_load(&BATT_DECIC);
-        int period_ms = bt >= 440 ? -1 :             /* >=44.0C: suspend      */
-                        bt >= 410 ? 400 :            /* 41-43.9C: ~2.5 Hz     */
-                        bt >= 380 ? 150 :            /* 38-40.9C: ~6.5 Hz     */
-                                    0;               /* cool/unknown: UNPACED */
+        int period_ms;
+        {
+            static int dyn_period;                   /* 0 = unpaced */
+            static int64_t last_adj;
+            if (bt >= 440) {
+                period_ms = -1;                      /* hand-comfort suspend */
+            } else {
+                int fps10 = S.fps_x10;               /* UVC cb rate x10, ~600 */
+                int64_t nowg = now_ms();
+                if (fps10 > 0 && nowg - last_adj >= 1000) {
+                    if (fps10 < 560) {
+                        dyn_period = dyn_period
+                                         ? (dyn_period * 2 > 700 ? 700
+                                                                 : dyn_period * 2)
+                                         : 100;
+                        last_adj = nowg;
+                        LOGI("depth governor: cam %.1f fps < 56 -> period %d ms",
+                             fps10 / 10.0, dyn_period);
+                    } else if (fps10 >= 580 && dyn_period) {
+                        dyn_period = dyn_period >= 200 ? dyn_period / 2 : 0;
+                        last_adj = nowg;
+                        LOGI("depth governor: cam %.1f fps ok -> period %d ms",
+                             fps10 / 10.0, dyn_period);
+                    }
+                }
+                period_ms = dyn_period;
+            }
+        }
         static int64_t last_pass_ms;
         if (period_ms < 0) {
             DEPTH_BOX.full = 0;                      /* drop pair uncopied */
