@@ -19,11 +19,13 @@ enum {
     XS_W = 240, XS_H = 320, XS_DISP = 48,
     XS_SCALE = 4,                       /* disparity output: quarter pixels */
     XS_MAX_OUT = XS_DISP * XS_SCALE,    /* largest possible output value */
-    /* Full-resolution LEFT rectify dedicated to ZipDepth: same virtual camera
-     * (FOV) as the 240x320 pair — the rectified focal scales with resolution —
-     * but sampled at the native 480x640 sensor detail, so the depth model is fed
-     * a sharp image instead of a 240x320->384 upscale. */
-    ZDR_W = XS_W * 2, ZDR_H = XS_H * 2  /* 480x640 */
+    /* Depth-net rectify: same virtual camera (FOV) as the 240x320 pair — the
+     * rectified focal scales with resolution — built DIRECTLY at the model's
+     * input size (192x256, f=160). One resample from the sensor instead of the
+     * old rectify-to-480x640 + bilinear-downsample two-step: ~2-3.5 ms/pass
+     * cheaper, sharper (single filtering), and it exactly matches how the
+     * quantization calibration data was rectified. */
+    ZDR_W = (XS_W * 4) / 5, ZDR_H = (XS_H * 4) / 5  /* 192x256 */
 };
 
 typedef struct {
@@ -36,8 +38,8 @@ typedef struct {
     float R_rect_imu[9];               /* rectified frame -> IMU frame */
     uint8_t rect[2][XS_W * XS_H];      /* rectified images (kept for tracker) */
 
-    /* full-res rectify for the stereo depth net: BOTH cameras at 480x640
-     * ([0]=left, [1]=right). mapx_hi==0xFFFF => invalid pixel. */
+    /* model-res rectify for the stereo depth net: BOTH cameras at ZDR_W x
+     * ZDR_H ([0]=left, [1]=right). mapx_hi==0xFFFF => invalid pixel. */
     uint16_t mapx_hi[2][ZDR_W * ZDR_H];
     uint16_t mapy_hi[2][ZDR_W * ZDR_H];
     uint8_t rect_hi[2][ZDR_W * ZDR_H];
@@ -66,9 +68,9 @@ void xr_stereo_init(xr_stereo *s,
 /* Rectify one camera image (cam 0 = left) into s->rect[cam], bilinear. */
 void xr_stereo_rectify(xr_stereo *s, int cam, const uint8_t *src);
 
-/* Rectify camera `cam` (0=left, 1=right) at full 480x640 into s->rect_hi[cam]
- * (bilinear) — the sharp inputs for the stereo depth net. `src` is that camera's
- * 480x640 descrambled image (the same buffer passed to xr_stereo_rectify). */
+/* Rectify camera `cam` (0=left, 1=right) at model resolution (ZDR_W x ZDR_H)
+ * into s->rect_hi[cam] (bilinear) — the direct inputs for the stereo depth net.
+ * `src` is that camera's 480x640 descrambled image (same buffer as rectify). */
 void xr_stereo_rectify_hi(xr_stereo *s, int cam, const uint8_t *src);
 
 /* Compute the disparity map from the rectified pair (call

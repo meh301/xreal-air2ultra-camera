@@ -1418,7 +1418,8 @@ static void *depth_worker(void *arg) {
         int used_zip = 0;
         if (use_npu) {
             static float metric[XS_W * XS_H];
-            /* full-res rectified focal (400): the hi-res pair the model consumes */
+            /* model-res rectified focal (160): rect_hi is built directly at the
+             * model's 192x256 input size, one resample from the sensor */
             float f_hi = st->f_rect * (float)ZDR_W / (float)XS_W;
             if (xr_las2_run(st->rect_hi[0], st->rect_hi[1], f_hi,
                             st->baseline_m, metric, XS_W, XS_H) == 0) {

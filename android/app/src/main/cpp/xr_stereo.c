@@ -101,12 +101,14 @@ void xr_stereo_init(xr_stereo *s,
         }
     }
 
-    /* Full-res rectify maps for the stereo depth net: BOTH cameras at 480x640,
-     * same virtual camera as the 240x320 pair (focal scales with resolution so
-     * the FOV is identical) but at native 480x640 detail. [0]=left=cams[0],
-     * [1]=right=cams[1]. mapx_hi==0xFFFF marks an invalid (out-of-fisheye) pixel
-     * -- valid u*16 tops out at 479*16=7664, well clear. */
-    float f_hi = F_RECT * (float)ZDR_W / (float)XS_W;   /* = 400, FOV-preserving */
+    /* Model-res rectify maps for the stereo depth net: BOTH cameras DIRECTLY
+     * at ZDR_W x ZDR_H (192x256), same virtual camera as the 240x320 pair
+     * (focal scales with resolution so the FOV is identical). One resample
+     * from the sensor — replaces the old 480x640 rectify + downsample two-step
+     * and matches the quantization calibration exactly. [0]=left=cams[0],
+     * [1]=right=cams[1]. mapx_hi==0xFFFF marks an invalid (out-of-fisheye)
+     * pixel -- valid u*16 tops out at 479*16=7664, well clear. */
+    float f_hi = F_RECT * (float)ZDR_W / (float)XS_W;   /* = 160, FOV-preserving */
     float cx_hi = (ZDR_W - 1) * 0.5f, cy_hi = (ZDR_H - 1) * 0.5f;
     for (int c = 0; c < 2; c++) {
         for (int y = 0; y < ZDR_H; y++) {

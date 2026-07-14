@@ -18,28 +18,28 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-/* Model input, per single image: NCHW (1,3,LAS_H,LAS_W), RGB (gray replicated),
- * raw [0,255] (LAS normalizes internally). MUST match the exported/compiled
- * shape (left/right [1,3,256,192]); the AoT context binary is fixed-shape.
- * The model runs at a REDUCED resolution (192x256) to fit the unsigned-PD DSP
- * memory budget (480x640 needs ~244 MB, far past the PD ration; 192x256 ~35 MB).
- * max_disp is locked at 192 by the trained weights, so 192 wide is the floor. */
+/* Model input, per single image: NCHW (1,1,LAS_H,LAS_W) — the model is
+ * 1-CHANNEL: the first conv's per-channel weights + the ImageNet normalization
+ * are folded into it (host-verified exact-equivalent to the 3-channel
+ * original, rel err < 1e-5). No gray->RGB replication, 3x less input DMA to
+ * the DSP, ~1/3 the first-layer MACs. Raw [0,255]; the AoT context binary is
+ * fixed-shape (192x256 to fit the v68 unsigned-PD budget; max_disp is locked
+ * at 192 by the trained weights, so 192 wide is the floor). */
 #define LAS_W 192
 #define LAS_H 256
-/* The rectified source (xr_stereo rect_hi) is 480x640; when the model runs at a
- * REDUCED resolution (current: 192x256, ~32 ms/frame) xr_las2_run downsamples +
- * rescales the focal. At FULL res (LAS == SRC — the 480x640 experiment measured
- * ~140 ms/frame on HVX = ~7 Hz depth) the input feeds straight through. */
-#define LAS_SRC_W 480
-#define LAS_SRC_H 640
+/* The rectified source (xr_stereo rect_hi) is now built DIRECTLY at the model
+ * size — one resample from the sensor, matching the quantization calibration —
+ * so the input feeds straight through. The resample branch below remains for
+ * any future SRC != model resolution experiment. */
+#define LAS_SRC_W 192
+#define LAS_SRC_H 256
 /* The model is QAIRT-NATIVE quantized (A16W8) — graph I/O is UFIXED_POINT_16, so
  * the EPContext wrapper declares uint16 tensors and we quantize/dequantize here.
  * Scales from qnn-context-binary-utility meta of the STAGED context (offset 0) —
- * MUST match assets/las2_s_ctx.onnx: in u16 = gray[0,255] / IN_SCALE (~x257),
- * out disparity = u16 * OUT_SCALE. 192x256 ctx: out 0.00108256; the 480x640
- * experiment ctx used 0.00269206 (ctx_480a16, swap constants + asset together). */
+ * MUST match assets/las2_s_ctx.onnx (1-ch fold, stereo_models/ctx_1ch): in u16 =
+ * gray[0,255] / IN_SCALE (~x257), out disparity = u16 * OUT_SCALE. */
 #define LAS_IN_SCALE  0.0038910505827516317f
-#define LAS_OUT_SCALE 0.001082559465430677f
+#define LAS_OUT_SCALE 0.0010810059029608965f
 
 static struct {
     const OrtApi *api;
@@ -51,8 +51,8 @@ static struct {
     char out_name[64];                /* disparity */
     char dsp_dir[256];
     atomic_int ready;
-    uint16_t in_l[3 * LAS_H * LAS_W]; /* NCHW u16-quantized inputs, run-thread only */
-    uint16_t in_r[3 * LAS_H * LAS_W];
+    uint16_t in_l[LAS_H * LAS_W];     /* 1-ch u16-quantized inputs, run-thread only */
+    uint16_t in_r[LAS_H * LAS_W];
 } Z;
 
 static int ort_ok(OrtStatus *st, const char *what) {
@@ -274,8 +274,8 @@ int xr_las2_run(const uint8_t *left, const uint8_t *right, float f_hi, float bas
     if (!atomic_load_explicit(&Z.ready, memory_order_acquire)) return -1;
     if (!left || !right || !depth_out || out_w <= 0 || out_h <= 0) return -1;
 
-    /* Resample the 480x640 rectified source to the model's LAS_W x LAS_H (direct
-     * quantize at full res), gray replicated to 3 channels, u16 input encoding. */
+    /* Quantize the model-res rectified gray pair to the graph's u16 input
+     * encoding (1 channel — the model's first conv is folded, no replication). */
     const int plane = LAS_H * LAS_W;
     const float qs = 1.0f / LAS_IN_SCALE;
     if (LAS_W == LAS_SRC_W && LAS_H == LAS_SRC_H) {
@@ -297,12 +297,8 @@ int xr_las2_run(const uint8_t *left, const uint8_t *right, float f_hi, float bas
             }
         }
     }
-    memcpy(Z.in_l + plane, Z.in_l, sizeof(uint16_t) * plane);
-    memcpy(Z.in_l + 2 * plane, Z.in_l, sizeof(uint16_t) * plane);
-    memcpy(Z.in_r + plane, Z.in_r, sizeof(uint16_t) * plane);
-    memcpy(Z.in_r + 2 * plane, Z.in_r, sizeof(uint16_t) * plane);
 
-    const int64_t shape[4] = { 1, 3, LAS_H, LAS_W };
+    const int64_t shape[4] = { 1, 1, LAS_H, LAS_W };
     OrtValue *inL = NULL, *inR = NULL;
     if (!ort_ok(Z.api->CreateTensorWithDataAsOrtValue(
                     Z.meminfo, Z.in_l, sizeof Z.in_l, shape, 4,
