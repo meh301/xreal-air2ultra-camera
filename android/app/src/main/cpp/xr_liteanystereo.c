@@ -24,22 +24,22 @@
  * The model runs at a REDUCED resolution (192x256) to fit the unsigned-PD DSP
  * memory budget (480x640 needs ~244 MB, far past the PD ration; 192x256 ~35 MB).
  * max_disp is locked at 192 by the trained weights, so 192 wide is the floor. */
-#define LAS_W 480
-#define LAS_H 640
+#define LAS_W 192
+#define LAS_H 256
 /* The rectified source (xr_stereo rect_hi) is 480x640; when the model runs at a
- * REDUCED resolution xr_las2_run downsamples + rescales the focal. At FULL res
- * (LAS == SRC, current 480x640 experiment: ~140 ms/frame on HVX = ~7 Hz depth)
- * the input feeds straight through. */
+ * REDUCED resolution (current: 192x256, ~32 ms/frame) xr_las2_run downsamples +
+ * rescales the focal. At FULL res (LAS == SRC — the 480x640 experiment measured
+ * ~140 ms/frame on HVX = ~7 Hz depth) the input feeds straight through. */
 #define LAS_SRC_W 480
 #define LAS_SRC_H 640
 /* The model is QAIRT-NATIVE quantized (A16W8) — graph I/O is UFIXED_POINT_16, so
  * the EPContext wrapper declares uint16 tensors and we quantize/dequantize here.
  * Scales from qnn-context-binary-utility meta of the STAGED context (offset 0) —
  * MUST match assets/las2_s_ctx.onnx: in u16 = gray[0,255] / IN_SCALE (~x257),
- * out disparity = u16 * OUT_SCALE. 480x640 ctx: out 0.00269206; (192x256 ctx
- * used 0.00108256 — restore if reverting to the 192 model). */
+ * out disparity = u16 * OUT_SCALE. 192x256 ctx: out 0.00108256; the 480x640
+ * experiment ctx used 0.00269206 (ctx_480a16, swap constants + asset together). */
 #define LAS_IN_SCALE  0.0038910505827516317f
-#define LAS_OUT_SCALE 0.0026920558884739876f
+#define LAS_OUT_SCALE 0.001082559465430677f
 
 static struct {
     const OrtApi *api;
