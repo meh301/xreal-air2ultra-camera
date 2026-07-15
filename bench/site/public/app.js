@@ -364,7 +364,7 @@ function datasetView(group) {
   const view = $("#view");
   const armsOn = ARMS.filter(a => S.armOn[a]);
   const series = [
-    { label: "VIO only", color: cssColor("bad"), values: seqs.map(s => med[s]?.bad?.vio) },
+    { label: "VIO only", color: cssColor("vio"), values: seqs.map(s => med[s]?.bad?.vio) },
     ...armsOn.map(a => ({
       label: `+map ${ARM_LABEL[a]}`, color: cssColor(a),
       values: seqs.map(s => med[s]?.[a]?.map),
@@ -445,7 +445,7 @@ function systemsView() {
   const sysArms = [...new Set(base.map(b => `${b.sys}_lc${b.lc}`))].sort();
   const colors = ["#e34948", "#eda100", "#8a2be2", "#1baf7a", "#2a78d6"];
   const series = [
-    { label: "ours: VIO", color: cssColor("bad"), values: seqs.map(s => med[s]?.bad?.vio) },
+    { label: "ours: VIO", color: cssColor("vio"), values: seqs.map(s => med[s]?.bad?.vio) },
     { label: "ours: +map (best arm)", color: cssColor("vpr"),
       values: seqs.map(s => {
         const v = ARMS.map(a => med[s]?.[a]?.map).filter(x => x != null);
@@ -529,6 +529,17 @@ function buildShell() {
     c.onclick = () => { S.armOn[a] = !S.armOn[a]; c.classList.toggle("off"); render(); };
     chips.append(c);
   }
+  const themes = ["auto", "light", "dark"];
+  let ti = themes.indexOf(localStorage.getItem("bench-theme") || "auto");
+  const applyTheme = () => {
+    const t = themes[ti];
+    if (t === "auto") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = t;
+    $("#theme-btn").textContent = `theme: ${t}`;
+    localStorage.setItem("bench-theme", t);
+  };
+  applyTheme();
+  $("#theme-btn").onclick = () => { ti = (ti + 1) % 3; applyTheme(); render(); };
   $("#show-pub").onchange = e => { S.showPub = e.target.checked; render(); };
   $("#show-base").onchange = e => { S.showBase = e.target.checked; render(); };
   $("#metric-rte").onchange = e => { S.useRte = e.target.checked; render(); };
