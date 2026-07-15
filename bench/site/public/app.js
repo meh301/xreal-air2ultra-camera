@@ -166,9 +166,14 @@ function orbitView(cv, cam, g) {
     ctx.strokeStyle = style; ctx.lineWidth = w;
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
   }
-  function polyline(pts, style, w) {
+  function polyline(pts, style, w) {   // null entries = pen-up (gap breaks)
     ctx.strokeStyle = style; ctx.lineWidth = w; ctx.beginPath();
-    pts.forEach((p, i) => { const [x, y] = proj(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    let pen = false;
+    for (const p of pts) {
+      if (!p) { pen = false; continue; }
+      const [x, y] = proj(p);
+      pen ? ctx.lineTo(x, y) : ctx.moveTo(x, y); pen = true;
+    }
     ctx.stroke();
   }
   function drawGrid() {
@@ -189,14 +194,18 @@ function orbitView(cv, cam, g) {
     basis();
     ctx.clearRect(0, 0, W, H); ctx.lineJoin = "round";
     drawGrid();
+    const noGt = col("gt");
     for (const tr of trajs) {
-      if (tr.err) {   // single-arm error coloring
+      if (tr.err) {   // single-arm: error-color where GT exists, neutral where not
         ctx.lineWidth = 1.9;
         for (let i = 1; i < tr.pts.length; i++) {
+          const e = tr.err[i];
           const [x0, y0] = proj(tr.pts[i - 1]), [x1, y1] = proj(tr.pts[i]);
-          ctx.strokeStyle = errCol(tr.err[i] ?? 0);
+          ctx.strokeStyle = (e == null) ? noGt : errCol(e);
+          ctx.globalAlpha = (e == null) ? 0.5 : 1;
           ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
         }
+        ctx.globalAlpha = 1;
       } else polyline(tr.pts, tr.color, tr.w || 1.8);
     }
   }
@@ -227,9 +236,14 @@ function timelineMulti(cv, series) {   // series = [{t, err, color, label}]
   const W = cv.width, H = cv.height, ml = 44, mb = 26, mt = 10;
   const tmax = Math.max(1, ...series.map(s => s.t[s.t.length - 1] || 0));
   let x0 = 0, x1 = tmax, sel = null;
+  // median dt per series → break the line when a gap exceeds ~8× it (no-GT holes)
+  series.forEach(s => {
+    const dts = []; for (let i = 1; i < s.t.length; i++) if (s.err[i] != null && s.err[i - 1] != null) dts.push(s.t[i] - s.t[i - 1]);
+    dts.sort((a, b) => a - b); s._gap = (dts[Math.floor(dts.length / 2)] || 1) * 8 + 0.5;
+  });
   function draw() {
     ctx.clearRect(0, 0, W, H);
-    const ymax = Math.max(5, ...series.flatMap(s => s.t.map((t, i) => t >= x0 && t <= x1 ? s.err[i] : 0))) * 1.12;
+    const ymax = Math.max(5, ...series.flatMap(s => s.t.map((t, i) => t >= x0 && t <= x1 && s.err[i] != null ? s.err[i] : 0))) * 1.12;
     const X = t => ml + (t - x0) / (x1 - x0 || 1) * (W - ml - 10);
     const Y = v => mt + (1 - v / ymax) * (H - mt - mb);
     ctx.strokeStyle = col("grid"); ctx.fillStyle = col("ink2"); ctx.font = "10px system-ui"; ctx.lineWidth = 1;
@@ -237,8 +251,13 @@ function timelineMulti(cv, series) {   // series = [{t, err, color, label}]
       ctx.beginPath(); ctx.moveTo(ml, Y(v)); ctx.lineTo(W - 10, Y(v)); ctx.stroke(); ctx.fillText(v.toFixed(0), 8, Y(v) + 3); }
     for (const s of series) {
       ctx.strokeStyle = s.color; ctx.lineWidth = 1.5; ctx.beginPath();
-      let started = false;
-      s.t.forEach((t, i) => { if (t < x0 || t > x1) return; const x = X(t), y = Y(s.err[i]); started ? ctx.lineTo(x, y) : ctx.moveTo(x, y); started = true; });
+      let pen = false, pt = null;
+      s.t.forEach((t, i) => {
+        const e = s.err[i];
+        if (t < x0 || t > x1 || e == null) { pen = false; return; }
+        if (pen && (t - pt) > s._gap) pen = false;   // break across a data gap
+        const x = X(t), y = Y(e); pen ? ctx.lineTo(x, y) : ctx.moveTo(x, y); pen = true; pt = t;
+      });
       ctx.stroke();
     }
     ctx.fillStyle = col("ink2"); ctx.fillText("error [cm] vs time [s] — drag to zoom, double-click resets", ml, H - 8);

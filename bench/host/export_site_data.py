@@ -136,28 +136,42 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500):
                 continue
             if est.ndim != 2 or len(est) < 10:
                 continue
-            # associate + SE3-Umeyama align est to GT for honest 3D overlay
+            # Associate est frames to GT within tolerance. Datasets like
+            # TUM-VI corridor/magistrale have mocap GT only at the start/end
+            # (big time gaps in between) — align on matched frames only, but
+            # export the FULL continuous estimate so the 3D path is complete;
+            # error is defined only where GT exists (null elsewhere), and GT
+            # is broken across its own gaps so nothing is drawn through them.
             gt_t, gt_p = gta[:, 0], gta[:, 1:4]
             t, p = est[:, 0], est[:, 1:4]
             i = np.clip(np.searchsorted(gt_t, t), 0, len(gt_t) - 1)
-            ok = np.abs(gt_t[i] - t) < 0.02
-            A, B = p[ok], gt_p[i][ok]
-            if len(A) < 10:
+            ok = np.abs(gt_t[i] - t) < 0.03
+            if ok.sum() < 10:
                 continue
+            A, B = p[ok], gt_p[i][ok]
             ca, cb = A.mean(0), B.mean(0)
             Hm = (A - ca).T @ (B - cb)
-            U, S, Vt = np.linalg.svd(Hm)
+            U, Sv, Vt = np.linalg.svd(Hm)
             D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
             R = Vt.T @ D @ U.T
-            Aal = (R @ (A - ca).T).T + cb
-            err = np.linalg.norm(Aal - B, axis=1) * 100.0
-            ts = t[ok] - t[ok][0]
-            step = max(1, len(Aal) // max_pts)
-            gstep = max(1, len(gt_p) // max_pts)
+            full = (R @ (p - ca).T).T + cb          # full aligned estimate
+            errf = np.full(len(p), np.nan)
+            errf[ok] = np.linalg.norm(full[ok] - B, axis=1) * 100.0
+            ts = t - t[0]
+            step = max(1, len(p) // max_pts)
             r3 = lambda a: [[round(float(v), 3) for v in row] for row in a]
+            # GT downsampled, with null breaks across time gaps > 2 s
+            gstep = max(1, len(gt_p) // max_pts)
+            gtd_t, gtd_p = gt_t[::gstep], gt_p[::gstep]
+            gt_out = []
+            for k in range(len(gtd_p)):
+                if k and gtd_t[k] - gtd_t[k - 1] > 2.0:
+                    gt_out.append(None)
+                gt_out.append([round(float(v), 3) for v in gtd_p[k]])
+            ed = errf[::step]
             (out_dir / f"{seq}_{arm}.json").write_text(json.dumps({
-                "est": r3(Aal[::step]), "gt": r3(gt_p[::gstep]),
-                "err": [round(float(e), 1) for e in err[::step]],
+                "est": r3(full[::step]), "gt": gt_out,
+                "err": [None if np.isnan(e) else round(float(e), 1) for e in ed],
                 "t": [round(float(x), 2) for x in ts[::step]],
             }))
             n += 1
