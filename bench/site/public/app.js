@@ -145,7 +145,7 @@ function barChart({ title, cats, series, refs = [], note = "", onBar }) {
 /* Orbit renderer with a PERSISTENT camera (cam survives data swaps). Grid
  * bounds come from `g` (stable per sequence, so pivot/grid don't jump when
  * arms toggle). .set(trajs) redraws with new data, camera untouched. */
-function orbitView(cv, cam, g) {
+function orbitView(cv, cam, g) {   // g bounds must already exclude null gap-markers
   const ctx = cv.getContext("2d");
   const W = cv.width, H = cv.height;
   cam.target = g.ctr.slice();                 // retarget to this scene's center
@@ -320,7 +320,8 @@ function trajPanel({ group, seq, compact } = {}) {
   }
 
   function gridInfo(gt) {
-    const withOrigin = gt.concat([[0, 0, 0]]);
+    // gt may contain null gap-markers (no-mocap holes) — bounds skip them
+    const withOrigin = gt.filter(Boolean).concat([[0, 0, 0]]);
     const lo = [0, 1, 2].map(k => Math.min(...withOrigin.map(p => p[k] || 0)));
     const hi = [0, 1, 2].map(k => Math.max(...withOrigin.map(p => p[k] || 0)));
     const ctr = [0, 1, 2].map(k => (lo[k] + hi[k]) / 2);
