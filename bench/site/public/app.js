@@ -139,140 +139,122 @@ function barChart({ title, cats, series, refs = [], note = "", onBar }) {
 }
 
 /* ---------- 3D orbit + error timeline trajectory panel ---------- */
-function orbitCanvas(cv, data, armColor) {
+/* Orbit renderer with a PERSISTENT camera (cam survives data swaps). Grid
+ * bounds come from `g` (stable per sequence, so pivot/grid don't jump when
+ * arms toggle). .set(trajs) redraws with new data, camera untouched. */
+function orbitView(cv, cam, g) {
   const ctx = cv.getContext("2d");
   const W = cv.width, H = cv.height;
-  const all = data.gt.concat(data.est);
-  const dim = all[0].length;
-  // include the world origin in bounds so the reference grid always shows it
-  const lo = [0, 1, 2].map(k => Math.min(0, ...all.map(p => p[k] || 0)));
-  const hi = [0, 1, 2].map(k => Math.max(0, ...all.map(p => p[k] || 0)));
-  const ctr = [0, 1, 2].map(k => (lo[k] + hi[k]) / 2);
-  const span = Math.max(1e-3, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
-  const raw = span / 6, mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  const step = (raw / mag >= 5 ? 5 : raw / mag >= 2 ? 2 : 1) * mag;
-  const gx0 = Math.floor(lo[0] / step) * step - step, gx1 = Math.ceil(hi[0] / step) * step + step;
-  const gy0 = Math.floor(lo[1] / step) * step - step, gy1 = Math.ceil(hi[1] / step) * step + step;
-
-  const target = ctr.slice();           // world look-at point; pan moves it
-  let theta = 0.7, phi = 1.0, zoom = 1;  // azimuth, polar from +Z (radians)
+  cam.target = g.ctr.slice();                 // retarget to this scene's center
+  if (!cam.init) { cam.theta = 0.7; cam.phi = 1.0; cam.zoom = 1; cam.init = true; }
+  let trajs = [], B;
   const errCol = e => { const t = Math.max(0, Math.min(e / 50, 1));
     return `hsl(${(1 - t) * 214},78%,${52 + t * 6}%)`; };
-  let B;
-  function basis() {
-    // standard spherical orbit camera, world +Z up (as three.js OrbitControls).
-    // eye direction from target = (sinφ cosθ, sinφ sinθ, cosφ); screen basis:
-    //   right = normalize(Zup × eyeDir) = (-sinθ, cosθ, 0)
-    //   up    = eyeDir × right          = (-cosφ cosθ, -cosφ sinθ, sinφ)
-    // up_z = sinφ > 0, so world-up is always screen-up; no axis inversions.
-    const ct = Math.cos(theta), st = Math.sin(theta), cf = Math.cos(phi), sf = Math.sin(phi);
+  function basis() {   // spherical orbit camera, world +Z up (three.js OrbitControls)
+    const ct = Math.cos(cam.theta), st = Math.sin(cam.theta),
+          cf = Math.cos(cam.phi), sf = Math.sin(cam.phi);
     B = { right: [-st, ct, 0], up: [-cf * ct, -cf * st, sf],
-          sc: (Math.min(W, H) * 0.4 * zoom) / span };
+          sc: (Math.min(W, H) * 0.4 * cam.zoom) / g.span };
   }
   function proj(p) {
-    const dx = (p[0] || 0) - target[0], dy = (p[1] || 0) - target[1], dz = (p[2] || 0) - target[2];
-    const X = dx * B.right[0] + dy * B.right[1] + dz * B.right[2];
-    const Y = dx * B.up[0] + dy * B.up[1] + dz * B.up[2];
-    return [W / 2 + X * B.sc, H / 2 - Y * B.sc];
+    const dx = (p[0] || 0) - cam.target[0], dy = (p[1] || 0) - cam.target[1], dz = (p[2] || 0) - cam.target[2];
+    return [W / 2 + (dx * B.right[0] + dy * B.right[1] + dz * B.right[2]) * B.sc,
+            H / 2 - (dx * B.up[0] + dy * B.up[1] + dz * B.up[2]) * B.sc];
   }
   function seg(a, b, style, w) {
     const [x0, y0] = proj(a), [x1, y1] = proj(b);
     ctx.strokeStyle = style; ctx.lineWidth = w;
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
   }
+  function polyline(pts, style, w) {
+    ctx.strokeStyle = style; ctx.lineWidth = w; ctx.beginPath();
+    pts.forEach((p, i) => { const [x, y] = proj(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke();
+  }
   function drawGrid() {
     const gc = col("grid");
     ctx.globalAlpha = 0.75;
-    for (let x = gx0; x <= gx1 + 1e-6; x += step) seg([x, gy0, 0], [x, gy1, 0], gc, Math.abs(x) < 1e-6 ? 1.4 : 0.7);
-    for (let y = gy0; y <= gy1 + 1e-6; y += step) seg([gx0, y, 0], [gx1, y, 0], gc, Math.abs(y) < 1e-6 ? 1.4 : 0.7);
+    for (let x = g.gx0; x <= g.gx1 + 1e-6; x += g.step) seg([x, g.gy0, 0], [x, g.gy1, 0], gc, Math.abs(x) < 1e-6 ? 1.4 : 0.7);
+    for (let y = g.gy0; y <= g.gy1 + 1e-6; y += g.step) seg([g.gx0, y, 0], [g.gx1, y, 0], gc, Math.abs(y) < 1e-6 ? 1.4 : 0.7);
     ctx.globalAlpha = 1;
-    const ax = step * 1.15;             // origin axes: X red, Y green, Z blue
-    seg([0, 0, 0], [ax, 0, 0], "#d83b3b", 2.2);
-    seg([0, 0, 0], [0, ax, 0], "#1baf7a", 2.2);
+    const ax = g.step * 1.15;
+    seg([0, 0, 0], [ax, 0, 0], "#d83b3b", 2.2); seg([0, 0, 0], [0, ax, 0], "#1baf7a", 2.2);
     seg([0, 0, 0], [0, 0, ax], "#2a78d6", 2.2);
     const [ox, oy] = proj([0, 0, 0]);
     ctx.fillStyle = col("ink2"); ctx.font = "11px system-ui";
     ctx.fillText("0,0,0", ox + 6, oy - 4);
-    ctx.fillText(`grid ${step >= 1 ? step + " m" : (step * 100).toFixed(0) + " cm"}`, 10, 16);
+    ctx.fillText(`grid ${g.step >= 1 ? g.step + " m" : (g.step * 100).toFixed(0) + " cm"}`, 10, 16);
   }
   function draw() {
     basis();
-    ctx.clearRect(0, 0, W, H);
-    ctx.lineJoin = "round";
+    ctx.clearRect(0, 0, W, H); ctx.lineJoin = "round";
     drawGrid();
-    ctx.strokeStyle = col("gt"); ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    data.gt.forEach((p, i) => { const [x, y] = proj(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-    ctx.stroke();
-    if (data.err) {
-      ctx.lineWidth = 1.9;
-      for (let i = 1; i < data.est.length; i++) {
-        const [x0, y0] = proj(data.est[i - 1]), [x1, y1] = proj(data.est[i]);
-        ctx.strokeStyle = errCol(data.err[i] ?? 0);
-        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-      }
-    } else {
-      ctx.strokeStyle = armColor; ctx.lineWidth = 1.9; ctx.beginPath();
-      data.est.forEach((p, i) => { const [x, y] = proj(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      ctx.stroke();
+    for (const tr of trajs) {
+      if (tr.err) {   // single-arm error coloring
+        ctx.lineWidth = 1.9;
+        for (let i = 1; i < tr.pts.length; i++) {
+          const [x0, y0] = proj(tr.pts[i - 1]), [x1, y1] = proj(tr.pts[i]);
+          ctx.strokeStyle = errCol(tr.err[i] ?? 0);
+          ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+        }
+      } else polyline(tr.pts, tr.color, tr.w || 1.8);
     }
   }
-  draw();
   let drag = null;
   cv.onpointerdown = e => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; cv.setPointerCapture(e.pointerId); };
   cv.oncontextmenu = e => e.preventDefault();
   cv.onpointermove = e => {
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-    if (drag.pan) {   // pan moves the look-at target -> orbit pivots with it
+    if (drag.pan) {
       const r = cv.getBoundingClientRect(), s = W / r.width;
       const kx = -dx * s / B.sc, ky = dy * s / B.sc;
-      for (let k = 0; k < 3; k++) target[k] += kx * B.right[k] + ky * B.up[k];
-    } else {   // OrbitControls convention: azimuth θ, polar φ — one coherent model
-      theta -= dx * 0.01;
-      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.01));
+      for (let k = 0; k < 3; k++) cam.target[k] += kx * B.right[k] + ky * B.up[k];
+    } else {
+      cam.theta -= dx * 0.01;
+      cam.phi = Math.max(0.05, Math.min(Math.PI - 0.05, cam.phi - dy * 0.01));
     }
     drag.x = e.clientX; drag.y = e.clientY; draw();
   };
   cv.onpointerup = () => drag = null;
-  cv.onwheel = e => { e.preventDefault(); zoom *= e.deltaY > 0 ? 1 / 1.15 : 1.15; draw(); };
-  return { redraw: draw, is3d: dim >= 3 };
+  cv.onwheel = e => { e.preventDefault(); cam.zoom *= e.deltaY > 0 ? 1 / 1.15 : 1.15; draw(); };
+  return { set(t) { trajs = t; draw(); } };
 }
 
-function timelineCanvas(cv, data) {
+/* multi-series error-over-time; drag-zoom shared across all series */
+function timelineMulti(cv, series) {   // series = [{t, err, color, label}]
   const ctx = cv.getContext("2d");
   const W = cv.width, H = cv.height, ml = 44, mb = 26, mt = 10;
-  let x0 = 0, x1 = data.t[data.t.length - 1] || 1, sel = null;
+  const tmax = Math.max(1, ...series.map(s => s.t[s.t.length - 1] || 0));
+  let x0 = 0, x1 = tmax, sel = null;
   function draw() {
     ctx.clearRect(0, 0, W, H);
-    const pts = data.t.map((t, i) => [t, data.err[i]]).filter(p => p[0] >= x0 && p[0] <= x1);
-    const ymax = Math.max(5, ...pts.map(p => p[1])) * 1.12;
+    const ymax = Math.max(5, ...series.flatMap(s => s.t.map((t, i) => t >= x0 && t <= x1 ? s.err[i] : 0))) * 1.12;
     const X = t => ml + (t - x0) / (x1 - x0 || 1) * (W - ml - 10);
     const Y = v => mt + (1 - v / ymax) * (H - mt - mb);
-    ctx.strokeStyle = col("grid"); ctx.fillStyle = col("ink2");
-    ctx.font = "10px system-ui"; ctx.lineWidth = 1;
-    for (let g = 0; g <= 3; g++) { const v = ymax * g / 3;
-      ctx.beginPath(); ctx.moveTo(ml, Y(v)); ctx.lineTo(W - 10, Y(v)); ctx.stroke();
-      ctx.fillText(v.toFixed(0), 8, Y(v) + 3); }
-    ctx.strokeStyle = col("base"); ctx.lineWidth = 1.5; ctx.beginPath();
-    pts.forEach((p, i) => { i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])); });
-    ctx.stroke();
-    ctx.fillText("error [cm] vs time [s] — drag to zoom, double-click resets", ml, H - 8);
-    if (sel) { ctx.fillStyle = "rgba(90,120,214,.2)";
-      ctx.fillRect(Math.min(sel.a, sel.b), mt, Math.abs(sel.b - sel.a), H - mt - mb); }
+    ctx.strokeStyle = col("grid"); ctx.fillStyle = col("ink2"); ctx.font = "10px system-ui"; ctx.lineWidth = 1;
+    for (let gg = 0; gg <= 3; gg++) { const v = ymax * gg / 3;
+      ctx.beginPath(); ctx.moveTo(ml, Y(v)); ctx.lineTo(W - 10, Y(v)); ctx.stroke(); ctx.fillText(v.toFixed(0), 8, Y(v) + 3); }
+    for (const s of series) {
+      ctx.strokeStyle = s.color; ctx.lineWidth = 1.5; ctx.beginPath();
+      let started = false;
+      s.t.forEach((t, i) => { if (t < x0 || t > x1) return; const x = X(t), y = Y(s.err[i]); started ? ctx.lineTo(x, y) : ctx.moveTo(x, y); started = true; });
+      ctx.stroke();
+    }
+    ctx.fillStyle = col("ink2"); ctx.fillText("error [cm] vs time [s] — drag to zoom, double-click resets", ml, H - 8);
+    if (sel) { ctx.fillStyle = "rgba(90,120,214,.2)"; ctx.fillRect(Math.min(sel.a, sel.b), mt, Math.abs(sel.b - sel.a), H - mt - mb); }
   }
   draw();
   const tAt = px => x0 + (px - ml) / (W - ml - 10) * (x1 - x0);
   const px = e => { const r = cv.getBoundingClientRect(); return (e.clientX - r.left) * W / r.width; };
   cv.onpointerdown = e => { sel = { a: px(e), b: px(e) }; cv.setPointerCapture(e.pointerId); };
   cv.onpointermove = e => { if (sel) { sel.b = px(e); draw(); } };
-  cv.onpointerup = () => { if (sel && Math.abs(sel.b - sel.a) > 10) {
-      const a = tAt(Math.min(sel.a, sel.b)), b = tAt(Math.max(sel.a, sel.b)); x0 = a; x1 = b; }
-    sel = null; draw(); };
-  cv.ondblclick = () => { x0 = 0; x1 = data.t[data.t.length - 1] || 1; draw(); };
+  cv.onpointerup = () => { if (sel && Math.abs(sel.b - sel.a) > 10) { x0 = tAt(Math.min(sel.a, sel.b)); x1 = tAt(Math.max(sel.a, sel.b)); } sel = null; draw(); };
+  cv.ondblclick = () => { x0 = 0; x1 = tmax; draw(); };
 }
 
-/* reusable: sequence + arm selectors, big 3D orbit, error timeline */
+/* sequence selector + MULTI-arm chips + persistent-camera 3D orbit + timeline.
+ * Toggling arms never resets the camera (orbit.set only swaps data). */
 function trajPanel({ group, seq, compact } = {}) {
   const card = el("div", { class: "card" });
   const seqs = group ? seqsIn(group) : [...new Set(S.runs.map(r => r.seq))].sort();
@@ -281,50 +263,85 @@ function trajPanel({ group, seq, compact } = {}) {
   const controls = el("div", { class: "traj-controls" });
   const seqSel = el("select");
   seqs.forEach(sq => { const o = el("option", { value: sq }, shortName(sq)); if (sq === seq) o.selected = true; seqSel.append(o); });
-  const armSel = el("select");
-  const armWrap = el("label", {}, "arm ");
-  armWrap.append(armSel);
-  controls.append(el("label", {}, "sequence "), seqSel, armWrap);
+  controls.append(el("label", {}, "sequence "), seqSel);
+  const armBox = el("span", { class: "traj-arms" });
+  controls.append(el("span", { class: "flabel", style: "margin-left:8px" }, "overlay arms"), armBox);
   card.append(controls);
   const vb = el("div", { class: "viewbox" });
   const cv = el("canvas", { width: 1000, height: compact ? 460 : 560 });
-  vb.append(cv);
-  card.append(vb);
+  vb.append(cv); card.append(vb);
+  const legendHost = el("div", { class: "legend-line" });
+  card.append(legendHost);
   const tlWrap = el("div");
   card.append(tlWrap);
-  card.append(el("div", { class: "legend-line" },
-    `<span><i style="background:var(--c-gt)"></i>ground truth</span>` +
-    `<span><i style="background:linear-gradient(90deg,#2a78d6,#d83b3b)"></i>estimate, colored by error 0→50 cm</span>` +
-    `<span class="hint">drag = orbit (pivots on look-at) · wheel = zoom · shift/right-drag = pan · grid on z=0 through origin</span>`));
 
-  let token = 0;
-  function fillArms() {
-    const av = armsFor(seq).filter(a => S.armOn[a]);
-    armSel.innerHTML = "";
-    (av.length ? av : armsFor(seq)).forEach(a => armSel.append(el("option", { value: a }, ARM_LABEL[a])));
+  const cam = {};                         // PERSISTENT across arm toggles
+  let orbit = null, gInfo = null, gtData = null, token = 0;
+  const sel = new Set();                  // selected arms
+
+  function gridInfo(gt) {
+    const withOrigin = gt.concat([[0, 0, 0]]);
+    const lo = [0, 1, 2].map(k => Math.min(...withOrigin.map(p => p[k] || 0)));
+    const hi = [0, 1, 2].map(k => Math.max(...withOrigin.map(p => p[k] || 0)));
+    const ctr = [0, 1, 2].map(k => (lo[k] + hi[k]) / 2);
+    const span = Math.max(1e-3, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
+    const raw = span / 6, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = (raw / mag >= 5 ? 5 : raw / mag >= 2 ? 2 : 1) * mag;
+    return { lo, hi, ctr, span, step,
+      gx0: Math.floor(lo[0] / step) * step - step, gx1: Math.ceil(hi[0] / step) * step + step,
+      gy0: Math.floor(lo[1] / step) * step - step, gy1: Math.ceil(hi[1] / step) * step + step };
   }
-  async function load() {
-    const my = ++token;
-    const arm = armSel.value || "bad";
-    const d = await loadJSON(`data/traj/${seq}_${arm}.json`, null);
-    if (my !== token) return;
-    if (!d || !d.est || !d.est.length) {
-      cv.getContext("2d").clearRect(0, 0, cv.width, cv.height);
-      tlWrap.innerHTML = `<div class="hint">no trajectory export for this run yet.</div>`;
-      return;
-    }
-    orbitCanvas(cv, d, col(arm));
+  const jsonCache = {};
+  async function getArm(a) {
+    if (!(a in jsonCache)) jsonCache[a] = await loadJSON(`data/traj/${seq}_${a}.json`, null);
+    return jsonCache[a];
+  }
+  async function redraw() {
+    if (!orbit) return;
+    const active = [...sel];
+    const loaded = await Promise.all(active.map(getArm));
+    const trajs = [{ pts: gtData, color: col("gt"), w: 1.6 }];
+    const singleErr = active.length === 1 && loaded[0]?.err;
+    loaded.forEach((d, i) => { if (d?.est) trajs.push(singleErr ? { pts: d.est, err: d.err } : { pts: d.est, color: col(active[i]) }); });
+    orbit.set(trajs);
+    // legend + timeline
+    legendHost.innerHTML = `<span><i style="background:var(--c-gt)"></i>ground truth</span>` +
+      (singleErr ? `<span><i style="background:linear-gradient(90deg,#2a78d6,#d83b3b)"></i>error 0→50 cm</span>`
+                 : active.map(a => `<span><i style="background:${col(a)}"></i>${ARM_LABEL[a]}</span>`).join("")) +
+      `<span class="hint">drag = orbit · wheel = zoom · shift/right-drag = pan · grid on z=0 through origin</span>`;
     tlWrap.innerHTML = "";
-    if (d.err && d.t) {
+    const ts = active.map((a, i) => loaded[i]?.err && loaded[i]?.t ? { t: loaded[i].t, err: loaded[i].err, color: singleErr ? col("base") : col(a), label: ARM_LABEL[a] } : null).filter(Boolean);
+    if (ts.length) {
       const tcv = el("canvas", { width: 1000, height: 180 });
       const w = el("div", { class: "viewbox", style: "margin-top:10px" });
-      w.append(tcv); tlWrap.append(w);
-      timelineCanvas(tcv, d);
+      w.append(tcv); tlWrap.append(w); timelineMulti(tcv, ts);
     }
   }
-  seqSel.onchange = () => { seq = seqSel.value; fillArms(); load(); };
-  armSel.onchange = load;
-  fillArms(); load();
+  function buildArmChips() {
+    const avail = armsFor(seq);
+    armBox.innerHTML = "";
+    if (!sel.size) { const first = avail.find(a => S.armOn[a]) || avail[0]; if (first) sel.add(first); }
+    [...sel].forEach(a => { if (!avail.includes(a)) sel.delete(a); });
+    for (const a of avail) {
+      const c = el("span", { class: "chip" + (sel.has(a) ? "" : " off") }, `<span class="dot" style="background:${col(a)}"></span>${ARM_LABEL[a]}`);
+      c.onclick = () => { if (sel.has(a)) { if (sel.size > 1) sel.delete(a); } else sel.add(a); buildArmChips(); redraw(); };
+      armBox.append(c);
+    }
+  }
+  async function loadSeq() {
+    const my = ++token;
+    for (const k in jsonCache) delete jsonCache[k];
+    const avail = armsFor(seq);
+    let gt = null;
+    for (const a of avail) { const d = await getArm(a); if (d?.gt) { gt = d.gt; break; } }
+    if (my !== token) return;
+    if (!gt) { cv.getContext("2d").clearRect(0, 0, cv.width, cv.height);
+      legendHost.innerHTML = `<span class="hint">no trajectory export for this sequence yet.</span>`; tlWrap.innerHTML = ""; return; }
+    gtData = gt; gInfo = gridInfo(gt); orbit = orbitView(cv, cam, gInfo);
+    buildArmChips(); redraw();
+  }
+  seqSel.onchange = () => { seq = seqSel.value; sel.clear(); loadSeq(); };
+  loadSeq();
   return card;
 }
 

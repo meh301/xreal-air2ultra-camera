@@ -96,6 +96,8 @@ svg text { font-family:system-ui; }
 .traj-controls select { background:var(--s2); color:var(--ink);
   border:1px solid var(--line); border-radius:8px; padding:5px 9px;
   font:13px system-ui; }
+.traj-arms { display:inline-flex; gap:6px; flex-wrap:wrap; }
+.traj-arms .chip { padding:3px 10px; font-size:12px; }
 .viewbox { background:var(--s2); border:1px solid var(--line); border-radius:10px;
   overflow:hidden; touch-action:none; }
 .viewbox canvas, .viewbox svg { display:block; width:100%; }

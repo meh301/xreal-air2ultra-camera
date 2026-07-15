@@ -46,7 +46,10 @@ def score_one(args):
     rte = float(m.group(2)) if m.group(2) != "inf" else None
     return fname, ate, rte, float(m.group(3))
 
-def collect_runs(dirs, name_re, cache=None):
+def collect_runs(dirs, name_re, cache=None, progress=None):
+    """progress = (out_path, cache_path) -> write results.json + cache
+    incrementally every ~40 newly-scored rows so the live site fills in as
+    scoring proceeds instead of only at the end."""
     jobs, meta, rows = [], {}, []
     for d in dirs:
         for f in sorted(Path(d).glob("*.tum")):
@@ -63,6 +66,7 @@ def collect_runs(dirs, name_re, cache=None):
                 continue
             meta[str(f)] = (m.groupdict(), key)
             jobs.append((str(f), str(gt), ds))
+    n = 0
     with ProcessPoolExecutor(max_workers=12) as ex:
         for fname, ate, rte, comp in ex.map(score_one, jobs):
             g, key = meta[fname]
@@ -78,6 +82,12 @@ def collect_runs(dirs, name_re, cache=None):
             rows.append(row)
             if cache is not None:
                 cache[key] = row
+            n += 1
+            if progress and n % 40 == 0:
+                out_path, cache_path, gen = progress
+                out_path.write_text(json.dumps({"generated": gen, "runs": rows}))
+                cache_path.write_text(json.dumps(cache))
+                print(f"  ...{n}/{len(jobs)} scored", flush=True)
     return rows
 
 def parse_ledgers(log_dirs):
@@ -173,10 +183,11 @@ def main():
     cache_f = out / ".score_cache.json"
     cache = json.loads(cache_f.read_text()) if cache_f.exists() else {}
 
+    gen = datetime.now(timezone.utc).isoformat()
     if a.results:
-        rows = collect_runs(a.results, ours_re, cache)
-        (out / "results.json").write_text(json.dumps(
-            {"generated": datetime.now(timezone.utc).isoformat(), "runs": rows}))
+        rows = collect_runs(a.results, ours_re, cache,
+                            progress=(out / "results.json", cache_f, gen))
+        (out / "results.json").write_text(json.dumps({"generated": gen, "runs": rows}))
         print(f"results.json: {len(rows)} rows")
     if a.baselines:
         rows = collect_runs(a.baselines, base_re, cache)
