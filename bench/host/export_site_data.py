@@ -34,17 +34,102 @@ def gt_for(seq):
                        else "euroc" if group_of(seq) == "euroc" else "tumvi")
     return None, None
 
+"""In-process scorer replicating score.py's protocol exactly (validated
+against evo on the full matrix; see fast-scorer commit). The old path spawned
+a fresh python+evo subprocess PER trajectory (~12 s of import overhead for
+~10 ms of math) — scoring took longer than the benchmarks themselves."""
+DATASET_FPS = {"euroc": 20.0, "tumvi": 20.0, "msd": 30.0}
+ATE_DIVERGE_M = {"euroc": 10.0, "tumvi": 10.0, "msd": 1.0}
+RTE_DIVERGE_CM = 10.0
+RTE_DELTA = 6
+T_MAX_DIFF = 0.01
+
+_GT_CACHE = {}
+
+def _load_gt(path):
+    import numpy as np
+    if path not in _GT_CACHE:
+        a = np.loadtxt(path)
+        _GT_CACHE[path] = a if a.ndim == 2 else a.reshape(1, -1)
+    return _GT_CACHE[path]
+
+def _quat_to_R(q):
+    """(N,4) qx qy qz qw -> (N,3,3), normalized."""
+    import numpy as np
+    q = q / np.linalg.norm(q, axis=1, keepdims=True)
+    x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    R = np.empty((len(q), 3, 3))
+    R[:, 0, 0] = 1 - 2 * (y * y + z * z); R[:, 0, 1] = 2 * (x * y - z * w); R[:, 0, 2] = 2 * (x * z + y * w)
+    R[:, 1, 0] = 2 * (x * y + z * w); R[:, 1, 1] = 1 - 2 * (x * x + z * z); R[:, 1, 2] = 2 * (y * z - x * w)
+    R[:, 2, 0] = 2 * (x * z - y * w); R[:, 2, 1] = 2 * (y * z + x * w); R[:, 2, 2] = 1 - 2 * (x * x + y * y)
+    return R
+
 def score_one(args):
-    fname, gt, ds = args
-    out = subprocess.run([PY, str(SCORE), fname, gt, "--dataset", ds],
-                         capture_output=True, text=True)
-    m = re.search(r"ATE ([\d.]+|inf) m \| RTE ([\d.]+|inf) cm \| "
-                  r"completion ([\d.]+)%", out.stdout)
-    if not m:
+    import numpy as np
+    fname, gt_path, ds = args
+    fps = DATASET_FPS[ds]
+    try:
+        gta = _load_gt(gt_path)
+        est = np.loadtxt(fname)
+    except Exception:
         return fname, None, None, None
-    ate = float(m.group(1)) * 100 if m.group(1) != "inf" else None
-    rte = float(m.group(2)) if m.group(2) != "inf" else None
-    return fname, ate, rte, float(m.group(3))
+    if est.ndim != 2 or len(est) < RTE_DELTA + 2:
+        return fname, None, None, 0.0
+    gt_t = gta[:, 0]
+    gt_span = gt_t[-1] - gt_t[0]
+    expected = max(1, int(round(gt_span * fps)) + 1)
+    t = est[:, 0]
+    slack = 0.5 / fps
+    completion = min(100.0, 100.0 * ((t >= gt_t[0] - slack) & (t <= gt_t[-1] + slack)).sum() / expected)
+    # associate: nearest GT stamp within tolerance, unique GT indices
+    idx = np.clip(np.searchsorted(gt_t, t), 1, len(gt_t) - 1)
+    idx = np.where(np.abs(gt_t[idx - 1] - t) < np.abs(gt_t[idx] - t), idx - 1, idx)
+    ok = np.abs(gt_t[idx] - t) <= T_MAX_DIFF
+    # dedup: keep closest est per GT index
+    order = np.argsort(np.abs(gt_t[idx] - t), kind="stable")
+    keep = np.zeros(len(t), bool); used = set()
+    for k in order:
+        if ok[k] and idx[k] not in used:
+            used.add(idx[k]); keep[k] = True
+    sel = np.where(keep)[0]
+    sel = sel[np.argsort(t[sel])]
+    if len(sel) < RTE_DELTA + 2:
+        return fname, None, None, round(float(completion), 1)
+    E_t, G_t = est[sel, 1:4], gta[idx[sel], 1:4]
+    E_q, G_q = est[sel, 4:8], gta[idx[sel], 4:8]
+    # ATE: Umeyama SE(3), no scale
+    ca, cb = E_t.mean(0), G_t.mean(0)
+    H = (E_t - ca).T @ (G_t - cb)
+    U, _, Vt = np.linalg.svd(H)
+    D = np.diag([1.0, 1.0, np.sign(np.linalg.det(Vt.T @ U.T))])
+    R = Vt.T @ D @ U.T
+    ate_m = float(np.sqrt((np.linalg.norm((R @ (E_t - ca).T).T + cb - G_t, axis=1) ** 2).mean()))
+    # RTE: delta=6 frames, consecutive non-overlapping pairs, trans part of
+    # relative error E = inv(rel_gt) @ rel_est. Pairs whose matched stamps
+    # span a GT hole (e.g. TUM-VI corridor's 247 s no-mocap stretch) measure
+    # relative motion over unobserved time — drop any pair wider than 4x the
+    # nominal delta duration.
+    ii = np.arange(0, len(sel) - RTE_DELTA, RTE_DELTA)
+    jj = ii + RTE_DELTA
+    ts = t[sel]
+    span_ok = (ts[jj] - ts[ii]) <= (RTE_DELTA / fps) * 4.0
+    ii, jj = ii[span_ok], jj[span_ok]
+    if not len(ii):
+        return fname, None, None, round(float(completion), 1)
+    Re, Rg = _quat_to_R(E_q), _quat_to_R(G_q)
+    def rel_trans(Rm, tm):
+        Ri = np.transpose(Rm[ii], (0, 2, 1))
+        rR = Ri @ Rm[jj]
+        rt = np.einsum("nij,nj->ni", Ri, tm[jj] - tm[ii])
+        return rR, rt
+    eR, et2 = rel_trans(Re, E_t)
+    gR, gt2 = rel_trans(Rg, G_t)
+    gRi = np.transpose(gR, (0, 2, 1))
+    err_t = np.einsum("nij,nj->ni", gRi, et2 - gt2)
+    rte_cm = float(np.sqrt((np.linalg.norm(err_t, axis=1) ** 2).mean())) * 100.0
+    if ate_m > ATE_DIVERGE_M[ds] or rte_cm > RTE_DIVERGE_CM:
+        return fname, None, None, round(float(completion), 1)
+    return fname, ate_m * 100.0, rte_cm, round(float(completion), 1)
 
 def collect_runs(dirs, name_re, cache=None, progress=None):
     """progress = (out_path, cache_path) -> write results.json + cache
