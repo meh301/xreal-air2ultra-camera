@@ -64,60 +64,82 @@ const seqsIn = group => [...new Set(S.runs.filter(r => r.group === group)
 const shortName = s => s.replace("dataset-", "").replace("_512_16", "")
     .replace("_easy", "").replace("_medium", "").replace("_difficult", "");
 
-/* ---------- SVG bar chart ---------- */
+/* ---------- SVG bar chart with click-to-filter legend ---------- */
 function barChart({ title, cats, series, refs = [], note = "", onBar }) {
-  const W = 1080, mb = 58, mt = 26, ml = 46, mr = 8;
-  const H = 300 + (cats.length > 14 ? 40 : 0);
-  const pw = W - ml - mr, ph = H - mt - mb;
-  const vals = series.flatMap(s => s.values).filter(v => v != null)
-      .concat(refs.map(r => r.v));
-  const ymax = Math.max(1, ...vals) * 1.14;
-  const Y = v => mt + ph - Math.min(v, ymax) / ymax * ph;
-  const gw = pw / cats.length;
-  const bw = Math.min(22, gw * 0.8 / series.length);
-  let s = `<svg viewBox="0 0 ${W} ${H}">`;
-  for (let g = 0; g <= 4; g++) {
-    const v = ymax * g / 4;
-    s += `<line x1="${ml}" x2="${W - mr}" y1="${Y(v)}" y2="${Y(v)}" class="grid-l"/>` +
-         `<text x="${ml - 5}" y="${Y(v) + 4}" class="tick" text-anchor="end">${v.toFixed(0)}</text>`;
-  }
-  cats.forEach((c, i) => {
-    const x0 = ml + i * gw + (gw - bw * series.length - 2 * (series.length - 1)) / 2;
-    series.forEach((sr, j) => {
-      const v = sr.values[i];
-      if (v == null) return;
-      const x = x0 + j * (bw + 2), y = Y(v);
-      s += `<rect class="bar" data-cat="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}"` +
-           ` width="${bw.toFixed(1)}" height="${(mt + ph - y).toFixed(1)}" rx="3"` +
-           ` fill="${sr.color}"><title>${c} — ${sr.label}: ${fmt(v)} cm` +
-           `${v > ymax ? " (clipped)" : ""}</title></rect>`;
-      if (series.length * cats.length < 70)
-        s += `<text x="${(x + bw / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}"` +
-             ` class="vlab" text-anchor="middle">${fmt(v)}</text>`;
-    });
-    const rot = cats.length > 14 ? ` transform="rotate(38 ${ml + i * gw + gw / 2} ${H - mb + 14})"` : "";
-    s += `<text class="cat" data-cat="${i}" x="${ml + i * gw + gw / 2}" y="${H - mb + 14}"` +
-         ` text-anchor="${cats.length > 14 ? "start" : "middle"}"${rot}>${c}</text>`;
-  });
-  for (const r of refs) {
-    const x0 = ml + r.i * gw + gw * 0.06, x1 = ml + r.i * gw + gw * 0.94;
-    s += `<line x1="${x0}" x2="${x1}" y1="${Y(r.v)}" y2="${Y(r.v)}"` +
-         ` class="${r.cls || "refline"}"><title>${r.label}: ${fmt(r.v)} cm</title></line>`;
-  }
-  s += "</svg>";
+  series.forEach(s => { if (s.on === undefined) s.on = true; });
+  const refGroups = [...new Set(refs.map(r => r.cls || "refline"))];
+  const refOn = Object.fromEntries(refGroups.map(g => [g, true]));
+
   const card = el("div", { class: "chart-card" });
   card.append(el("h3", {}, title));
-  const holder = el("div", {}, s);
+  const holder = el("div");
   card.append(holder);
+
+  function draw() {
+    const act = series.filter(s => s.on);
+    const actRefs = refs.filter(r => refOn[r.cls || "refline"]);
+    const W = 1080, mb = 58, mt = 26, ml = 46, mr = 8;
+    const H = 300 + (cats.length > 14 ? 40 : 0);
+    const pw = W - ml - mr, ph = H - mt - mb;
+    const vals = act.flatMap(s => s.values).filter(v => v != null)
+        .concat(actRefs.map(r => r.v));
+    const ymax = Math.max(1, ...vals) * 1.14;
+    const Y = v => mt + ph - Math.min(v, ymax) / ymax * ph;
+    const gw = pw / cats.length;
+    const bw = Math.min(22, gw * 0.8 / Math.max(1, act.length));
+    let s = `<svg viewBox="0 0 ${W} ${H}">`;
+    for (let g = 0; g <= 4; g++) {
+      const v = ymax * g / 4;
+      s += `<line x1="${ml}" x2="${W - mr}" y1="${Y(v)}" y2="${Y(v)}" class="grid-l"/>` +
+           `<text x="${ml - 5}" y="${Y(v) + 4}" class="tick" text-anchor="end">${v.toFixed(0)}</text>`;
+    }
+    cats.forEach((c, i) => {
+      const x0 = ml + i * gw + (gw - bw * act.length - 2 * (act.length - 1)) / 2;
+      act.forEach((sr, j) => {
+        const v = sr.values[i];
+        if (v == null) return;
+        const x = x0 + j * (bw + 2), y = Y(v);
+        s += `<rect class="bar" data-cat="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}"` +
+             ` width="${bw.toFixed(1)}" height="${(mt + ph - y).toFixed(1)}" rx="3"` +
+             ` fill="${sr.color}"><title>${c} — ${sr.label}: ${fmt(v)} cm` +
+             `${v > ymax ? " (clipped)" : ""}</title></rect>`;
+        if (act.length * cats.length < 70)
+          s += `<text x="${(x + bw / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}"` +
+               ` class="vlab" text-anchor="middle">${fmt(v)}</text>`;
+      });
+      const rot = cats.length > 14 ? ` transform="rotate(38 ${ml + i * gw + gw / 2} ${H - mb + 14})"` : "";
+      s += `<text class="cat" data-cat="${i}" x="${ml + i * gw + gw / 2}" y="${H - mb + 14}"` +
+           ` text-anchor="${cats.length > 14 ? "start" : "middle"}"${rot}>${c}</text>`;
+    });
+    for (const r of actRefs) {
+      const x0 = ml + r.i * gw + gw * 0.06, x1 = ml + r.i * gw + gw * 0.94;
+      s += `<line x1="${x0}" x2="${x1}" y1="${Y(r.v)}" y2="${Y(r.v)}"` +
+           ` class="${r.cls || "refline"}"><title>${r.label}: ${fmt(r.v)} cm</title></line>`;
+    }
+    s += "</svg>";
+    holder.innerHTML = s;
+    if (onBar) holder.querySelectorAll(".bar,.cat").forEach(b =>
+        b.addEventListener("click", () => onBar(+b.dataset.cat)));
+  }
+
   const leg = el("div", { class: "legend" });
-  for (const sr of series)
-    leg.append(el("span", {}, `<span class="dot" style="background:${sr.color}"></span>${sr.label}`));
-  if (refs.length) leg.append(el("span", {},
-      `<span class="dot" style="background:var(--c-ref)"></span>published / reference`));
+  for (const sr of series) {
+    const chip = el("span", { class: "chip", title: "click to toggle this series" },
+        `<span class="dot" style="background:${sr.color}"></span>${sr.label}`);
+    chip.onclick = () => { sr.on = !sr.on; chip.classList.toggle("off"); draw(); };
+    leg.append(chip);
+  }
+  for (const g of refGroups) {
+    const lbl = g === "refline" ? "published refs" : "baselines (ours-run)";
+    const col = g === "refline" ? "var(--c-ref)" : "var(--c-base)";
+    const chip = el("span", { class: "chip", title: "click to toggle" },
+        `<span class="dot" style="background:${col}"></span>${lbl}`);
+    chip.onclick = () => { refOn[g] = !refOn[g]; chip.classList.toggle("off"); draw(); };
+    leg.append(chip);
+  }
   card.append(leg);
   if (note) card.append(el("div", { class: "note" }, note));
-  if (onBar) holder.querySelectorAll(".bar,.cat").forEach(b =>
-      b.addEventListener("click", () => onBar(+b.dataset.cat)));
+  draw();
   return card;
 }
 
