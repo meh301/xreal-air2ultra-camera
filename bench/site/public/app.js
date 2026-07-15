@@ -160,8 +160,11 @@ function orbitCanvas(cv, data, armColor) {
     return `hsl(${(1 - t) * 214},78%,${52 + t * 6}%)`; };
   let B;
   function basis() {
+    // orbit camera about the world up-axis (+Z): forward f = (cp·cy, cp·sy, sp);
+    // right = normalize(f × Zup) = (sy, -cy, 0); camUp = right × f has +Z
+    // component (cos pitch) so world-up always projects to screen-up.
     const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
-    B = { right: [cy, -sy, 0], up: [sy * cp, cy * cp, -sp],
+    B = { right: [sy, -cy, 0], up: [-cy * sp, -sy * sp, cp],
           sc: (Math.min(W, H) * 0.4 * zoom) / span };
   }
   function proj(p) {
