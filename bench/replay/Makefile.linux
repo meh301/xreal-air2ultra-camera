@@ -1,0 +1,26 @@
+# Linux (container) build of the replay harness. Needs a libbasalt.so built
+# for this host (bench/container/build_basalt_linux.sh) reachable via
+# LD_LIBRARY_PATH at runtime; nothing links against it (dlopen'd).
+#
+#   make -f Makefile.linux XR_OW=752 XR_OH=480 OUT=xr_replay_euroc
+#
+# Per-dataset resolutions: EuRoC 752x480, TUM-VI 512x512, MSD MOO 640x480.
+XR_OW ?= 480
+XR_OH ?= 640
+OUT   ?= xr_replay
+
+CPP   := ../../android/app/src/main/cpp
+VIT   := $(CPP)/third_party/basalt/thirdparty/vit
+CC    ?= cc
+CFLAGS := -O3 -std=c11 -Wall -D_GNU_SOURCE -DXR_OW=$(XR_OW) -DXR_OH=$(XR_OH) \
+          -Ishim -I$(CPP) -I$(VIT) -pthread
+LDLIBS := -lm -ldl -pthread
+
+SRC := xr_replay_main.c $(CPP)/xr_slam.c $(CPP)/xr_map.c $(CPP)/xr_xfeat.c \
+       $(CPP)/xr_liteanystereo.c
+
+$(OUT): $(SRC)
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
+
+clean:
+	rm -f xr_replay xr_replay_*

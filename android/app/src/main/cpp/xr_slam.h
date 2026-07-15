@@ -58,6 +58,26 @@ int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
                   int variant, const float gyro_bias[3],
                   const float accel_bias[3], const float noises[4]);
 
+/* Raw calibration for dataset replay (benchmark harness): Kannala-Brandt
+ * kb4 intrinsics passed straight through (no fisheye624 refit, no device
+ * conventions), cam->IMU extrinsics as an explicit xyzw quaternion +
+ * translation, and the dataset's IMU rate. k[0..3]=0 is a pure equidistant
+ * camera (host-side remap target for radtan datasets). */
+typedef struct {
+    int width, height;      /* must equal XR_OW/XR_OH of this build */
+    double fps;
+    float fx, fy, cx, cy;
+    float k[4];             /* kb4 k1..k4 */
+    float q_xyzw[4];        /* rotation cam->IMU (R_imu_cam) */
+    float p[3];             /* camera origin in the IMU frame [m] */
+} xr_slam_cam_raw;
+
+/* Create + start the tracker from raw dataset calibration. noises as in
+ * xr_slam_start (NULL -> defaults); biases zero (datasets estimate them
+ * online). Returns 0 on success. */
+int xr_slam_start_raw(const xr_slam_cam_raw *left, const xr_slam_cam_raw *right,
+                      double imu_hz, const float noises[4]);
+
 void xr_slam_stop(void);
 void xr_slam_reset(void);
 int xr_slam_running(void);
@@ -81,5 +101,12 @@ void xr_slam_push_pair(const uint8_t *left, const uint8_t *right,
 /* Drain the pose queue; keeps the newest. Returns 1 if `out` was updated
  * with a fresh state, 0 if nothing new arrived. */
 int xr_slam_poll(xr_slam_state *out);
+
+/* Drain the pose queue delivering EVERY queued pose in order via `cb`
+ * (benchmark harness: the causal protocol needs one pose per frame — the
+ * newest-only poll would corrupt RTE and completion metrics). `state` is
+ * scratch storage reused across callbacks. Returns the number delivered. */
+int xr_slam_poll_each(void (*cb)(const xr_slam_state *st, void *user),
+                      void *user, xr_slam_state *state);
 
 #endif

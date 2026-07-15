@@ -1,0 +1,378 @@
+/* xr_replay_main.c — headless dataset replay through the production stack:
+ * replay pack (see bench/host/README.md) -> xr_slam (Basalt VIT) -> landmark
+ * confirm cache -> xr_map (loop closure / healing), emitting causal per-frame
+ * trajectories in TUM format:
+ *   <out>_vio.tum   raw Basalt odometry        (the "stock Basalt" baseline)
+ *   <out>_map.tum   session pose = D o odom    (ours: VIO + loop closure)
+ * One run produces both. Replicates the slam_worker order from xreal_jni.c:
+ * push_pair -> poll -> confirm-cache -> xr_map_offer -> get_correction ->
+ * compose. Build per dataset resolution: -DXR_OW=<W> -DXR_OH=<H>.
+ *
+ * Usage: xr_replay --pack <dir> --out <prefix> [--toml <basalt.toml>]
+ *        [--inflight N] [--fast] [--no-map] [--xfeat <model.onnx>]
+ */
+#include <inttypes.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "xr_map.h"
+#include "xr_slam.h"
+#include "xreal_core.h"
+
+#define DIE(...) do { fprintf(stderr, "xr_replay: " __VA_ARGS__); \
+                      fprintf(stderr, "\n"); exit(1); } while (0)
+
+/* ---------------- pack readers ---------------- */
+
+typedef struct { int W, H, n_frames; double fps, imu_hz; } pack_meta;
+
+static void read_meta(const char *dir, pack_meta *m) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/meta.txt", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) DIE("missing %s", path);
+    char k[64], v[256];
+    memset(m, 0, sizeof *m);
+    while (fscanf(f, " %63[^=\n]=%255s", k, v) == 2) {
+        if (!strcmp(k, "W")) m->W = atoi(v);
+        else if (!strcmp(k, "H")) m->H = atoi(v);
+        else if (!strcmp(k, "fps")) m->fps = atof(v);
+        else if (!strcmp(k, "imu_hz")) m->imu_hz = atof(v);
+        else if (!strcmp(k, "n_frames")) m->n_frames = atoi(v);
+    }
+    fclose(f);
+    if (m->W != XR_OW || m->H != XR_OH)
+        DIE("pack is %dx%d but this binary is built for %dx%d "
+            "(rebuild with -DXR_OW=%d -DXR_OH=%d)",
+            m->W, m->H, XR_OW, XR_OH, m->W, m->H);
+    if (m->imu_hz <= 0 || m->fps <= 0 || m->n_frames <= 0)
+        DIE("meta.txt missing fps/imu_hz/n_frames");
+}
+
+static void read_cam(FILE *f, const char *side, xr_slam_cam_raw *c,
+                     const pack_meta *m) {
+    char key[64];
+    char want[64];
+    snprintf(want, sizeof want, "%s_pinhole", side);
+    if (fscanf(f, "%63s %f %f %f %f", key, &c->fx, &c->fy, &c->cx, &c->cy) != 5
+        || strcmp(key, want))
+        DIE("calib.txt: expected '%s'", want);
+    if (fscanf(f, "%63s %f %f %f %f", key, &c->k[0], &c->k[1], &c->k[2],
+               &c->k[3]) != 5)
+        DIE("calib.txt: expected %s_dist", side);
+    if (fscanf(f, "%63s %f %f %f %f", key, &c->q_xyzw[0], &c->q_xyzw[1],
+               &c->q_xyzw[2], &c->q_xyzw[3]) != 5)
+        DIE("calib.txt: expected %s_q_xyzw", side);
+    if (fscanf(f, "%63s %f %f %f", key, &c->p[0], &c->p[1], &c->p[2]) != 4)
+        DIE("calib.txt: expected %s_p", side);
+    c->width = m->W;
+    c->height = m->H;
+    c->fps = m->fps;
+}
+
+static void read_calib(const char *dir, const pack_meta *m,
+                       xr_slam_cam_raw *L, xr_slam_cam_raw *R,
+                       float noises[4], int *have_noises) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/calib.txt", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) DIE("missing %s", path);
+    char key[64], model[64];
+    if (fscanf(f, "%63s %63s", key, model) != 2 || strcmp(key, "model") ||
+        strcmp(model, "kb4"))
+        DIE("calib.txt: expected 'model kb4'");
+    read_cam(f, "left", L, m);
+    read_cam(f, "right", R, m);
+    *have_noises = fscanf(f, "%63s %f %f %f %f", key, &noises[0], &noises[1],
+                          &noises[2], &noises[3]) == 5 &&
+                   !strcmp(key, "noises");
+    fclose(f);
+}
+
+/* ---------------- small quaternion helpers (Hamilton wxyz) ---------------- */
+
+static void quat_mul_wxyz(const float a[4], const float b[4], float o[4]) {
+    o[0] = a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3];
+    o[1] = a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2];
+    o[2] = a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1];
+    o[3] = a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0];
+}
+
+static void wxyz_to_rot(const float q[4], float R[9]) {
+    float w = q[0], x = q[1], y = q[2], z = q[3];
+    R[0] = 1 - 2 * (y * y + z * z); R[1] = 2 * (x * y - w * z); R[2] = 2 * (x * z + w * y);
+    R[3] = 2 * (x * y + w * z); R[4] = 1 - 2 * (x * x + z * z); R[5] = 2 * (y * z - w * x);
+    R[6] = 2 * (x * z - w * y); R[7] = 2 * (y * z + w * x); R[8] = 1 - 2 * (x * x + y * y);
+}
+
+static void m3v(const float R[9], const float v[3], float o[3]) {
+    o[0] = R[0] * v[0] + R[1] * v[1] + R[2] * v[2];
+    o[1] = R[3] * v[0] + R[4] * v[1] + R[5] * v[2];
+    o[2] = R[6] * v[0] + R[7] * v[1] + R[8] * v[2];
+}
+
+/* ---------------- frame ring (pose ts -> left image for xr_map) ---------- */
+
+#define RING_N 64
+static struct {
+    uint64_t ts[RING_N];
+    uint8_t *img[RING_N];   /* left frames, XR_OW*XR_OH each */
+    int head;
+} RING;
+
+static void ring_put(uint64_t ts, const uint8_t *left) {
+    int i = RING.head;
+    memcpy(RING.img[i], left, (size_t)XR_OW * XR_OH);
+    RING.ts[i] = ts;
+    RING.head = (i + 1) % RING_N;
+}
+
+static const uint8_t *ring_get(uint64_t ts) {
+    for (int i = 0; i < RING_N; i++)
+        if (RING.ts[i] == ts) return RING.img[i];
+    return NULL;
+}
+
+/* ---------------- per-pose processing ---------------- */
+
+/* landmark confirm cache, ported from slam_worker (xreal_jni.c:1081-1140):
+ * a 3D position is only trusted after TWO exports that agree (<0.35 m) —
+ * single gate-passing values of later-divergent depths starve RANSAC. */
+static struct {
+    int32_t id;
+    float xyz[3];
+    uint64_t ts;
+    int hits;
+} LMC[1024];
+
+typedef struct {
+    FILE *f_vio, *f_map;
+    int use_map;
+    int geom_wired;
+    long n_poses;
+    long n_offers;
+} pose_ctx;
+
+static void tum_line(FILE *f, uint64_t ts_ns, const float q_wxyz[4],
+                     const float p[3]) {
+    fprintf(f, "%.9f %.6f %.6f %.6f %.7f %.7f %.7f %.7f\n",
+            ts_ns / 1e9, p[0], p[1], p[2],
+            q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]);
+}
+
+static void on_pose(const xr_slam_state *st_in, void *user) {
+    pose_ctx *ctx = user;
+    xr_slam_state *st = (xr_slam_state *)st_in;   /* scratch, mutable */
+    ctx->n_poses++;
+    tum_line(ctx->f_vio, st->ts, st->q, st->p);
+    if (!ctx->use_map) return;
+
+    if (!ctx->geom_wired) {
+        float Ric[9], pic[3];
+        if (xr_slam_cam0_geom(Ric, pic) == 0) {
+            xr_map_set_geom(xr_slam_unproject0, Ric, pic);
+            ctx->geom_wired = 1;
+        }
+    }
+
+    /* confirm cache update */
+    for (int i = 0; i < st->n_landmarks; i++) {
+        uint32_t h = ((uint32_t)st->lm_id[i] * 2654435761u) & 1023u;
+        int slot = (int)h, oldest = (int)h;
+        for (int k = 0; k < 16; k++) {
+            uint32_t j = (h + k) & 1023u;
+            if (!LMC[j].ts || LMC[j].id == st->lm_id[i]) { slot = (int)j; break; }
+            if (LMC[j].ts < LMC[oldest].ts) oldest = (int)j;
+            slot = oldest;
+        }
+        if (LMC[slot].ts && LMC[slot].id == st->lm_id[i]) {
+            float dx = LMC[slot].xyz[0] - st->lm_xyz[i][0];
+            float dy = LMC[slot].xyz[1] - st->lm_xyz[i][1];
+            float dz = LMC[slot].xyz[2] - st->lm_xyz[i][2];
+            if (dx * dx + dy * dy + dz * dz < 0.35f * 0.35f) {
+                if (LMC[slot].hits < 100) LMC[slot].hits++;
+            } else {
+                LMC[slot].hits = 1;
+            }
+        } else {
+            LMC[slot].id = st->lm_id[i];
+            LMC[slot].hits = 1;
+        }
+        memcpy(LMC[slot].xyz, st->lm_xyz[i], sizeof LMC[slot].xyz);
+        LMC[slot].ts = st->ts;
+    }
+    static int32_t off_id[XR_SLAM_MAX_FEATURES];
+    static float off_xyz[XR_SLAM_MAX_FEATURES][3];
+    static float off_uv[XR_SLAM_MAX_FEATURES][2];
+    int off_n = 0;
+    for (int i = 0; i < st->n_features; i++) {
+        uint32_t h = ((uint32_t)st->feat_id[i] * 2654435761u) & 1023u;
+        for (int k = 0; k < 16; k++) {
+            uint32_t j = (h + k) & 1023u;
+            if (!LMC[j].ts) break;
+            if (LMC[j].id == st->feat_id[i]) {
+                if (LMC[j].hits >= 2 && st->ts - LMC[j].ts < 2000000000ull) {
+                    off_id[off_n] = st->feat_id[i];
+                    memcpy(off_xyz[off_n], LMC[j].xyz, sizeof off_xyz[0]);
+                    off_uv[off_n][0] = st->feat_uv[i][0];
+                    off_uv[off_n][1] = st->feat_uv[i][1];
+                    off_n++;
+                }
+                break;
+            }
+        }
+    }
+
+    const uint8_t *img = ring_get(st->ts);
+    if (img) {
+        xr_map_freeze_storage(0);
+        xr_map_offer(st->q, st->p, st->ts, img, off_id, off_xyz, off_uv, off_n);
+        ctx->n_offers++;
+    }
+
+    /* session correction (identity until the first verified closure) */
+    float cq[4], cp[3], CR[9], t3[3], qs[4];
+    xr_map_get_correction(cq, cp);
+    wxyz_to_rot(cq, CR);
+    quat_mul_wxyz(cq, st->q, qs);
+    m3v(CR, st->p, t3);
+    float p2[3] = { t3[0] + cp[0], t3[1] + cp[1], t3[2] + cp[2] };
+    tum_line(ctx->f_map, st->ts, qs, p2);
+}
+
+/* ---------------- main ---------------- */
+
+int main(int argc, char **argv) {
+    const char *pack = NULL, *out = NULL, *toml = NULL, *xfeat = NULL;
+    int inflight = 6, fast = 0, use_map = 1;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--pack") && i + 1 < argc) pack = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
+        else if (!strcmp(argv[i], "--toml") && i + 1 < argc) toml = argv[++i];
+        else if (!strcmp(argv[i], "--xfeat") && i + 1 < argc) xfeat = argv[++i];
+        else if (!strcmp(argv[i], "--inflight") && i + 1 < argc) inflight = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--fast")) fast = 1;
+        else if (!strcmp(argv[i], "--no-map")) use_map = 0;
+        else DIE("unknown arg '%s'", argv[i]);
+    }
+    if (!pack || !out) DIE("usage: xr_replay --pack <dir> --out <prefix> "
+                           "[--toml f] [--inflight N] [--fast] [--no-map] "
+                           "[--xfeat model.onnx]");
+
+    pack_meta meta;
+    read_meta(pack, &meta);
+    xr_slam_cam_raw L, R;
+    float noises[4];
+    int have_noises = 0;
+    read_calib(pack, &meta, &L, &R, noises, &have_noises);
+
+    char path[1024];
+    snprintf(path, sizeof path, "%s/imu.bin", pack);
+    FILE *f_imu = fopen(path, "rb");
+    if (!f_imu) DIE("missing %s", path);
+    snprintf(path, sizeof path, "%s/frames.csv", pack);
+    FILE *f_idx = fopen(path, "r");
+    if (!f_idx) DIE("missing %s", path);
+    snprintf(path, sizeof path, "%s/frames.raw", pack);
+    FILE *f_raw = fopen(path, "rb");
+    if (!f_raw) DIE("missing %s", path);
+
+    for (int i = 0; i < RING_N; i++) {
+        RING.img[i] = malloc((size_t)XR_OW * XR_OH);
+        if (!RING.img[i]) DIE("oom");
+    }
+    uint8_t *fr = malloc((size_t)2 * XR_OW * XR_OH);
+    if (!fr) DIE("oom");
+
+    pose_ctx ctx = { 0 };
+    ctx.use_map = use_map;
+    char fname[1100];
+    snprintf(fname, sizeof fname, "%s_vio.tum", out);
+    ctx.f_vio = fopen(fname, "w");
+    snprintf(fname, sizeof fname, "%s_map.tum", out);
+    ctx.f_map = fopen(fname, "w");
+    if (!ctx.f_vio || !ctx.f_map) DIE("cannot open outputs '%s_*.tum'", out);
+
+    if (toml) xr_slam_set_config(toml);
+    if (use_map) {
+        xr_map_set_mapping(1);
+        xr_map_set_recovery(1);
+        if (xfeat) {
+            xr_map_set_model(xfeat);
+            xr_map_set_use_xfeat(1);
+        }
+    }
+    if (xr_slam_start_raw(&L, &R, meta.imu_hz,
+                          have_noises ? noises : NULL) != 0)
+        DIE("Basalt failed to start (libbasalt.so on LD_LIBRARY_PATH?)");
+
+    /* interleaved feed in timestamp order */
+    struct { int64_t ts; float g[3], a[3]; } imu;
+    int have_imu = fread(&imu, 32, 1, f_imu) == 1;
+    xr_slam_state scratch;
+    long frames_pushed = 0, frames_skipped = 0, imu_pushed = 0;
+    uint64_t f_ts;
+    long f_i;
+    long line = 0;
+    while (fscanf(f_idx, "%" SCNu64 ",%ld\n", &f_ts, &f_i) == 2) {
+        while (have_imu && (uint64_t)imu.ts <= f_ts) {
+            xr_slam_push_imu((uint64_t)imu.ts, imu.g, imu.a);
+            imu_pushed++;
+            have_imu = fread(&imu, 32, 1, f_imu) == 1;
+        }
+        if (fread(fr, (size_t)2 * XR_OW * XR_OH, 1, f_raw) != 1)
+            DIE("frames.raw truncated at pair %ld", line);
+        if (imu_pushed >= 300) {
+            ring_put(f_ts, fr);
+            xr_slam_push_pair(fr, fr + (size_t)XR_OW * XR_OH, f_ts);
+            frames_pushed++;
+        } else {
+            frames_skipped++;   /* IMU warmup window */
+        }
+        xr_slam_poll_each(on_pose, &ctx, &scratch);
+        if (!fast) {           /* observed backpressure: don't outrun VIO */
+            int spins = 0;
+            while (frames_pushed - ctx.n_poses > inflight && spins++ < 2500) {
+                usleep(2000);
+                xr_slam_poll_each(on_pose, &ctx, &scratch);
+            }
+        }
+        line++;
+    }
+    while (have_imu) {          /* tail IMU */
+        xr_slam_push_imu((uint64_t)imu.ts, imu.g, imu.a);
+        have_imu = fread(&imu, 32, 1, f_imu) == 1;
+    }
+    long quiet = 0, last = ctx.n_poses;
+    while (quiet < 20) {        /* drain until 2 s with no new poses */
+        usleep(100000);
+        xr_slam_poll_each(on_pose, &ctx, &scratch);
+        quiet = ctx.n_poses == last ? quiet + 1 : 0;
+        last = ctx.n_poses;
+    }
+    xr_slam_stop();
+
+    int kf = use_map ? xr_map_num_keyframes() : 0;
+    int loops = 0, matches = 0;
+    float lp[3] = { 0 };
+    if (use_map) xr_map_loop_stats(&loops, lp, &matches);
+    int vpairs = 0, vinl = 0;
+    if (use_map) xr_map_verify_stats(&vpairs, &vinl);
+    fprintf(stderr,
+            "xr_replay done: pairs=%ld pushed=%ld warmup_skip=%ld imu=%ld "
+            "poses=%ld offers=%ld completion=%.1f%% kf=%d loops=%d "
+            "last_verify=%d/%d\n",
+            line, frames_pushed, frames_skipped, imu_pushed, ctx.n_poses,
+            ctx.n_offers, 100.0 * ctx.n_poses / (line ? line : 1), kf, loops,
+            vinl, vpairs);
+    fclose(ctx.f_vio);
+    fclose(ctx.f_map);
+    fclose(f_imu);
+    fclose(f_idx);
+    fclose(f_raw);
+    return 0;
+}

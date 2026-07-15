@@ -1,0 +1,6 @@
+# build artifacts
+replay/libs/
+replay/obj/
+replay/xr_replay_*
+container/basalt-linux/
+container/lib/

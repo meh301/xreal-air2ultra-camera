@@ -380,17 +380,9 @@ static void kb4_unproject(const float k[8], float u, float v, float ray[3]) {
     ray[2] = cosf(th);
 }
 
-int xr_slam_poll(xr_slam_state *out) {
-    if (!atomic_load(&B.running)) return 0;
-    vit_pose_t *newest = NULL;
-    for (;;) {
-        vit_pose_t *p = NULL;
-        if (B.pop_pose(B.tracker, &p) != VIT_SUCCESS || !p) break;
-        if (newest) B.pose_destroy(newest);
-        newest = p;
-    }
-    if (!newest) return 0;
-
+/* unpack one popped pose into xr_slam_state (shared by the newest-only
+ * poll and the benchmark's every-pose drain); destroys the pose. */
+static int fill_state(vit_pose_t *newest, xr_slam_state *out) {
     vit_pose_data_t d;
     if (B.pose_data(newest, &d) != VIT_SUCCESS) {
         B.pose_destroy(newest);
@@ -465,4 +457,114 @@ int xr_slam_poll(xr_slam_state *out) {
     }
     B.pose_destroy(newest);
     return 1;
+}
+
+int xr_slam_poll(xr_slam_state *out) {
+    if (!atomic_load(&B.running)) return 0;
+    vit_pose_t *newest = NULL;
+    for (;;) {
+        vit_pose_t *p = NULL;
+        if (B.pop_pose(B.tracker, &p) != VIT_SUCCESS || !p) break;
+        if (newest) B.pose_destroy(newest);
+        newest = p;
+    }
+    if (!newest) return 0;
+    return fill_state(newest, out);
+}
+
+int xr_slam_poll_each(void (*cb)(const xr_slam_state *st, void *user),
+                      void *user, xr_slam_state *state) {
+    if (!atomic_load(&B.running)) return 0;
+    int n = 0;
+    for (;;) {
+        vit_pose_t *p = NULL;
+        if (B.pop_pose(B.tracker, &p) != VIT_SUCCESS || !p) break;
+        if (fill_state(p, state)) {   /* destroys p */
+            cb(state, user);
+            n++;
+        }
+    }
+    return n;
+}
+
+int xr_slam_start_raw(const xr_slam_cam_raw *left, const xr_slam_cam_raw *right,
+                      double imu_hz, const float noises[4]) {
+    if (!xr_slam_load()) return -1;
+    if (B.tracker) return 0;
+    if (left->width != XR_OW || left->height != XR_OH ||
+        right->width != XR_OW || right->height != XR_OH) {
+        LOGE("Basalt raw: calib %dx%d but this build is compiled for %dx%d — "
+             "rebuild with -DXR_OW/-DXR_OH", left->width, left->height,
+             XR_OW, XR_OH);
+        return -1;
+    }
+
+    vit_config_t cfg = { .file = B.config_path[0] ? B.config_path : NULL,
+                         .cam_count = 2, .imu_count = 1, .show_ui = false };
+    if (cfg.file) LOGI("Basalt: using config %s", cfg.file);
+    if (B.create(&cfg, &B.tracker) != VIT_SUCCESS || !B.tracker) {
+        LOGE("Basalt: tracker create failed");
+        B.tracker = NULL;
+        return -1;
+    }
+    B.enable_ext(B.tracker, VIT_TRACKER_EXTENSION_POSE_FEATURES, true);
+
+    for (int i = 0; i < 2; i++) {
+        const xr_slam_cam_raw *c = i ? right : left;
+        vit_camera_calibration_t cc;
+        memset(&cc, 0, sizeof cc);
+        cc.camera_index = (uint32_t)i;
+        cc.width = c->width;
+        cc.height = c->height;
+        cc.frequency = c->fps;
+        cc.fx = c->fx; cc.fy = c->fy; cc.cx = c->cx; cc.cy = c->cy;
+        cc.model = VIT_CAMERA_DISTORTION_KB4;
+        cc.distortion_count = 4;
+        for (int k = 0; k < 4; k++) cc.distortion[k] = c->k[k];
+        B.kb4[i][0] = c->fx; B.kb4[i][1] = c->fy;
+        B.kb4[i][2] = c->cx; B.kb4[i][3] = c->cy;
+        for (int k = 0; k < 4; k++) B.kb4[i][4 + k] = c->k[k];
+        float R[9];
+        quat_to_rot_xyzw(c->q_xyzw, 0, R);
+        memcpy(B.R_ic[i], R, sizeof R);
+        memcpy(B.p_ic[i], c->p, sizeof B.p_ic[i]);
+        for (int r = 0; r < 3; r++) {
+            for (int cc2 = 0; cc2 < 3; cc2++)
+                cc.transform[r * 4 + cc2] = R[r * 3 + cc2];
+            cc.transform[r * 4 + 3] = c->p[r];
+        }
+        cc.transform[15] = 1.0;
+        B.add_cam_calib(B.tracker, &cc);
+    }
+    LOGI("Basalt raw: kb4 left fx=%.1f k=[%.4f %.4f %.4f %.4f] imu %.0f Hz",
+         B.kb4[0][0], B.kb4[0][4], B.kb4[0][5], B.kb4[0][6], B.kb4[0][7],
+         imu_hz);
+
+    vit_imu_calibration_t ic;
+    memset(&ic, 0, sizeof ic);
+    ic.imu_index = 0;
+    ic.frequency = imu_hz;
+    float nz[4] = { 0.00035f, 0.0001f, 0.00667f, 0.001f };
+    if (noises) memcpy(nz, noises, sizeof nz);
+    for (int i = 0; i < 3; i++) {
+        ic.accel.transform[i * 3 + i] = 1.0;
+        ic.gyro.transform[i * 3 + i] = 1.0;
+        ic.gyro.noise_std[i] = nz[0];
+        ic.gyro.bias_std[i] = nz[1];
+        ic.accel.noise_std[i] = nz[2];
+        ic.accel.bias_std[i] = nz[3];
+    }
+    B.add_imu_calib(B.tracker, &ic);
+
+    if (B.start(B.tracker) != VIT_SUCCESS) {
+        LOGE("Basalt: tracker start failed");
+        B.destroy(B.tracker);
+        B.tracker = NULL;
+        return -1;
+    }
+    atomic_store(&B.imu_pushed, 0);
+    B.last_pair_ts = 0;
+    atomic_store(&B.running, 1);
+    LOGI("Basalt VIO started (raw calib, %d cams, %.0f Hz IMU)", 2, imu_hz);
+    return 0;
 }

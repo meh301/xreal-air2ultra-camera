@@ -15,9 +15,20 @@ enum {
     XR_CTR_COL = 18, XR_CAM_COL = 59,       /* telemetry: pair counter, camera bit */
     XR_FRAME_BYTES = XR_W * XR_H_FULL,      /* 308480 */
     XR_IMG_BYTES = XR_W * XR_H_IMG,         /* 307200 */
-    XR_NB = 128, XR_BS = 2400,              /* scramble blocks */
-    XR_OW = 480, XR_OH = 640                /* descrambled portrait size */
+    XR_NB = 128, XR_BS = 2400               /* scramble blocks */
 };
+
+/* Working image size fed to SLAM/map (descrambled portrait on-device).
+ * Overridable at compile time (-DXR_OW=... -DXR_OH=...) so the benchmark
+ * replay harness can rebuild the stack at dataset resolutions (EuRoC
+ * 752x480, TUM-VI 512x512, MSD 640x480/960x960); all downstream buffers
+ * (xr_slam frame pushes, xr_map integral/keyframe arrays) size from these. */
+#ifndef XR_OW
+#define XR_OW 480
+#endif
+#ifndef XR_OH
+#define XR_OH 640
+#endif
 
 /* Byte order of the delivered stream. The fourcc is fake, so a UVC stack may
  * hand us the bytes of each 16-bit "YUV" pair in either order; constant
