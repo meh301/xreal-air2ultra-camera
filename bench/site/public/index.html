@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SLAM Benchmark Explorer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>SLAM Benchmark Explorer</h1>
+  <div class="sub" id="meta-line">loading…</div>
+  <nav id="tabs"></nav>
+  <div id="filters">
+    <span class="flabel">arms:</span><span id="arm-chips"></span>
+    <label class="chk"><input type="checkbox" id="show-pub" checked> published refs</label>
+    <label class="chk"><input type="checkbox" id="show-base" checked> baselines</label>
+    <label class="chk"><input type="checkbox" id="metric-rte"> RTE instead of ATE</label>
+  </div>
+</header>
+<main id="view"></main>
+<div id="drill" class="hidden">
+  <div id="drill-card">
+    <button id="drill-close">×</button>
+    <h2 id="drill-title"></h2>
+    <div id="drill-body"></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

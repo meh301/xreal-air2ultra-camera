@@ -1,0 +1,10 @@
+[
+  {"seq":"dataset-room1_512_16","group":"rooms","system":"Basalt","ate_cm":6.3,"regime":"500kbps, stereo VO no-IMU, LC off — VOCA tbl.2","source":"arXiv:2607.00189"},
+  {"seq":"dataset-room2_512_16","group":"rooms","system":"Basalt","ate_cm":12.8,"regime":"500kbps, stereo VO no-IMU, LC off — VOCA tbl.2","source":"arXiv:2607.00189"},
+  {"seq":"dataset-room3_512_16","group":"rooms","system":"Basalt","ate_cm":15.3,"regime":"500kbps, stereo VO no-IMU, LC off — VOCA tbl.2","source":"arXiv:2607.00189"},
+  {"seq":"dataset-room4_512_16","group":"rooms","system":"Basalt","ate_cm":14.4,"regime":"500kbps, stereo VO no-IMU, LC off — VOCA tbl.2","source":"arXiv:2607.00189"},
+  {"seq":"dataset-room5_512_16","group":"rooms","system":"Basalt","ate_cm":54.5,"regime":"500kbps, stereo VO no-IMU, LC off — VOCA tbl.2","source":"arXiv:2607.00189"},
+  {"seq":"dataset-room6_512_16","group":"rooms","system":"Basalt","ate_cm":4.7,"regime":"500kbps, stereo VO no-IMU, LC off — VOCA tbl.2","source":"arXiv:2607.00189"},
+  {"seq":"dataset-magistrale2_512_16","group":"long","system":"Basalt","ate_cm":323.0,"regime":"non-causal, VI, no LC — Basalt paper via OKVIS2 tbl","source":"arXiv:1904.06504"},
+  {"seq":"MH_01_easy","group":"euroc","system":"OKVIS2 (paper)","ate_cm":3.1,"regime":"non-causal 0.031m avg EuRoC; causal 0.071 4-DoF — see baselines for our same-machine runs","source":"arXiv:2202.09199"}
+]
