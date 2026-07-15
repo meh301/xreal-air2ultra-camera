@@ -233,12 +233,14 @@ function orbitView(cv, cam, g) {
   return { set(t) { trajs = t; draw(); } };
 }
 
-/* multi-series error-over-time; drag-zoom shared across all series */
-function timelineMulti(cv, series) {   // series = [{t, err, color, label}]
+/* multi-series error-over-time; drag-zoom shared across all series.
+ * opts.onRange(x0, x1|null) fires when the zoom window changes (null = reset);
+ * opts.range = [x0, x1] restores a prior window (survives arm toggles). */
+function timelineMulti(cv, series, opts = {}) {   // series = [{t, err, color, label}]
   const ctx = cv.getContext("2d");
   const W = cv.width, H = cv.height, ml = 44, mb = 26, mt = 10;
   const tmax = Math.max(1, ...series.map(s => s.t[s.t.length - 1] || 0));
-  let x0 = 0, x1 = tmax, sel = null;
+  let x0 = opts.range ? opts.range[0] : 0, x1 = opts.range ? opts.range[1] : tmax, sel = null;
   // median dt per series → break the line when a gap exceeds ~8× it (no-GT holes)
   series.forEach(s => {
     const dts = []; for (let i = 1; i < s.t.length; i++) if (s.err[i] != null && s.err[i - 1] != null) dts.push(s.t[i] - s.t[i - 1]);
@@ -271,8 +273,14 @@ function timelineMulti(cv, series) {   // series = [{t, err, color, label}]
   const px = e => { const r = cv.getBoundingClientRect(); return (e.clientX - r.left) * W / r.width; };
   cv.onpointerdown = e => { sel = { a: px(e), b: px(e) }; cv.setPointerCapture(e.pointerId); };
   cv.onpointermove = e => { if (sel) { sel.b = px(e); draw(); } };
-  cv.onpointerup = () => { if (sel && Math.abs(sel.b - sel.a) > 10) { x0 = tAt(Math.min(sel.a, sel.b)); x1 = tAt(Math.max(sel.a, sel.b)); } sel = null; draw(); };
-  cv.ondblclick = () => { x0 = 0; x1 = tmax; draw(); };
+  cv.onpointerup = () => {
+    if (sel && Math.abs(sel.b - sel.a) > 10) {
+      x0 = tAt(Math.min(sel.a, sel.b)); x1 = tAt(Math.max(sel.a, sel.b));
+      opts.onRange?.([x0, x1]);
+    }
+    sel = null; draw();
+  };
+  cv.ondblclick = () => { x0 = 0; x1 = tmax; draw(); opts.onRange?.(null); };
 }
 
 /* sequence selector + MULTI-arm chips + persistent-camera 3D orbit + timeline.
@@ -300,7 +308,16 @@ function trajPanel({ group, seq, compact } = {}) {
   const cam = {};                         // PERSISTENT across arm toggles
   let orbit = null, gInfo = null, gtData = null, token = 0;
   let availArms = [];                     // arms that actually HAVE a trajectory
+  let timeRange = null;                   // timeline brush [t0,t1] — arms only
   const sel = new Set();                  // selected arms
+
+  // clip an arm's trajectory to the brushed time window (GT is never clipped)
+  function clipArm(d) {
+    if (!timeRange || !d.t) return d;
+    const [a, b] = timeRange;
+    const idx = d.t.map((t, i) => t >= a && t <= b ? i : -1).filter(i => i >= 0);
+    return { est: idx.map(i => d.est[i]), err: d.err ? idx.map(i => d.err[i]) : null, t: idx.map(i => d.t[i]) };
+  }
 
   function gridInfo(gt) {
     const withOrigin = gt.concat([[0, 0, 0]]);
@@ -319,25 +336,38 @@ function trajPanel({ group, seq, compact } = {}) {
     if (!(a in jsonCache)) jsonCache[a] = await loadJSON(`data/traj/${seq}_${a}.json`, null);
     return jsonCache[a];
   }
-  async function redraw() {
+  async function updateOrbit() {
     if (!orbit) return;
     const active = [...sel];
     const loaded = await Promise.all(active.map(getArm));
-    const trajs = [{ pts: gtData, color: col("gt"), w: 1.6 }];
+    const trajs = [{ pts: gtData, color: col("gt"), w: 1.6 }];   // GT always full
     const singleErr = active.length === 1 && loaded[0]?.err;
-    loaded.forEach((d, i) => { if (d?.est) trajs.push(singleErr ? { pts: d.est, err: d.err } : { pts: d.est, color: col(active[i]) }); });
+    loaded.forEach((d, i) => {
+      if (!d?.est) return;
+      const c = clipArm(d);
+      trajs.push(singleErr ? { pts: c.est, err: c.err } : { pts: c.est, color: col(active[i]) });
+    });
     orbit.set(trajs);
-    // legend + timeline
     legendHost.innerHTML = `<span><i style="background:var(--c-gt)"></i>ground truth</span>` +
       (singleErr ? `<span><i style="background:linear-gradient(90deg,#2a78d6,#d83b3b)"></i>error 0→50 cm</span>`
                  : active.map(a => `<span><i style="background:${col(a)}"></i>${ARM_LABEL[a]}</span>`).join("")) +
-      `<span class="hint">drag = orbit · wheel = zoom · shift/right-drag = pan · grid on z=0 through origin</span>`;
+      (timeRange ? `<span class="hint">showing ${timeRange[0].toFixed(0)}–${timeRange[1].toFixed(0)} s (arms only) — double-click the timeline to reset</span>`
+                 : `<span class="hint">drag = orbit · wheel = zoom · shift/right-drag = pan · grid on z=0 through origin</span>`);
+  }
+  async function redraw() {
+    if (!orbit) return;
+    await updateOrbit();
+    const active = [...sel];
+    const loaded = await Promise.all(active.map(getArm));
+    const singleErr = active.length === 1 && loaded[0]?.err;
     tlWrap.innerHTML = "";
     const ts = active.map((a, i) => loaded[i]?.err && loaded[i]?.t ? { t: loaded[i].t, err: loaded[i].err, color: singleErr ? col("base") : col(a), label: ARM_LABEL[a] } : null).filter(Boolean);
     if (ts.length) {
       const tcv = el("canvas", { width: 1000, height: 180 });
       const w = el("div", { class: "viewbox", style: "margin-top:10px" });
-      w.append(tcv); tlWrap.append(w); timelineMulti(tcv, ts);
+      w.append(tcv); tlWrap.append(w);
+      timelineMulti(tcv, ts, { range: timeRange,
+        onRange: r => { timeRange = r; updateOrbit(); } });
     }
   }
   function buildArmChips() {
@@ -366,7 +396,7 @@ function trajPanel({ group, seq, compact } = {}) {
     gtData = withGt[1].gt; gInfo = gridInfo(gtData); orbit = orbitView(cv, cam, gInfo);
     buildArmChips(); redraw();
   }
-  seqSel.onchange = () => { seq = seqSel.value; sel.clear(); loadSeq(); };
+  seqSel.onchange = () => { seq = seqSel.value; sel.clear(); timeRange = null; loadSeq(); };
   loadSeq();
   return card;
 }
