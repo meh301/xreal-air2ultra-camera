@@ -126,12 +126,30 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500):
                 continue
             if est.ndim != 2 or len(est) < 10:
                 continue
-            def ds(a):
-                step = max(1, len(a) // max_pts)
-                return [[round(float(x), 3), round(float(y), 3)]
-                        for x, y in a[::step, 1:3]]
-            (out_dir / f"{seq}_{arm}.json").write_text(json.dumps(
-                {"est": ds(est), "gt": ds(gta)}))
+            # associate + SE3-Umeyama align est to GT for honest 3D overlay
+            gt_t, gt_p = gta[:, 0], gta[:, 1:4]
+            t, p = est[:, 0], est[:, 1:4]
+            i = np.clip(np.searchsorted(gt_t, t), 0, len(gt_t) - 1)
+            ok = np.abs(gt_t[i] - t) < 0.02
+            A, B = p[ok], gt_p[i][ok]
+            if len(A) < 10:
+                continue
+            ca, cb = A.mean(0), B.mean(0)
+            Hm = (A - ca).T @ (B - cb)
+            U, S, Vt = np.linalg.svd(Hm)
+            D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
+            R = Vt.T @ D @ U.T
+            Aal = (R @ (A - ca).T).T + cb
+            err = np.linalg.norm(Aal - B, axis=1) * 100.0
+            ts = t[ok] - t[ok][0]
+            step = max(1, len(Aal) // max_pts)
+            gstep = max(1, len(gt_p) // max_pts)
+            r3 = lambda a: [[round(float(v), 3) for v in row] for row in a]
+            (out_dir / f"{seq}_{arm}.json").write_text(json.dumps({
+                "est": r3(Aal[::step]), "gt": r3(gt_p[::gstep]),
+                "err": [round(float(e), 1) for e in err[::step]],
+                "t": [round(float(x), 2) for x in ts[::step]],
+            }))
             n += 1
     return n
 

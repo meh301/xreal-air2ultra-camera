@@ -166,6 +166,130 @@ function trajViewer(data, armColor) {
   return wrap;
 }
 
+/* ---------- 3D orbit trajectory viewer (canvas) ---------- */
+function orbitViewer(data, armColor) {
+  const W = 880, H = 540;
+  const wrap = el("div", { class: "traj-wrap" });
+  const cv = el("canvas", { width: W, height: H, style: "width:100%;display:block" });
+  wrap.append(cv);
+  const ctx = cv.getContext("2d");
+  const pts = data.gt.concat(data.est);
+  const c = [0, 1, 2].map(k => pts.reduce((s, p) => s + p[k], 0) / pts.length);
+  const span = Math.max(...pts.map(p => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]))) || 1;
+  let yaw = 0.7, pitch = 0.5, zoom = 1, panX = 0, panY = 0;
+  const errCol = e => {
+    const t = Math.min(e / 60, 1);   // 0..60cm ramp
+    return `hsl(${(1 - t) * 210},80%,55%)`;
+  };
+  function proj(p) {
+    const x = p[0] - c[0], y = p[1] - c[1], z = p[2] - c[2];
+    const cy = Math.cos(yaw), sy = Math.sin(yaw);
+    const cp = Math.cos(pitch), sp = Math.sin(pitch);
+    const x1 = x * cy - y * sy, y1 = x * sy + y * cy;
+    const y2 = y1 * cp - z * sp, z2 = y1 * sp + z * cp;
+    const s = (H * 0.42 * zoom) / span;
+    return [W / 2 + x1 * s + panX, H / 2 - z2 * s + panY, y2];
+  }
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.lineWidth = 1.2;
+    // ground-truth: neutral
+    ctx.strokeStyle = "#8888";
+    ctx.beginPath();
+    data.gt.forEach((p, i) => {
+      const [x, y] = proj(p);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+    // estimate: error-colored segments when err available, else arm color
+    for (let i = 1; i < data.est.length; i++) {
+      const [x0, y0] = proj(data.est[i - 1]);
+      const [x1, y1] = proj(data.est[i]);
+      ctx.strokeStyle = data.err ? errCol(data.err[i] ?? 0) : armColor;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+    ctx.fillStyle = "#999"; ctx.font = "11px system-ui";
+    ctx.fillText("drag = orbit · wheel = zoom · shift-drag = pan · color = error (blue→red 0–60 cm)", 10, H - 10);
+  }
+  let drag = null;
+  cv.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey }; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (drag.pan) { panX += dx; panY += dy; }
+    else { yaw += dx * 0.008; pitch = Math.max(-1.55, Math.min(1.55, pitch + dy * 0.008)); }
+    drag.x = e.clientX; drag.y = e.clientY;
+    requestAnimationFrame(draw);
+  });
+  cv.addEventListener("pointerup", () => drag = null);
+  wrap.addEventListener("wheel", e => {
+    e.preventDefault();
+    zoom *= e.deltaY > 0 ? 1 / 1.15 : 1.15;
+    requestAnimationFrame(draw);
+  }, { passive: false });
+  draw();
+  return wrap;
+}
+
+/* ---------- error-over-time strip (drag to zoom, dblclick reset) ---------- */
+function errTimeline(data) {
+  if (!data.err || !data.t) return null;
+  const W = 880, H = 170, ml = 42, mb = 24, mt = 8;
+  const wrap = el("div", { class: "traj-wrap" });
+  const cv = el("canvas", { width: W, height: H, style: "width:100%;display:block" });
+  wrap.append(cv);
+  const ctx = cv.getContext("2d");
+  let x0 = 0, x1 = data.t[data.t.length - 1];
+  let sel = null;
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    const inRange = data.t.map((t, i) => [t, data.err[i]]).filter(p => p[0] >= x0 && p[0] <= x1);
+    const ymax = Math.max(10, ...inRange.map(p => p[1])) * 1.1;
+    const X = t => ml + (t - x0) / (x1 - x0 || 1) * (W - ml - 8);
+    const Y = v => mt + (1 - v / ymax) * (H - mt - mb);
+    ctx.strokeStyle = "#8884"; ctx.fillStyle = "#999"; ctx.font = "10px system-ui";
+    for (let g = 0; g <= 3; g++) {
+      const v = ymax * g / 3;
+      ctx.beginPath(); ctx.moveTo(ml, Y(v)); ctx.lineTo(W - 8, Y(v)); ctx.stroke();
+      ctx.fillText(v.toFixed(0), 6, Y(v) + 3);
+    }
+    ctx.strokeStyle = "#e34948"; ctx.lineWidth = 1.4; ctx.beginPath();
+    inRange.forEach((p, i) => {
+      i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1]));
+    });
+    ctx.stroke();
+    ctx.fillText("position error [cm] vs time [s] — drag to zoom, double-click to reset",
+                 ml, H - 8);
+    if (sel) {
+      ctx.fillStyle = "rgba(42,120,214,.18)";
+      ctx.fillRect(Math.min(sel.a, sel.b), mt, Math.abs(sel.b - sel.a), H - mt - mb);
+    }
+  }
+  const tAt = px => x0 + (px - ml) / (W - ml - 8) * (x1 - x0);
+  cv.addEventListener("pointerdown", e => {
+    const r = cv.getBoundingClientRect();
+    sel = { a: (e.clientX - r.left) * W / r.width, b: (e.clientX - r.left) * W / r.width };
+    cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!sel) return;
+    const r = cv.getBoundingClientRect();
+    sel.b = (e.clientX - r.left) * W / r.width;
+    requestAnimationFrame(draw);
+  });
+  cv.addEventListener("pointerup", () => {
+    if (sel && Math.abs(sel.b - sel.a) > 12) {
+      const [a, b] = [tAt(Math.min(sel.a, sel.b)), tAt(Math.max(sel.a, sel.b))];
+      x0 = a; x1 = b;
+    }
+    sel = null;
+    draw();
+  });
+  cv.addEventListener("dblclick", () => { x0 = 0; x1 = data.t[data.t.length - 1]; draw(); });
+  draw();
+  return wrap;
+}
+
 /* ---------- drill-down ---------- */
 async function drill(seq) {
   $("#drill-title").textContent = shortName(seq);
@@ -192,15 +316,21 @@ async function drill(seq) {
     }
   }
   body.append(el("h3", {}, "runs (ATE cm)"), t);
-  // trajectory
+  // trajectory: 3D orbit + error timeline + 2D top view
   for (const arm of ARMS.filter(a => S.armOn[a])) {
     const d = await loadJSON(`data/traj/${seq}_${arm}.json`, null);
-    if (d) {
-      body.append(el("h3", {}, `trajectory — ${ARM_LABEL[arm]} (map track, r1)`),
-                  trajViewer(d, cssColor(arm)),
+    if (!d) continue;
+    const is3d = d.est[0] && d.est[0].length >= 3;
+    body.append(el("h3", {}, `trajectory — ${ARM_LABEL[arm]} (map track, r1) vs ground truth`));
+    if (is3d) {
+      body.append(orbitViewer(d, cssColor(arm)));
+      const et = errTimeline(d);
+      if (et) body.append(et);
+    } else {
+      body.append(trajViewer(d, cssColor(arm)),
                   el("div", { class: "hint" }, "wheel = zoom · drag = pan · gray = ground truth"));
-      break;   // one viewer; switching arms = future nicety
     }
+    break;
   }
   $("#drill").classList.remove("hidden");
 }
