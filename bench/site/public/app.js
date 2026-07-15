@@ -155,16 +155,18 @@ function orbitCanvas(cv, data, armColor) {
   const gy0 = Math.floor(lo[1] / step) * step - step, gy1 = Math.ceil(hi[1] / step) * step + step;
 
   const target = ctr.slice();           // world look-at point; pan moves it
-  let yaw = 0.6, pitch = 0.9, zoom = 1;
+  let theta = 0.7, phi = 1.0, zoom = 1;  // azimuth, polar from +Z (radians)
   const errCol = e => { const t = Math.max(0, Math.min(e / 50, 1));
     return `hsl(${(1 - t) * 214},78%,${52 + t * 6}%)`; };
   let B;
   function basis() {
-    // orbit camera about the world up-axis (+Z): forward f = (cp·cy, cp·sy, sp);
-    // right = normalize(f × Zup) = (sy, -cy, 0); camUp = right × f has +Z
-    // component (cos pitch) so world-up always projects to screen-up.
-    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
-    B = { right: [sy, -cy, 0], up: [-cy * sp, -sy * sp, cp],
+    // standard spherical orbit camera, world +Z up (as three.js OrbitControls).
+    // eye direction from target = (sinφ cosθ, sinφ sinθ, cosφ); screen basis:
+    //   right = normalize(Zup × eyeDir) = (-sinθ, cosθ, 0)
+    //   up    = eyeDir × right          = (-cosφ cosθ, -cosφ sinθ, sinφ)
+    // up_z = sinφ > 0, so world-up is always screen-up; no axis inversions.
+    const ct = Math.cos(theta), st = Math.sin(theta), cf = Math.cos(phi), sf = Math.sin(phi);
+    B = { right: [-st, ct, 0], up: [-cf * ct, -cf * st, sf],
           sc: (Math.min(W, H) * 0.4 * zoom) / span };
   }
   function proj(p) {
@@ -226,8 +228,9 @@ function orbitCanvas(cv, data, armColor) {
       const r = cv.getBoundingClientRect(), s = W / r.width;
       const kx = -dx * s / B.sc, ky = dy * s / B.sc;
       for (let k = 0; k < 3; k++) target[k] += kx * B.right[k] + ky * B.up[k];
-    } else {   // grab-and-turn: content follows the cursor
-      yaw -= dx * 0.01; pitch = Math.max(-1.55, Math.min(1.55, pitch + dy * 0.01));
+    } else {   // OrbitControls convention: azimuth θ, polar φ — one coherent model
+      theta -= dx * 0.01;
+      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.01));
     }
     drag.x = e.clientX; drag.y = e.clientY; draw();
   };
