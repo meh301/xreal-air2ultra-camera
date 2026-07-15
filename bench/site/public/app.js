@@ -410,7 +410,9 @@ function trajPanel({ group, seq, compact } = {}) {
     gtData = withGt[1].gt; gInfo = gridInfo(gtData); orbit = orbitView(cv, cam, gInfo);
     buildArmChips(); redraw();
   }
-  seqSel.onchange = () => { seq = seqSel.value; sel.clear(); timeRange = null; loadSeq(); };
+  // keep the arm selection across sequence changes (buildArmChips prunes any
+  // arm the new sequence lacks); only the time brush resets — new time axis
+  seqSel.onchange = () => { seq = seqSel.value; timeRange = null; loadSeq(); };
   loadSeq();
   return card;
 }
