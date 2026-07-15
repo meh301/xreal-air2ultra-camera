@@ -226,8 +226,8 @@ function orbitCanvas(cv, data, armColor) {
       const r = cv.getBoundingClientRect(), s = W / r.width;
       const kx = -dx * s / B.sc, ky = dy * s / B.sc;
       for (let k = 0; k < 3; k++) target[k] += kx * B.right[k] + ky * B.up[k];
-    } else {
-      yaw += dx * 0.01; pitch = Math.max(-1.55, Math.min(1.55, pitch - dy * 0.01));
+    } else {   // grab-and-turn: content follows the cursor
+      yaw -= dx * 0.01; pitch = Math.max(-1.55, Math.min(1.55, pitch + dy * 0.01));
     }
     drag.x = e.clientX; drag.y = e.clientY; draw();
   };
