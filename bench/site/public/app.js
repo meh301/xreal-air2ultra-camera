@@ -299,6 +299,7 @@ function trajPanel({ group, seq, compact } = {}) {
 
   const cam = {};                         // PERSISTENT across arm toggles
   let orbit = null, gInfo = null, gtData = null, token = 0;
+  let availArms = [];                     // arms that actually HAVE a trajectory
   const sel = new Set();                  // selected arms
 
   function gridInfo(gt) {
@@ -340,11 +341,12 @@ function trajPanel({ group, seq, compact } = {}) {
     }
   }
   function buildArmChips() {
-    const avail = armsFor(seq);
     armBox.innerHTML = "";
-    if (!sel.size) { const first = avail.find(a => S.armOn[a]) || avail[0]; if (first) sel.add(first); }
-    [...sel].forEach(a => { if (!avail.includes(a)) sel.delete(a); });
-    for (const a of avail) {
+    if (!availArms.length) return;   // no arm has data — panel shows GT/grid only
+    if (!sel.size) { const first = availArms.find(a => S.armOn[a]) || availArms[0]; if (first) sel.add(first); }
+    [...sel].forEach(a => { if (!availArms.includes(a)) sel.delete(a); });
+    if (!sel.size) sel.add(availArms[0]);
+    for (const a of availArms) {
       const c = el("span", { class: "chip" + (sel.has(a) ? "" : " off") }, `<span class="dot" style="background:${col(a)}"></span>${ARM_LABEL[a]}`);
       c.onclick = () => { if (sel.has(a)) { if (sel.size > 1) sel.delete(a); } else sel.add(a); buildArmChips(); redraw(); };
       armBox.append(c);
@@ -353,13 +355,15 @@ function trajPanel({ group, seq, compact } = {}) {
   async function loadSeq() {
     const my = ++token;
     for (const k in jsonCache) delete jsonCache[k];
-    const avail = armsFor(seq);
-    let gt = null;
-    for (const a of avail) { const d = await getArm(a); if (d?.gt) { gt = d.gt; break; } }
+    // probe EVERY arm's trajectory once; only arms with real data become chips
+    const loaded = await Promise.all(armsFor(seq).map(async a => [a, await getArm(a)]));
     if (my !== token) return;
-    if (!gt) { cv.getContext("2d").clearRect(0, 0, cv.width, cv.height);
-      legendHost.innerHTML = `<span class="hint">no trajectory export for this sequence yet.</span>`; tlWrap.innerHTML = ""; return; }
-    gtData = gt; gInfo = gridInfo(gt); orbit = orbitView(cv, cam, gInfo);
+    availArms = loaded.filter(([, d]) => d?.est?.length).map(([a]) => a);
+    const withGt = loaded.find(([, d]) => d?.gt?.length);
+    if (!withGt) { cv.getContext("2d").clearRect(0, 0, cv.width, cv.height);
+      legendHost.innerHTML = `<span class="hint">no trajectory export for this sequence yet.</span>`;
+      armBox.innerHTML = ""; tlWrap.innerHTML = ""; return; }
+    gtData = withGt[1].gt; gInfo = gridInfo(gtData); orbit = orbitView(cv, cam, gInfo);
     buildArmChips(); redraw();
   }
   seqSel.onchange = () => { seq = seqSel.value; sel.clear(); loadSeq(); };
