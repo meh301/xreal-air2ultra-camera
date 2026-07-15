@@ -41,7 +41,7 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 LOCAL_PATH := $(XREAL_LOCAL_PATH)
 LOCAL_MODULE := xrealcam
-LOCAL_SRC_FILES := xr_map.c xr_slam.c xr_stereo.c xr_track.c xr_xfeat.c \
+LOCAL_SRC_FILES := xr_map.c xr_slam.c xr_stereo.c xr_track.c xr_vpr.c xr_xfeat.c \
     xr_depthcal.c xr_sgrid.c xr_zipdepth.c xr_liteanystereo.c \
     xreal_align.c xreal_core.c xreal_gles.c xreal_imu.c xreal_jni.c
 LOCAL_STATIC_LIBRARIES := uvc

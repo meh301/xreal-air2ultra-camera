@@ -23,6 +23,7 @@
 
 #include <android/log.h>
 
+#include "xr_vpr.h"
 #include "xr_xfeat.h"
 #include "xr_teblid_params.h"
 #include "xreal_core.h"
@@ -113,6 +114,15 @@ enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
 #define LOOP_SEARCH_LOST_BAD_NS      150000000ull
 #define LOOP_SEARCH_LOST_XFEAT_NS    250000000ull
 #define RELOC_TOPK 3                   /* candidate clusters verified when relocalizing (repetitive scenes hand raw scoring to the wrong keyframe) */
+/* VPR retrieval (xr_vpr): appearance embedding pre-ranking of closure /
+ * relocalization candidates. Active once a model is registered and frames
+ * embed; only the top VPR_SHORTLIST keyframes by cosine similarity get the
+ * per-keypoint descriptor scoring. Keyframes stored before the model came
+ * up (has_emb=0) stay always-eligible so a mid-session rollout can't hide
+ * part of the map. */
+#define VPR_SHORTLIST 12
+#define VPR_MIN_SIM 0.25f
+#define VPR_MIN_KF (VPR_SHORTLIST + 4)  /* smaller maps: full scan is cheap */
 /* HEALTHY loop-detection coarse gate: only full-match keyframes whose
  * SESSION position is within this radius of the corrected pose (a revisit
  * is where you physically are). A FULL sweep every Nth healthy search
@@ -151,6 +161,10 @@ typedef struct {
     int32_t lm_id[XR_MAP_KP_PER_KF];
     float lm_xyz[XR_MAP_KP_PER_KF][3];
     float lm_uv[XR_MAP_KP_PER_KF][2];
+    /* place-recognition embedding (xr_vpr), L2-normalized; the retrieval
+     * pre-rank's dot products are cosines. Model-version-locked. */
+    int has_emb;
+    float emb[XR_VPR_DIM];
 } xr_kf;
 
 static xr_kf KF[XR_MAP_MAX_KF];        /* .bss — physical slot pool */
@@ -281,6 +295,13 @@ static void *xfeat_preload_thread(void *arg) {
     setpriority(PRIO_PROCESS, (id_t)gettid(), 19);
     if (MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);   /* dlopen ORT + load model */
     return NULL;
+}
+
+/* Register the VPR (place recognition) model — retrieval pre-ranking
+ * activates once frames embed successfully; without it the map keeps the
+ * brute-scan + spatial-gate behavior. */
+void xr_map_set_vpr_model(const char *onnx_path) {
+    xr_vpr_set_model(onnx_path);
 }
 
 void xr_map_set_model(const char *onnx_path) {
@@ -1563,6 +1584,11 @@ static void process_keyframe(void) {
         bad_extract(img, &work);
     }
 
+    /* place-recognition embedding for retrieval pre-ranking. Cheap no-op
+     * until a VPR model is registered (and permanently off after a failed
+     * bring-up). Runs on this (map) thread at keyframe/search rate. */
+    work.has_emb = xr_vpr_embed(img, work.emb) == 0;
+
     /* ---- candidate search + geometric verification: LOCK-FREE. Only the
      * map thread WRITES the keyframe store; a concurrent reset / descriptor
      * switch clears KF_N (frees the slots) and bumps RESET_GEN, but never
@@ -1579,6 +1605,8 @@ static void process_keyframe(void) {
     int any_pairs = 0;
     int searched = 0;                  /* keyframes actually match-scored */
     unsigned match_us = 0;             /* telemetry: match+PnP wall time */
+    int use_vpr = 0;                   /* retrieval pre-rank active */
+    float vpr_top = 0;                 /* best cosine this search (ledger) */
     float bDq[4], bDp[3];
     if (do_search) {
     did_search = 1;
@@ -1614,7 +1642,42 @@ static void process_keyframe(void) {
             wsp[2] += snap_corr_p[2];
         }
     }
+    /* VPR pre-rank: when the query and store carry embeddings, appearance
+     * similarity (one 512-D dot per keyframe) selects a short list and ONLY
+     * those get descriptor-scored. Replaces the spatial gate — appearance
+     * needs no trusted pose, which is exactly what LOST lacks — and full
+     * recall is preserved because every keyframe is ranked, not windowed. */
+    static uint8_t vpr_pick[XR_MAP_MAX_KF];    /* map thread only */
+    use_vpr = work.has_emb && lim > VPR_MIN_KF;
+    if (use_vpr) {
+        memset(vpr_pick, 0, (size_t)lim);
+        float bs[VPR_SHORTLIST];
+        int bi[VPR_SHORTLIST], bn = 0;
+        for (int i = 0; i < lim; i++) {
+            if (!KFA(i).has_emb) { vpr_pick[i] = 1; continue; }  /* pre-VPR kf */
+            const float *a = work.emb, *b = KFA(i).emb;
+            float s = 0;
+            for (int d = 0; d < XR_VPR_DIM; d++) s += a[d] * b[d];
+            if (s > vpr_top) vpr_top = s;
+            if (s < VPR_MIN_SIM) continue;
+            int pos = bn < VPR_SHORTLIST
+                          ? bn : (s > bs[VPR_SHORTLIST - 1] ? VPR_SHORTLIST - 1
+                                                            : -1);
+            if (pos < 0) continue;
+            if (bn < VPR_SHORTLIST) bn++;
+            while (pos > 0 && bs[pos - 1] < s) {
+                bs[pos] = bs[pos - 1];
+                bi[pos] = bi[pos - 1];
+                pos--;
+            }
+            bs[pos] = s;
+            bi[pos] = i;
+        }
+        for (int t = 0; t < bn; t++) vpr_pick[bi[t]] = 1;
+        gate = 0;                      /* retrieval supersedes the gate */
+    }
     for (int i = 0; i < lim; i++) {
+        if (use_vpr && !vpr_pick[i]) continue;
         if (gate) {
             float gx = wsp[0] - KFA(i).pc[0], gy = wsp[1] - KFA(i).pc[1],
                   gz = wsp[2] - KFA(i).pc[2];
@@ -1674,6 +1737,13 @@ static void process_keyframe(void) {
         }
     }
     match_us = (unsigned)(map_mono_us() - t_match0);
+    /* closure ledger: one line per search so retrieval recall/precision is
+     * measurable offline (the benchmark GT-labels candidates post-hoc) */
+    if (use_vpr)
+        LOGI("session map: LEDGER q=%llu vprtop=%.3f searched=%d cand=%d "
+             "bestm=%d n3=%d nin=%d lost=%d",
+             (unsigned long long)work.ts, (double)vpr_top, searched, ncand,
+             raw_best_m, any_pairs, best_nin, lost);
     }   /* end LOCK-FREE candidate search */
 
     /* ---- write / publish: LOCKED, but BRIEF (no match, no PnP). The VIO

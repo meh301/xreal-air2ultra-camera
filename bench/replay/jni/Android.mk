@@ -12,6 +12,7 @@ LOCAL_SRC_FILES := ../xr_replay_main.c \
     ../../../android/app/src/main/cpp/xr_slam.c \
     ../../../android/app/src/main/cpp/xr_map.c \
     ../../../android/app/src/main/cpp/xr_xfeat.c \
+    ../../../android/app/src/main/cpp/xr_vpr.c \
     ../../../android/app/src/main/cpp/xr_liteanystereo.c
 LOCAL_C_INCLUDES := $(CPP) $(CPP)/third_party/basalt/thirdparty/vit
 LOCAL_CFLAGS := -O3 -std=c11 -Wall -DXR_OW=$(XR_OW) -DXR_OH=$(XR_OH)

@@ -254,12 +254,14 @@ static void on_pose(const xr_slam_state *st_in, void *user) {
 
 int main(int argc, char **argv) {
     const char *pack = NULL, *out = NULL, *toml = NULL, *xfeat = NULL;
+    const char *vpr = NULL;
     int inflight = 6, fast = 0, use_map = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pack") && i + 1 < argc) pack = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--toml") && i + 1 < argc) toml = argv[++i];
         else if (!strcmp(argv[i], "--xfeat") && i + 1 < argc) xfeat = argv[++i];
+        else if (!strcmp(argv[i], "--vpr") && i + 1 < argc) vpr = argv[++i];
         else if (!strcmp(argv[i], "--inflight") && i + 1 < argc) inflight = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fast")) fast = 1;
         else if (!strcmp(argv[i], "--no-map")) use_map = 0;
@@ -267,7 +269,7 @@ int main(int argc, char **argv) {
     }
     if (!pack || !out) DIE("usage: xr_replay --pack <dir> --out <prefix> "
                            "[--toml f] [--inflight N] [--fast] [--no-map] "
-                           "[--xfeat model.onnx]");
+                           "[--xfeat model.onnx] [--vpr model.onnx]");
 
     pack_meta meta;
     read_meta(pack, &meta);
@@ -311,6 +313,7 @@ int main(int argc, char **argv) {
             xr_map_set_model(xfeat);
             xr_map_set_use_xfeat(1);
         }
+        if (vpr) xr_map_set_vpr_model(vpr);
     }
     if (xr_slam_start_raw(&L, &R, meta.imu_hz,
                           have_noises ? noises : NULL) != 0)

@@ -31,6 +31,11 @@ enum {
  * Without it the mini-ORB fallback is used. */
 void xr_map_set_model(const char *onnx_path);
 
+/* Register the VPR place-recognition model (xr_vpr): per-keyframe
+ * embeddings + top-K appearance retrieval replace the brute candidate
+ * scan once frames embed. Optional; no-op path without it. */
+void xr_map_set_vpr_model(const char *onnx_path);
+
 /* Runtime descriptor selector: 0 = mini-ORB (default), 1 = XFeat (needs
  * the model staged + ONNX Runtime present). Clears the keyframe store on
  * a real change since the two descriptor types cannot cross-match. */
