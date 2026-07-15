@@ -9,9 +9,9 @@ const ARM_LABEL = {
   xfeat: "XFeat", xvpr: "XFeat + EigenPlaces", xmegaloc: "XFeat + MegaLoc",
 };
 const GROUPS = [
-  ["overview", "Overview"], ["euroc", "EuRoC"], ["rooms", "TUM-VI rooms"],
-  ["long", "TUM-VI long"], ["msd", "MSD (headset)"],
-  ["systems", "vs. Systems"], ["table", "Full table"], ["method", "Method"],
+  ["overview", "Overview"], ["systems", "vs. Systems"], ["euroc", "EuRoC"],
+  ["rooms", "TUM-VI rooms"], ["long", "TUM-VI long"], ["msd", "MSD (headset)"],
+  ["table", "Full table"], ["method", "Method"],
 ];
 
 const S = {
@@ -440,6 +440,13 @@ function datasetViewInto(group, view) {
 function systemsView() {
   const view = $("#view");
   const base = aggBaselines();
+  if (!base.length) {
+    view.append(el("div", { class: "chart-card" },
+        "<h3>Baseline runs are scoring…</h3><p class='note'>OKVIS2 (LC on/off), " +
+        "ORB-SLAM3 (LC on/off) and OpenVINS finished on the compute container; " +
+        "their causal trajectories are being scored into this view. Auto-refreshes.</p>"));
+    return;
+  }
   const seqs = [...new Set(base.map(b => b.seq))].sort();
   const med = medians(S.runs.filter(r => seqs.includes(r.seq)), S.useRte ? "rte" : "ate");
   const sysArms = [...new Set(base.map(b => `${b.sys}_lc${b.lc}`))].sort();
