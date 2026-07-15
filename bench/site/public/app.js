@@ -144,35 +144,70 @@ function orbitCanvas(cv, data, armColor) {
   const W = cv.width, H = cv.height;
   const all = data.gt.concat(data.est);
   const dim = all[0].length;
-  const ctr = [0, 1, 2].map(k => all.reduce((s, p) => s + (p[k] || 0), 0) / all.length);
-  const span = Math.max(1e-3, ...all.map(p =>
-      Math.hypot(p[0] - ctr[0], p[1] - ctr[1], (p[2] || 0) - ctr[2])));
-  let yaw = 0.6, pitch = 0.9, zoom = 1, panX = 0, panY = 0;
+  // include the world origin in bounds so the reference grid always shows it
+  const lo = [0, 1, 2].map(k => Math.min(0, ...all.map(p => p[k] || 0)));
+  const hi = [0, 1, 2].map(k => Math.max(0, ...all.map(p => p[k] || 0)));
+  const ctr = [0, 1, 2].map(k => (lo[k] + hi[k]) / 2);
+  const span = Math.max(1e-3, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
+  const raw = span / 6, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = (raw / mag >= 5 ? 5 : raw / mag >= 2 ? 2 : 1) * mag;
+  const gx0 = Math.floor(lo[0] / step) * step - step, gx1 = Math.ceil(hi[0] / step) * step + step;
+  const gy0 = Math.floor(lo[1] / step) * step - step, gy1 = Math.ceil(hi[1] / step) * step + step;
+
+  const target = ctr.slice();           // world look-at point; pan moves it
+  let yaw = 0.6, pitch = 0.9, zoom = 1;
   const errCol = e => { const t = Math.max(0, Math.min(e / 50, 1));
     return `hsl(${(1 - t) * 214},78%,${52 + t * 6}%)`; };
-  function proj(p) {
-    const x = p[0] - ctr[0], y = p[1] - ctr[1], z = (p[2] || 0) - ctr[2];
+  let B;
+  function basis() {
     const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
-    const X = x * cy - y * sy, Yr = x * sy + y * cy;
-    const Yp = Yr * cp - z * sp;
-    const sc = (Math.min(W, H) * 0.4 * zoom) / span;
-    return [W / 2 + X * sc + panX, H / 2 - Yp * sc + panY];
+    B = { right: [cy, -sy, 0], up: [sy * cp, cy * cp, -sp],
+          sc: (Math.min(W, H) * 0.4 * zoom) / span };
+  }
+  function proj(p) {
+    const dx = (p[0] || 0) - target[0], dy = (p[1] || 0) - target[1], dz = (p[2] || 0) - target[2];
+    const X = dx * B.right[0] + dy * B.right[1] + dz * B.right[2];
+    const Y = dx * B.up[0] + dy * B.up[1] + dz * B.up[2];
+    return [W / 2 + X * B.sc, H / 2 - Y * B.sc];
+  }
+  function seg(a, b, style, w) {
+    const [x0, y0] = proj(a), [x1, y1] = proj(b);
+    ctx.strokeStyle = style; ctx.lineWidth = w;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  function drawGrid() {
+    const gc = col("grid");
+    ctx.globalAlpha = 0.75;
+    for (let x = gx0; x <= gx1 + 1e-6; x += step) seg([x, gy0, 0], [x, gy1, 0], gc, Math.abs(x) < 1e-6 ? 1.4 : 0.7);
+    for (let y = gy0; y <= gy1 + 1e-6; y += step) seg([gx0, y, 0], [gx1, y, 0], gc, Math.abs(y) < 1e-6 ? 1.4 : 0.7);
+    ctx.globalAlpha = 1;
+    const ax = step * 1.15;             // origin axes: X red, Y green, Z blue
+    seg([0, 0, 0], [ax, 0, 0], "#d83b3b", 2.2);
+    seg([0, 0, 0], [0, ax, 0], "#1baf7a", 2.2);
+    seg([0, 0, 0], [0, 0, ax], "#2a78d6", 2.2);
+    const [ox, oy] = proj([0, 0, 0]);
+    ctx.fillStyle = col("ink2"); ctx.font = "11px system-ui";
+    ctx.fillText("0,0,0", ox + 6, oy - 4);
+    ctx.fillText(`grid ${step >= 1 ? step + " m" : (step * 100).toFixed(0) + " cm"}`, 10, 16);
   }
   function draw() {
+    basis();
     ctx.clearRect(0, 0, W, H);
-    ctx.lineWidth = 1.6; ctx.lineJoin = "round";
-    ctx.strokeStyle = col("gt");
+    ctx.lineJoin = "round";
+    drawGrid();
+    ctx.strokeStyle = col("gt"); ctx.lineWidth = 1.6;
     ctx.beginPath();
     data.gt.forEach((p, i) => { const [x, y] = proj(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
     ctx.stroke();
     if (data.err) {
+      ctx.lineWidth = 1.9;
       for (let i = 1; i < data.est.length; i++) {
         const [x0, y0] = proj(data.est[i - 1]), [x1, y1] = proj(data.est[i]);
         ctx.strokeStyle = errCol(data.err[i] ?? 0);
         ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
       }
     } else {
-      ctx.strokeStyle = armColor; ctx.beginPath();
+      ctx.strokeStyle = armColor; ctx.lineWidth = 1.9; ctx.beginPath();
       data.est.forEach((p, i) => { const [x, y] = proj(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
       ctx.stroke();
     }
@@ -184,8 +219,13 @@ function orbitCanvas(cv, data, armColor) {
   cv.onpointermove = e => {
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-    if (drag.pan) { panX += dx; panY += dy; }
-    else { yaw += dx * 0.01; pitch = Math.max(-1.55, Math.min(1.55, pitch - dy * 0.01)); }
+    if (drag.pan) {   // pan moves the look-at target -> orbit pivots with it
+      const r = cv.getBoundingClientRect(), s = W / r.width;
+      const kx = -dx * s / B.sc, ky = dy * s / B.sc;
+      for (let k = 0; k < 3; k++) target[k] += kx * B.right[k] + ky * B.up[k];
+    } else {
+      yaw += dx * 0.01; pitch = Math.max(-1.55, Math.min(1.55, pitch - dy * 0.01));
+    }
     drag.x = e.clientX; drag.y = e.clientY; draw();
   };
   cv.onpointerup = () => drag = null;
@@ -249,7 +289,7 @@ function trajPanel({ group, seq, compact } = {}) {
   card.append(el("div", { class: "legend-line" },
     `<span><i style="background:var(--c-gt)"></i>ground truth</span>` +
     `<span><i style="background:linear-gradient(90deg,#2a78d6,#d83b3b)"></i>estimate, colored by error 0→50 cm</span>` +
-    `<span class="hint">drag = orbit · wheel = zoom · shift/right-drag = pan</span>`));
+    `<span class="hint">drag = orbit (pivots on look-at) · wheel = zoom · shift/right-drag = pan · grid on z=0 through origin</span>`));
 
   let token = 0;
   function fillArms() {
