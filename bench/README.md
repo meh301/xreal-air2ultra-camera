@@ -35,12 +35,12 @@ xr_replay --pack <dir> --out <prefix> [--toml basalt.toml] [--inflight N]
           [--fast] [--no-map] [--xfeat model.onnx]
 ```
 
-Feed pacing: `--inflight` (default 6) blocks the feeder when more than N
-pushed pairs have no pose yet — approximates blocking-queue flow control on
-the app's drop-under-backpressure libbasalt. The bench libbasalt (stock
-blocking queues, `bench/container/patch_basalt_bench.py` applies only the
-cam-calib-optional patch) gives natural flow control instead; `--fast`
-disables observation pacing when using it.
+Feed pacing: `--inflight` (default 6) makes the feeder wait (while polling
+poses) once more than N pushed pairs have no pose yet. This pacing is
+MANDATORY with the bench libbasalt (stock blocking queues): pushing without
+polling deadlocks the pipeline — Basalt blocks on its full output pose
+queue while the feeder blocks on the full input queue (`--fast` reproduces
+exactly that; only use it with the app's drop-under-backpressure lib).
 
 ## Basalt variants
 

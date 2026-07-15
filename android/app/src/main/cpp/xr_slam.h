@@ -58,16 +58,19 @@ int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
                   int variant, const float gyro_bias[3],
                   const float accel_bias[3], const float noises[4]);
 
-/* Raw calibration for dataset replay (benchmark harness): Kannala-Brandt
- * kb4 intrinsics passed straight through (no fisheye624 refit, no device
- * conventions), cam->IMU extrinsics as an explicit xyzw quaternion +
- * translation, and the dataset's IMU rate. k[0..3]=0 is a pure equidistant
- * camera (host-side remap target for radtan datasets). */
+/* Raw calibration for dataset replay (benchmark harness): intrinsics passed
+ * straight through (no fisheye624 refit, no device conventions), cam->IMU
+ * extrinsics as an explicit xyzw quaternion + translation, and the dataset's
+ * IMU rate. Models: KB4 (k[0..3]; zeros = pure equidistant, the host-side
+ * remap target for EuRoC) or RT8 (pinhole-radtan8, k = k1 k2 p1 p2 k3 k4 k5
+ * k6 rpmax — Basalt-native, what MSD ships). */
+enum { XR_SLAM_CAM_KB4 = 0, XR_SLAM_CAM_RT8 = 1 };
 typedef struct {
+    int model;              /* XR_SLAM_CAM_KB4 / XR_SLAM_CAM_RT8 */
     int width, height;      /* must equal XR_OW/XR_OH of this build */
     double fps;
     float fx, fy, cx, cy;
-    float k[4];             /* kb4 k1..k4 */
+    float k[9];             /* kb4: k1..k4; rt8: k1 k2 p1 p2 k3 k4 k5 k6 rpmax */
     float q_xyzw[4];        /* rotation cam->IMU (R_imu_cam) */
     float p[3];             /* camera origin in the IMU frame [m] */
 } xr_slam_cam_raw;

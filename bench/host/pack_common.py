@@ -114,11 +114,15 @@ def format_calib(calib):
     Rotation q/p are cam->IMU: p_imu = R(q) * p_cam + p.
     Noise units (SI): rad/s/sqrt(Hz), rad/s^2/sqrt(Hz),
                       m/s^2/sqrt(Hz), m/s^3/sqrt(Hz)."""
-    lines = ["model kb4"]
+    model = calib.get("model", "kb4")          # kb4 (4 dist) | rt8 (9: k1 k2
+    ndist = {"kb4": 4, "rt8": 9}.get(model)    # p1 p2 k3 k4 k5 k6 rpmax)
+    if ndist is None:
+        die(f"internal: unknown calib model {model!r}")
+    lines = [f"model {model}"]
     for side in ("left", "right"):
         c = calib[side]
-        if len(c["pinhole"]) != 4 or len(c["dist"]) != 4:
-            die(f"internal: calib {side} needs 4 pinhole + 4 dist values")
+        if len(c["pinhole"]) != 4 or len(c["dist"]) != ndist:
+            die(f"internal: calib {side} needs 4 pinhole + {ndist} dist values")
         q = np.asarray(c["q_xyzw"], dtype=float)
         if abs(np.linalg.norm(q) - 1.0) > 1e-6:
             die(f"internal: calib {side} quaternion not normalized: {q}")

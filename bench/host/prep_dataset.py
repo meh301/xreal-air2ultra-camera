@@ -493,10 +493,24 @@ def prep_msd(seq_root, seq, input_root):
     # MSD/Basalt convention: cam list order == cam0, cam1 dirs; cam0 = left.
     for side, i in (("left", 0), ("right", 1)):
         it = intr_list[i]
-        if str(it.get("camera_type", "")).lower() != "kb4":
-            die(f"{calib_path}: cam{i} camera_type="
-                f"{it.get('camera_type')!r}, only kb4 supported")
+        ctype = str(it.get("camera_type", "")).lower()
         ii = it["intrinsics"]
+        if ctype == "kb4":
+            model, dist = "kb4", [float(ii[k]) for k in ("k1", "k2", "k3", "k4")]
+        elif ctype == "pinhole-radtan8":
+            # Basalt-native RT8 passes straight through the VIT interface
+            # (PinholeRadtan8Camera, 8 coeffs + rpmax) — same model the MSD
+            # paper's own Basalt baseline ran.
+            model = "rt8"
+            dist = [float(ii[k]) for k in ("k1", "k2", "p1", "p2",
+                                           "k3", "k4", "k5", "k6")]
+            dist.append(float(ii.get("rpmax", 0.0)))
+        else:
+            die(f"{calib_path}: cam{i} camera_type={it.get('camera_type')!r}, "
+                f"only kb4 / pinhole-radtan8 supported")
+        if calib.get("model", model) != model:
+            die(f"{calib_path}: mixed camera models between cams")
+        calib["model"] = model
         Td = T_list[i]
         # Basalt T_imu_cam maps cam-frame points into the IMU frame
         # (p_imu = T_imu_cam * p_cam) => already cam->IMU, use directly.
@@ -504,7 +518,7 @@ def prep_msd(seq_root, seq, input_root):
         q /= np.linalg.norm(q)
         calib[side] = {
             "pinhole": [float(ii[k]) for k in ("fx", "fy", "cx", "cy")],
-            "dist": [float(ii[k]) for k in ("k1", "k2", "k3", "k4")],
+            "dist": dist,
             "q_xyzw": q.tolist(),
             "p": [float(Td["px"]), float(Td["py"]), float(Td["pz"])],
         }

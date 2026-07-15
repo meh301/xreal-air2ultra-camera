@@ -53,22 +53,25 @@ static void read_meta(const char *dir, pack_meta *m) {
         DIE("meta.txt missing fps/imu_hz/n_frames");
 }
 
-static void read_cam(FILE *f, const char *side, xr_slam_cam_raw *c,
-                     const pack_meta *m) {
+static void read_cam(FILE *f, const char *side, int model,
+                     xr_slam_cam_raw *c, const pack_meta *m) {
     char key[64];
     char want[64];
+    int ndist = model == XR_SLAM_CAM_RT8 ? 9 : 4;
     snprintf(want, sizeof want, "%s_pinhole", side);
     if (fscanf(f, "%63s %f %f %f %f", key, &c->fx, &c->fy, &c->cx, &c->cy) != 5
         || strcmp(key, want))
         DIE("calib.txt: expected '%s'", want);
-    if (fscanf(f, "%63s %f %f %f %f", key, &c->k[0], &c->k[1], &c->k[2],
-               &c->k[3]) != 5)
-        DIE("calib.txt: expected %s_dist", side);
+    if (fscanf(f, "%63s", key) != 1) DIE("calib.txt: expected %s_dist", side);
+    for (int i = 0; i < ndist; i++)
+        if (fscanf(f, "%f", &c->k[i]) != 1)
+            DIE("calib.txt: %s_dist needs %d values", side, ndist);
     if (fscanf(f, "%63s %f %f %f %f", key, &c->q_xyzw[0], &c->q_xyzw[1],
                &c->q_xyzw[2], &c->q_xyzw[3]) != 5)
         DIE("calib.txt: expected %s_q_xyzw", side);
     if (fscanf(f, "%63s %f %f %f", key, &c->p[0], &c->p[1], &c->p[2]) != 4)
         DIE("calib.txt: expected %s_p", side);
+    c->model = model;
     c->width = m->W;
     c->height = m->H;
     c->fps = m->fps;
@@ -82,11 +85,14 @@ static void read_calib(const char *dir, const pack_meta *m,
     FILE *f = fopen(path, "r");
     if (!f) DIE("missing %s", path);
     char key[64], model[64];
-    if (fscanf(f, "%63s %63s", key, model) != 2 || strcmp(key, "model") ||
-        strcmp(model, "kb4"))
-        DIE("calib.txt: expected 'model kb4'");
-    read_cam(f, "left", L, m);
-    read_cam(f, "right", R, m);
+    if (fscanf(f, "%63s %63s", key, model) != 2 || strcmp(key, "model"))
+        DIE("calib.txt: expected 'model ...'");
+    int cm;
+    if (!strcmp(model, "kb4")) cm = XR_SLAM_CAM_KB4;
+    else if (!strcmp(model, "rt8")) cm = XR_SLAM_CAM_RT8;
+    else DIE("calib.txt: unknown model '%s'", model);
+    read_cam(f, "left", cm, L, m);
+    read_cam(f, "right", cm, R, m);
     *have_noises = fscanf(f, "%63s %f %f %f %f", key, &noises[0], &noises[1],
                           &noises[2], &noises[3]) == 5 &&
                    !strcmp(key, "noises");
@@ -326,7 +332,7 @@ int main(int argc, char **argv) {
         }
         if (fread(fr, (size_t)2 * XR_OW * XR_OH, 1, f_raw) != 1)
             DIE("frames.raw truncated at pair %ld", line);
-        if (imu_pushed >= 300) {
+        if (imu_pushed >= 20) {   /* mirrors xr_slam_start_raw's small gate */
             ring_put(f_ts, fr);
             xr_slam_push_pair(fr, fr + (size_t)XR_OW * XR_OH, f_ts);
             frames_pushed++;

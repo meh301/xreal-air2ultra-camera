@@ -26,7 +26,8 @@ cmake -S "$WORK" -B "$WORK/build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DBASALT_INSTANTIATIONS_DOUBLE=OFF \
     -DBASALT_BUILD_SHARED_LIBRARY_ONLY=ON \
-    -DBUILD_TESTS=OFF
+    -DSKIP_PERFORMANCE_COMPARISON=ON \
+    -DBUILD_TESTS=OFF -DBUILD_SANDBOX=OFF -DBUILD_DOC=OFF
 cmake --build "$WORK/build" -j "$JOBS" --target basalt
 
 LIB="$(find "$WORK/build" -name 'libbasalt.so' | head -1)"

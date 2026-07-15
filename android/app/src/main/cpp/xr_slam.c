@@ -39,7 +39,10 @@ static struct {
     vit_tracker_t *tracker;
     atomic_int running;
     atomic_int imu_pushed;  /* samples since start: frames wait for history */
+    int warmup;             /* frame gate: samples required before frame 1 */
     float kb4[2][8];        /* per cam: fx fy cx cy k1..k4 (for unproject) */
+    int cam_model[2];       /* XR_SLAM_CAM_* (raw path; device path = KB4) */
+    float rt8[2][13];       /* fx fy cx cy k1 k2 p1 p2 k3 k4 k5 k6 rpmax */
     float R_ic[2][9];       /* camera -> IMU rotation, row-major */
     float p_ic[2][3];       /* camera position in the IMU frame */
     uint64_t last_pair_ts;
@@ -61,7 +64,10 @@ void xr_slam_set_config(const char *unified_config_path) {
 
 /* Basalt reports through std::cout/cerr, which Android swallows. Redirect
  * both into logcat (tag "basalt") so config echoes, queue warnings and
- * assertion messages are visible. */
+ * assertion messages are visible. ANDROID ONLY: on desktop builds (bench
+ * replay) stdio already reaches the console, and the shim's fprintf(stderr)
+ * inside the pump would feed the pipe back into itself and deadlock. */
+#ifdef __ANDROID__
 static void *stdio_pump(void *arg) {
     int fd = (int)(intptr_t)arg;
     char buf[512];
@@ -89,6 +95,9 @@ static void redirect_stdio(void) {
     pthread_create(&t, NULL, stdio_pump, (void *)(intptr_t)p[0]);
     pthread_detach(t);
 }
+#else
+static void redirect_stdio(void) {}
+#endif
 
 int xr_slam_load(void) {
     static int attempted;
@@ -309,9 +318,34 @@ int xr_slam_running(void) {
 
 static void kb4_unproject(const float k[8], float u, float v, float ray[3]);
 
+/* pinhole-radtan8 unprojection: OpenCV-style fixed-point undistort of the
+ * normalized point, then lift. Rational radial + tangential terms. */
+static void rt8_unproject(const float k[13], float u, float v, float ray[3]) {
+    float mx = (u - k[2]) / k[0], my = (v - k[3]) / k[1];
+    float x = mx, y = my;
+    for (int i = 0; i < 12; i++) {
+        float r2 = x * x + y * y, r4 = r2 * r2, r6 = r4 * r2;
+        float rad = (1 + k[4] * r2 + k[5] * r4 + k[8] * r6) /
+                    (1 + k[9] * r2 + k[10] * r4 + k[11] * r6);
+        float dx = 2 * k[6] * x * y + k[7] * (r2 + 2 * x * x);
+        float dy = k[6] * (r2 + 2 * y * y) + 2 * k[7] * x * y;
+        x = (mx - dx) / rad;
+        y = (my - dy) / rad;
+    }
+    float n = sqrtf(x * x + y * y + 1.0f);
+    ray[0] = x / n;
+    ray[1] = y / n;
+    ray[2] = 1.0f / n;
+}
+
+static void cam0_unproject(float u, float v, float ray[3]) {
+    if (B.cam_model[0] == XR_SLAM_CAM_RT8) rt8_unproject(B.rt8[0], u, v, ray);
+    else kb4_unproject(B.kb4[0], u, v, ray);
+}
+
 int xr_slam_unproject0(float u, float v, float ray_cam[3]) {
     if (B.kb4[0][0] == 0) return -1;           /* not configured yet */
-    kb4_unproject(B.kb4[0], u, v, ray_cam);
+    cam0_unproject(u, v, ray_cam);
     return 0;
 }
 
@@ -343,7 +377,8 @@ void xr_slam_push_pair(const uint8_t *left, const uint8_t *right,
     if (!atomic_load(&B.running) || ts_ns == 0) return;
     /* the VIO derives its gravity/world at the first frame from the IMU
      * pushed so far — don't hand it frames before there is history */
-    if (atomic_load(&B.imu_pushed) < IMU_WARMUP_SAMPLES) return;
+    if (atomic_load(&B.imu_pushed) <
+        (B.warmup ? B.warmup : IMU_WARMUP_SAMPLES)) return;
     if (ts_ns <= B.last_pair_ts) return;       /* must increase monotonically */
     B.last_pair_ts = ts_ns;
     vit_img_sample_t s = {
@@ -415,7 +450,7 @@ static int fill_state(vit_pose_t *newest, xr_slam_state *out) {
             out->feat_uv[i][1] = v;
             out->feat_id[i] = (int32_t)feats.features[i].id;
             float rc[3];
-            kb4_unproject(B.kb4[0], u, v, rc);         /* unit ray, camera */
+            cam0_unproject(u, v, rc);                  /* unit ray, camera */
             const float *R = B.R_ic[0];
             float ri[3] = {                            /* ray in IMU frame */
                 R[0] * rc[0] + R[1] * rc[1] + R[2] * rc[2],
@@ -518,12 +553,24 @@ int xr_slam_start_raw(const xr_slam_cam_raw *left, const xr_slam_cam_raw *right,
         cc.height = c->height;
         cc.frequency = c->fps;
         cc.fx = c->fx; cc.fy = c->fy; cc.cx = c->cx; cc.cy = c->cy;
-        cc.model = VIT_CAMERA_DISTORTION_KB4;
-        cc.distortion_count = 4;
-        for (int k = 0; k < 4; k++) cc.distortion[k] = c->k[k];
+        B.cam_model[i] = c->model;
+        /* pinhole part mirrors into kb4[0..3] for both models so the
+         * "configured" checks (kb4[0][0] != 0) hold */
         B.kb4[i][0] = c->fx; B.kb4[i][1] = c->fy;
         B.kb4[i][2] = c->cx; B.kb4[i][3] = c->cy;
-        for (int k = 0; k < 4; k++) B.kb4[i][4 + k] = c->k[k];
+        if (c->model == XR_SLAM_CAM_RT8) {
+            cc.model = VIT_CAMERA_DISTORTION_RT8;
+            cc.distortion_count = 9;    /* 8 coeffs + rpmax */
+            for (int k = 0; k < 9; k++) cc.distortion[k] = c->k[k];
+            B.rt8[i][0] = c->fx; B.rt8[i][1] = c->fy;
+            B.rt8[i][2] = c->cx; B.rt8[i][3] = c->cy;
+            for (int k = 0; k < 9; k++) B.rt8[i][4 + k] = c->k[k];
+        } else {
+            cc.model = VIT_CAMERA_DISTORTION_KB4;
+            cc.distortion_count = 4;
+            for (int k = 0; k < 4; k++) cc.distortion[k] = c->k[k];
+            for (int k = 0; k < 4; k++) B.kb4[i][4 + k] = c->k[k];
+        }
         float R[9];
         quat_to_rot_xyzw(c->q_xyzw, 0, R);
         memcpy(B.R_ic[i], R, sizeof R);
@@ -564,6 +611,12 @@ int xr_slam_start_raw(const xr_slam_cam_raw *left, const xr_slam_cam_raw *right,
     }
     atomic_store(&B.imu_pushed, 0);
     B.last_pair_ts = 0;
+    /* Dataset replay: a tiny gate only (Basalt's own dataset runners feed
+     * IMU/frames interleaved from t0). The device's 300-sample warmup would
+     * FILL the estimator's bounded IMU queue before the first frame — with
+     * the bench lib's BLOCKING pushes that deadlocks init (estimator won't
+     * consume IMU until the first optical-flow result arrives). */
+    B.warmup = 20;
     atomic_store(&B.running, 1);
     LOGI("Basalt VIO started (raw calib, %d cams, %.0f Hz IMU)", 2, imu_hz);
     return 0;
