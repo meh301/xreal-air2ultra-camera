@@ -197,17 +197,34 @@ def parse_ledgers(log_dirs):
              "vprtop_mean": round(sum(v["top"]) / len(v["top"]), 3) if v["top"] else None}
             for k, v in out.items()]
 
-def downsample_traj(results_dirs, out_dir, max_pts=1500):
+def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
+    """Emit <seq>_<key>.json for every plot the viewer offers:
+    our arms r1 map track (key=<arm>), r1 vio track (key=<arm>-vio, bad only
+    would be redundant per arm — VIO differs only by descriptor so bad/xfeat),
+    and baseline systems (key=okvis2lc0 etc.)."""
     import numpy as np
     out_dir.mkdir(parents=True, exist_ok=True)
     n = 0
     seen = set()
+    jobs = []
     for d in results_dirs:
         for f in sorted(Path(d).glob("*_r1_map.tum")):
             m = re.match(r"(.+)_(bad|vpr|megaloc|xfeat|xvpr|xmegaloc)_r1_map", f.stem)
-            if not m:
-                continue
-            seq, arm = m.group(1), m.group(2)
+            if m:
+                jobs.append((f, m.group(1), m.group(2)))
+        # VIO track: one per descriptor family (bad, xfeat) — vpr/megaloc VIO
+        # is identical to bad's (map layer has no feedback into VIO)
+        for f in sorted(Path(d).glob("*_r1_vio.tum")):
+            m = re.match(r"(.+)_(bad|xfeat)_r1_vio", f.stem)
+            if m:
+                jobs.append((f, m.group(1), m.group(2) + "-vio"))
+    for d in baseline_dirs:
+        for f in sorted(Path(d).glob("*.tum")):
+            m = re.match(r"(.+)_(okvis2|orb3|openvins)_lc([01])$", f.stem)
+            if m:
+                jobs.append((f, m.group(1), f"{m.group(2)}lc{m.group(3)}"))
+    for f, seq, arm in jobs:
+        if True:
             if (seq, arm) in seen:
                 continue
             seen.add((seq, arm))
@@ -298,7 +315,7 @@ def main():
         (out / "ledger.json").write_text(json.dumps(led))
         print(f"ledger.json: {len(led)} entries")
     if a.traj and a.results:
-        n = downsample_traj(a.results, out / "traj")
+        n = downsample_traj(a.results, out / "traj", baseline_dirs=a.baselines)
         print(f"traj: {n} files")
     meta = {"generated": datetime.now(timezone.utc).isoformat(),
             "protocol": "causal (pose at first estimate), SE3-Umeyama ATE, "

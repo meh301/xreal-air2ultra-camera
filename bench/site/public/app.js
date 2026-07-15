@@ -6,6 +6,17 @@ const ARMS = ["bad", "vpr", "megaloc", "xfeat", "xvpr", "xmegaloc"];
 const ARM_LABEL = {
   bad: "BAD/TEBLID", vpr: "BAD + EigenPlaces", megaloc: "BAD + MegaLoc",
   xfeat: "XFeat", xvpr: "XFeat + EigenPlaces", xmegaloc: "XFeat + MegaLoc",
+  "bad-vio": "VIO only", "xfeat-vio": "VIO only (XFeat)",
+  okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
+  orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
+};
+/* every plot key the trajectory panel may offer, in display order */
+const TRAJ_KEYS = ["bad-vio", "xfeat-vio", ...ARMS,
+  "okvis2lc0", "okvis2lc1", "orb3lc0", "orb3lc1", "openvinslc0"];
+const TRAJ_COLOR = {
+  "bad-vio": "vio", "xfeat-vio": "vio",
+  okvis2lc0: "base", okvis2lc1: "base", orb3lc0: "xvpr", orb3lc1: "xvpr",
+  openvinslc0: "pub",
 };
 const GROUPS = [
   ["overview", "Overview"], ["systems", "vs. Systems"], ["trajectories", "Trajectories"],
@@ -346,12 +357,13 @@ function trajPanel({ group, seq, compact } = {}) {
     loaded.forEach((d, i) => {
       if (!d?.est) return;
       const c = clipArm(d);
-      trajs.push(singleErr ? { pts: c.est, err: c.err } : { pts: c.est, color: col(active[i]) });
+      trajs.push(singleErr ? { pts: c.est, err: c.err }
+                           : { pts: c.est, color: col(TRAJ_COLOR[active[i]] || active[i]) });
     });
     orbit.set(trajs);
     legendHost.innerHTML = `<span><i style="background:var(--c-gt)"></i>ground truth</span>` +
       (singleErr ? `<span><i style="background:linear-gradient(90deg,#2a78d6,#d83b3b)"></i>error 0→50 cm</span>`
-                 : active.map(a => `<span><i style="background:${col(a)}"></i>${ARM_LABEL[a]}</span>`).join("")) +
+                 : active.map(a => `<span><i style="background:${col(TRAJ_COLOR[a] || a)}"></i>${ARM_LABEL[a] || a}</span>`).join("")) +
       (timeRange ? `<span class="hint">showing ${timeRange[0].toFixed(0)}–${timeRange[1].toFixed(0)} s (arms only) — double-click the timeline to reset</span>`
                  : `<span class="hint">drag = orbit · wheel = zoom · shift/right-drag = pan · grid on z=0 through origin</span>`);
   }
@@ -362,7 +374,7 @@ function trajPanel({ group, seq, compact } = {}) {
     const loaded = await Promise.all(active.map(getArm));
     const singleErr = active.length === 1 && loaded[0]?.err;
     tlWrap.innerHTML = "";
-    const ts = active.map((a, i) => loaded[i]?.err && loaded[i]?.t ? { t: loaded[i].t, err: loaded[i].err, color: singleErr ? col("base") : col(a), label: ARM_LABEL[a] } : null).filter(Boolean);
+    const ts = active.map((a, i) => loaded[i]?.err && loaded[i]?.t ? { t: loaded[i].t, err: loaded[i].err, color: singleErr ? col("base") : col(TRAJ_COLOR[a] || a), label: ARM_LABEL[a] || a } : null).filter(Boolean);
     if (ts.length) {
       const tcv = el("canvas", { width: 1000, height: 180 });
       const w = el("div", { class: "viewbox", style: "margin-top:10px" });
@@ -378,7 +390,7 @@ function trajPanel({ group, seq, compact } = {}) {
     [...sel].forEach(a => { if (!availArms.includes(a)) sel.delete(a); });
     if (!sel.size) sel.add(availArms[0]);
     for (const a of availArms) {
-      const c = el("span", { class: "chip" + (sel.has(a) ? "" : " off") }, `<span class="dot" style="background:${col(a)}"></span>${ARM_LABEL[a]}`);
+      const c = el("span", { class: "chip" + (sel.has(a) ? "" : " off") }, `<span class="dot" style="background:${col(TRAJ_COLOR[a] || a)}"></span>${ARM_LABEL[a] || a}`);
       c.onclick = () => { if (sel.has(a)) { if (sel.size > 1) sel.delete(a); } else sel.add(a); buildArmChips(); redraw(); };
       armBox.append(c);
     }
@@ -386,8 +398,9 @@ function trajPanel({ group, seq, compact } = {}) {
   async function loadSeq() {
     const my = ++token;
     for (const k in jsonCache) delete jsonCache[k];
-    // probe EVERY arm's trajectory once; only arms with real data become chips
-    const loaded = await Promise.all(armsFor(seq).map(async a => [a, await getArm(a)]));
+    // probe EVERY plot key (arms, VIO tracks, baselines); only keys with
+    // real data become chips
+    const loaded = await Promise.all(TRAJ_KEYS.map(async a => [a, await getArm(a)]));
     if (my !== token) return;
     availArms = loaded.filter(([, d]) => d?.est?.length).map(([a]) => a);
     const withGt = loaded.find(([, d]) => d?.gt?.length);
