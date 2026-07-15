@@ -91,7 +91,7 @@ function barChart({ title, cats, series, refs = [], note = "", onBar }) {
     const vals = act.flatMap(s => s.values).filter(v => v != null).concat(aRefs.map(r => r.v));
     const ymax = Math.max(1, ...vals) * 1.14;
     const Y = v => mt + ph - Math.min(v, ymax) / ymax * ph;
-    const gw = pw / cats.length, bw = Math.min(24, gw * 0.82 / Math.max(1, act.length));
+    const gw = pw / Math.max(1, cats.length), bw = Math.min(24, gw * 0.82 / Math.max(1, act.length));
     let s = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
     for (let g = 0; g <= 4; g++) {
       const v = ymax * g / 4;
@@ -116,6 +116,9 @@ function barChart({ title, cats, series, refs = [], note = "", onBar }) {
       const c = r.cls === "base" ? "var(--c-base)" : "var(--c-pub)";
       s += `<line x1="${x0.toFixed(1)}" x2="${x1.toFixed(1)}" y1="${Y(r.v).toFixed(1)}" y2="${Y(r.v).toFixed(1)}" class="refline" stroke="${c}"><title>${r.label}: ${fmt(r.v)} cm</title></line>`;
     }
+    // empty state: keep the axes frame, just note there's nothing to plot
+    if (!vals.length)
+      s += `<text x="${(ml + pw / 2).toFixed(0)}" y="${(mt + ph / 2).toFixed(0)}" class="tick" text-anchor="middle" font-size="13">no data for the selected series</text>`;
     s += "</svg>";
     holder.innerHTML = s;
     if (onBar) holder.querySelectorAll(".bar,.cat").forEach(b => b.onclick = () => onBar(+b.dataset.cat));
