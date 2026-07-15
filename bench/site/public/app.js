@@ -387,7 +387,7 @@ function datasetView(group) {
   view.append(barChart({
     title: `${GROUPS.find(g => g[0] === group)[1]} — causal ${S.useRte ? "RTE" : "ATE"} medians [cm]`,
     cats: seqs.map(shortName), series, refs,
-    note: "click a bar or label for run-level detail + trajectory. Yellow dashes = " +
+    note: "click a bar or label for run-level detail + trajectory. Gray dashes = " +
           "published references (regime annotated on hover); red dashes = baselines we ran.",
     onBar: i => drill(seqs[i]),
   }));
