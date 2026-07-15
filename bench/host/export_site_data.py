@@ -46,8 +46,8 @@ def score_one(args):
     rte = float(m.group(2)) if m.group(2) != "inf" else None
     return fname, ate, rte, float(m.group(3))
 
-def collect_runs(dirs, name_re):
-    jobs, meta = [], {}
+def collect_runs(dirs, name_re, cache=None):
+    jobs, meta, rows = [], {}, []
     for d in dirs:
         for f in sorted(Path(d).glob("*.tum")):
             m = name_re.match(f.name)
@@ -57,13 +57,16 @@ def collect_runs(dirs, name_re):
             gt, ds = gt_for(seq)
             if not gt:
                 continue
-            meta[str(f)] = m.groupdict()
+            key = f"{f.name}|{f.stat().st_size}"
+            if cache is not None and key in cache:
+                rows.append(cache[key])
+                continue
+            meta[str(f)] = (m.groupdict(), key)
             jobs.append((str(f), str(gt), ds))
-    rows = []
     with ProcessPoolExecutor(max_workers=12) as ex:
         for fname, ate, rte, comp in ex.map(score_one, jobs):
-            g = meta[fname]
-            rows.append({
+            g, key = meta[fname]
+            row = {
                 "seq": g["seq"], "group": group_of(g["seq"]),
                 "arm": g.get("arm") or g.get("sys"),
                 "run": int(g["run"]) if g.get("run") else 1,
@@ -71,7 +74,10 @@ def collect_runs(dirs, name_re):
                 "ate_cm": round(ate, 3) if ate is not None else None,
                 "rte_cm": round(rte, 3) if rte is not None else None,
                 "completion": comp,
-            })
+            }
+            rows.append(row)
+            if cache is not None:
+                cache[key] = row
     return rows
 
 def parse_ledgers(log_dirs):
@@ -146,15 +152,19 @@ def main():
     base_re = re.compile(
         r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins)_lc(?P<lc>[01])\.tum$")
 
+    cache_f = out / ".score_cache.json"
+    cache = json.loads(cache_f.read_text()) if cache_f.exists() else {}
+
     if a.results:
-        rows = collect_runs(a.results, ours_re)
+        rows = collect_runs(a.results, ours_re, cache)
         (out / "results.json").write_text(json.dumps(
             {"generated": datetime.now(timezone.utc).isoformat(), "runs": rows}))
         print(f"results.json: {len(rows)} rows")
     if a.baselines:
-        rows = collect_runs(a.baselines, base_re)
+        rows = collect_runs(a.baselines, base_re, cache)
         (out / "baselines.json").write_text(json.dumps({"runs": rows}))
         print(f"baselines.json: {len(rows)} rows")
+    cache_f.write_text(json.dumps(cache))
     if a.logs:
         led = parse_ledgers(a.logs)
         (out / "ledger.json").write_text(json.dumps(led))

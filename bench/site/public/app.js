@@ -384,7 +384,8 @@ function buildShell() {
   $("#drill").onclick = e => { if (e.target.id === "drill") $("#drill").classList.add("hidden"); };
 }
 
-(async () => {
+let lastGenerated = null;
+async function refreshData(first) {
   const [res, base, pub, led, meta] = await Promise.all([
     loadJSON("data/results.json", { runs: [] }),
     loadJSON("data/baselines.json", { runs: [] }),
@@ -392,11 +393,18 @@ function buildShell() {
     loadJSON("data/ledger.json", []),
     loadJSON("data/meta.json", {}),
   ]);
+  const changed = res.generated !== lastGenerated;
+  lastGenerated = res.generated;
   S.runs = res.runs; S.baselines = base.runs; S.published = pub;
   S.ledger = led; S.meta = meta;
-  $("#meta-line").textContent =
-    `${S.runs.length} run-scores · generated ${res.generated || "?"} · ` +
-    `causal protocol · ${S.meta.protocol || ""}`;
+  $("#meta-line").innerHTML =
+    `<span id="live-dot" title="auto-refreshing">●</span> LIVE · ` +
+    `${S.runs.length} run-scores · data ${res.generated || "?"} · causal protocol`;
+  if (first || changed) render();
+}
+(async () => {
+  await refreshData(true);
   buildShell();
   render();
+  setInterval(() => refreshData(false), 45000);   // live: poll every 45 s
 })();

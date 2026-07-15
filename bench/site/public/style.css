@@ -18,6 +18,8 @@ header { padding:18px 24px 10px; border-bottom:1px solid var(--grid);
   position:sticky; top:0; background:var(--s1); z-index:5; }
 h1 { font-size:21px; margin:0; }
 .sub { color:var(--ink2); font-size:12.5px; margin:2px 0 10px; }
+#live-dot { color:#1baf7a; animation:pulse 2.4s infinite; }
+@keyframes pulse { 50% { opacity:.25; } }
 nav button { background:none; border:none; color:var(--ink2); font:600 14px system-ui;
   padding:8px 14px; cursor:pointer; border-bottom:2px solid transparent; }
 nav button.on { color:var(--ink); border-color:var(--accent); }
