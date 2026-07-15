@@ -127,7 +127,11 @@ def score_one(args):
     gRi = np.transpose(gR, (0, 2, 1))
     err_t = np.einsum("nij,nj->ni", gRi, et2 - gt2)
     rte_cm = float(np.sqrt((np.linalg.norm(err_t, axis=1) ** 2).mean())) * 100.0
-    if ate_m > ATE_DIVERGE_M[ds] or rte_cm > RTE_DIVERGE_CM:
+    # Divergence gates on ATE ONLY. An RTE gate structurally kills causal
+    # loop-closure systems: a correction re-anchor is one giant frame-pair
+    # step (ORB-SLAM3+LC lost 10/11 EuRoC runs to it while whole-run ATE was
+    # 0.4-8.7 m). RTE is still computed and reported — snaps show up there.
+    if ate_m > ATE_DIVERGE_M[ds]:
         return fname, None, None, round(float(completion), 1)
     return fname, ate_m * 100.0, rte_cm, round(float(completion), 1)
 
