@@ -17,7 +17,7 @@ const GROUP_TITLE = Object.fromEntries(GROUPS);
 const S = {
   runs: [], baselines: [], published: [], ledger: [], meta: {},
   tab: "overview", armOn: Object.fromEntries(ARMS.map(a => [a, true])),
-  showPub: true, showBase: true, useRte: false,
+  useRte: false,
 };
 
 const $ = s => document.querySelector(s);
@@ -346,6 +346,11 @@ function trajPanel({ group, seq, compact } = {}) {
 }
 
 /* ---------- views ---------- */
+const BASE_COLORS = { "okvis2_lc0": "#d83b3b", "okvis2_lc1": "#a01f1f",
+  "orb3_lc0": "#e0930a", "orb3_lc1": "#a86a00", "openvins_lc0": "#8a897f" };
+const BASE_LABEL = { "okvis2_lc0": "OKVIS2", "okvis2_lc1": "OKVIS2+LC",
+  "orb3_lc0": "ORB-SLAM3", "orb3_lc1": "ORB-SLAM3+LC", "openvins_lc0": "OpenVINS" };
+
 function datasetBar(group, view) {
   const seqs = seqsIn(group);
   const med = medians(S.runs.filter(r => r.group === group), S.useRte ? "rte" : "ate");
@@ -355,17 +360,20 @@ function datasetBar(group, view) {
     ...armsOn.map(a => ({ label: `+map ${ARM_LABEL[a]}`, color: col(a),
       values: seqs.map(s => med[s]?.[a]?.map) })),
   ];
-  const refs = [];
-  if (S.showPub) for (const p of S.published.filter(p => p.group === group)) {
-    const i = seqs.indexOf(p.seq); if (i >= 0 && !S.useRte) refs.push({ i, v: p.ate_cm, cls: "pub", label: `${p.system} (${p.regime})` }); }
-  if (S.showBase) for (const b of aggBaselines().filter(b => group_of(b.seq) === group)) {
-    const i = seqs.indexOf(b.seq); if (i >= 0) refs.push({ i, v: S.useRte ? b.rte : b.ate, cls: "base", label: `${b.sys} lc${b.lc} (ours-run causal)` }); }
+  // baseline systems as REAL bar series (same machine, same causal protocol)
+  const base = aggBaselines().filter(b => group_of(b.seq) === group);
+  const sysKeys = [...new Set(base.map(b => `${b.sys}_lc${b.lc}`))].sort();
+  for (const k of sysKeys) series.push({
+    label: BASE_LABEL[k] || k.replace("_", " "),
+    color: BASE_COLORS[k] || "#888",
+    values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === k); return b ? (S.useRte ? b.rte : b.ate) : null; }),
+  });
   let curSeq = seqs[0];
   const panelHost = el("div");
   const chart = barChart({
     title: `${GROUP_TITLE[group]} — causal ${S.useRte ? "RTE" : "ATE"} medians [cm]`,
-    cats: seqs.map(shortName), series, refs,
-    note: "Bars = our arms. Gray dashes = published refs (regime on hover); red dashes = baselines we ran on the same machine. Click a bar to load its trajectory below.",
+    cats: seqs.map(shortName), series,
+    note: "All bars are systems we ran ourselves: same machine, same causal protocol. Click a legend chip to toggle a series, or a bar to load its trajectory below.",
     onBar: i => { curSeq = seqs[i]; panelHost.innerHTML = ""; panelHost.append(trajPanel({ group, seq: curSeq, compact: true })); panelHost.scrollIntoView({ behavior: "smooth", block: "nearest" }); },
   });
   view.append(chart);
@@ -401,12 +409,11 @@ function systemsView() {
   const seqs = [...new Set(base.map(b => b.seq))].sort();
   const med = medians(S.runs.filter(r => seqs.includes(r.seq)), S.useRte ? "rte" : "ate");
   const sysArms = [...new Set(base.map(b => `${b.sys}_lc${b.lc}`))].sort();
-  const palette = ["#d83b3b", "#8a897f", "#a06be0", "#e0930a", "#0f8a3c"];
   const bestArm = s => { const v = ARMS.map(a => med[s]?.[a]?.map).filter(x => x != null); return v.length ? Math.min(...v) : null; };
   const series = [
     { label: "ours: VIO", color: col("vio"), values: seqs.map(s => med[s]?.bad?.vio) },
     { label: "ours: +map (best arm)", color: col("vpr"), values: seqs.map(bestArm) },
-    ...sysArms.map((sa, i) => ({ label: sa.replace("_", " "), color: palette[i % palette.length],
+    ...sysArms.map(sa => ({ label: BASE_LABEL[sa] || sa.replace("_", " "), color: BASE_COLORS[sa] || "#888",
       values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === sa); return b ? (S.useRte ? b.rte : b.ate) : null; }) })),
   ];
   view.append(barChart({
@@ -483,19 +490,18 @@ function buildShell() {
   };
   applyTheme(localStorage.getItem("bench-theme") || "auto");
   seg.querySelectorAll("button").forEach(b => b.onclick = () => { applyTheme(b.dataset.t); render(); });
-  $("#show-pub").onchange = e => { S.showPub = e.target.checked; render(); };
-  $("#show-base").onchange = e => { S.showBase = e.target.checked; render(); };
   $("#metric-rte").onchange = e => { S.useRte = e.target.checked; render(); };
 }
 
 let lastGen = null;
 async function refresh(first) {
-  const [res, base, pub, led, meta] = await Promise.all([
+  const [res, base, led, meta] = await Promise.all([
     loadJSON("data/results.json", { runs: [] }), loadJSON("data/baselines.json", { runs: [] }),
-    loadJSON("data/published.json", []), loadJSON("data/ledger.json", []), loadJSON("data/meta.json", {}),
+    loadJSON("data/ledger.json", []), loadJSON("data/meta.json", {}),
   ]);
-  const changed = res.generated !== lastGen; lastGen = res.generated;
-  S.runs = res.runs; S.baselines = base.runs || []; S.published = pub; S.ledger = led; S.meta = meta;
+  const changed = (res.generated !== lastGen) || (S.baselines.length !== (base.runs || []).length);
+  lastGen = res.generated;
+  S.runs = res.runs; S.baselines = base.runs || []; S.ledger = led; S.meta = meta;
   $("#meta-line").innerHTML = `<span id="live-dot">●</span> LIVE · ${S.runs.length} run-scores · ${S.baselines.length} baseline runs · data ${res.generated || "?"}`;
   if (first || changed) render();
 }
