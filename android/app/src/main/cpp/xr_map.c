@@ -162,9 +162,12 @@ typedef struct {
     float lm_xyz[XR_MAP_KP_PER_KF][3];
     float lm_uv[XR_MAP_KP_PER_KF][2];
     /* place-recognition embedding (xr_vpr), L2-normalized; the retrieval
-     * pre-rank's dot products are cosines. Model-version-locked. */
+     * pre-rank's dot products are cosines. Model-version-locked: emb_dim
+     * is the active model's dimension (512 EigenPlaces .. 8448 MegaLoc);
+     * only same-dim embeddings compare. */
     int has_emb;
-    float emb[XR_VPR_DIM];
+    int emb_dim;
+    float emb[XR_VPR_MAX_DIM];
 } xr_kf;
 
 static xr_kf KF[XR_MAP_MAX_KF];        /* .bss — physical slot pool */
@@ -1569,7 +1572,13 @@ static void process_keyframe(void) {
              * BAD path anchors descriptors AT the landmarks instead) */
             for (int j = 0; j < work.n_kp; j++) {
                 work.lm_of_kp[j] = -1;
-                float bd = 16.0f;              /* 4 px */
+                /* association radius 8 px (was 4): XFeat's learned detector
+                 * rarely fires within 4 px of the VIO's FAST corners — on
+                 * 512x512 fisheye the 4 px join starved PnP verification to
+                 * 0-12 usable 2D-3D pairs (bench matrix 1, corridor/room
+                 * data) while matching itself outperformed BAD. 8 px ~ 1 deg
+                 * at these focals, well inside VER_COS_TOL (~4 deg). */
+                float bd = 64.0f;              /* 8 px squared */
                 for (int i = 0; i < work.n_lm; i++) {
                     float du = work.lm_uv[i][0] - work.kp_uv[j][0];
                     float dv = work.lm_uv[i][1] - work.kp_uv[j][1];
@@ -1587,7 +1596,8 @@ static void process_keyframe(void) {
     /* place-recognition embedding for retrieval pre-ranking. Cheap no-op
      * until a VPR model is registered (and permanently off after a failed
      * bring-up). Runs on this (map) thread at keyframe/search rate. */
-    work.has_emb = xr_vpr_embed(img, work.emb) == 0;
+    work.emb_dim = xr_vpr_embed(img, work.emb);
+    work.has_emb = work.emb_dim > 0;
 
     /* ---- candidate search + geometric verification: LOCK-FREE. Only the
      * map thread WRITES the keyframe store; a concurrent reset / descriptor
@@ -1654,10 +1664,14 @@ static void process_keyframe(void) {
         float bs[VPR_SHORTLIST];
         int bi[VPR_SHORTLIST], bn = 0;
         for (int i = 0; i < lim; i++) {
-            if (!KFA(i).has_emb) { vpr_pick[i] = 1; continue; }  /* pre-VPR kf */
+            /* pre-VPR or other-model keyframes stay always-eligible */
+            if (!KFA(i).has_emb || KFA(i).emb_dim != work.emb_dim) {
+                vpr_pick[i] = 1;
+                continue;
+            }
             const float *a = work.emb, *b = KFA(i).emb;
             float s = 0;
-            for (int d = 0; d < XR_VPR_DIM; d++) s += a[d] * b[d];
+            for (int d = 0; d < work.emb_dim; d++) s += a[d] * b[d];
             if (s > vpr_top) vpr_top = s;
             if (s < VPR_MIN_SIM) continue;
             int pos = bn < VPR_SHORTLIST

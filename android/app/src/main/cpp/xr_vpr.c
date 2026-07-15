@@ -27,6 +27,7 @@ static struct {
     char path[512];
     atomic_int ready;
     int failed;                       /* permanent: don't retry every frame */
+    int dim;                          /* model output dim, set at bring-up */
     float input[XR_OH * XR_OW];       /* map thread only */
 } V;
 
@@ -44,6 +45,10 @@ void xr_vpr_set_model(const char *onnx_path) {
 
 int xr_vpr_ready(void) {
     return atomic_load_explicit(&V.ready, memory_order_acquire);
+}
+
+int xr_vpr_dim(void) {
+    return atomic_load_explicit(&V.ready, memory_order_acquire) ? V.dim : 0;
 }
 
 static int vpr_try_init(void) {
@@ -88,13 +93,32 @@ static int vpr_try_init(void) {
         return 0;
     strncpy(V.out_name, name, sizeof V.out_name - 1);
     alloc->Free(alloc, name);
+    /* discover the embedding dimension from the output shape [1, D] */
+    OrtTypeInfo *ti = NULL;
+    const OrtTensorTypeAndShapeInfo *tsi = NULL;
+    int64_t d[2] = { 0, 0 };
+    size_t nd = 0;
+    if (!ort_ok(V.api->SessionGetOutputTypeInfo(V.session, 0, &ti),
+                "OutputTypeInfo"))
+        return 0;
+    V.api->CastTypeInfoToTensorInfo(ti, &tsi);
+    if (tsi) {
+        V.api->GetDimensionsCount(tsi, &nd);
+        V.api->GetDimensions(tsi, d, nd < 2 ? nd : 2);
+    }
+    V.api->ReleaseTypeInfo(ti);
+    V.dim = (int)d[1];
+    if (V.dim <= 0 || V.dim > XR_VPR_MAX_DIM) {
+        LOGE("VPR: unusable embedding dim %d (max %d)", V.dim, XR_VPR_MAX_DIM);
+        return 0;
+    }
     atomic_store_explicit(&V.ready, 1, memory_order_release);
-    LOGI("VPR ready: %s (%d-D, in=%s out=%s)", V.path, XR_VPR_DIM,
+    LOGI("VPR ready: %s (%d-D, in=%s out=%s)", V.path, V.dim,
          V.in_name, V.out_name);
     return 1;
 }
 
-int xr_vpr_embed(const uint8_t *img, float emb[XR_VPR_DIM]) {
+int xr_vpr_embed(const uint8_t *img, float emb[XR_VPR_MAX_DIM]) {
     if (!atomic_load_explicit(&V.ready, memory_order_acquire)) {
         if (V.failed || !V.path[0]) return -1;
         if (!vpr_try_init()) {         /* map thread; one attempt only */
@@ -123,10 +147,10 @@ int xr_vpr_embed(const uint8_t *img, float emb[XR_VPR_DIM]) {
         /* graph L2-normalizes; renormalize anyway so stored dot products
          * are true cosines even under numeric drift */
         float n = 0;
-        for (int i = 0; i < XR_VPR_DIM; i++) n += e[i] * e[i];
+        for (int i = 0; i < V.dim; i++) n += e[i] * e[i];
         n = n > 1e-12f ? 1.0f / sqrtf(n) : 0.0f;
-        for (int i = 0; i < XR_VPR_DIM; i++) emb[i] = e[i] * n;
+        for (int i = 0; i < V.dim; i++) emb[i] = e[i] * n;
     }
     V.api->ReleaseValue(ov);
-    return ok ? 0 : -1;
+    return ok ? V.dim : -1;
 }
