@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <android/log.h>
@@ -71,6 +72,34 @@ static int vpr_try_init(void) {
         return 0;
     V.api->SetIntraOpNumThreads(opts, 2);
     V.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL);
+#ifndef __ANDROID__
+    /* Opt-in CUDA EP for host/container replay (XR_ORT_CUDA=<device_id>).
+     * Resolved via dlsym so the same source runs against CPU-only ORT.
+     * Heavy VPR models (MegaLoc 915MB fp32, ~229ms/embed on CPU) drop to
+     * ~10ms on GPU, restoring realistic retrieval cadence in the bench. */
+    {
+        const char *cud = getenv("XR_ORT_CUDA");
+        if (cud && *cud) {
+            /* look up on the dlopen handle: the lib is RTLD_LOCAL, so its
+             * symbols are invisible to RTLD_DEFAULT */
+            OrtStatus *(*cuda_ep)(OrtSessionOptions *, int) =
+                (OrtStatus * (*)(OrtSessionOptions *, int))
+                dlsym(dl, "OrtSessionOptionsAppendExecutionProvider_CUDA");
+            if (cuda_ep) {
+                OrtStatus *st = cuda_ep(opts, atoi(cud));
+                if (st) {
+                    LOGI("VPR: CUDA EP failed (%s), staying on CPU",
+                         V.api->GetErrorMessage(st));
+                    V.api->ReleaseStatus(st);
+                } else {
+                    LOGI("VPR: CUDA EP enabled (device %s)", cud);
+                }
+            } else {
+                LOGI("VPR: CUDA EP symbol absent (CPU-only ORT), staying on CPU");
+            }
+        }
+    }
+#endif
     if (!ort_ok(V.api->CreateSession(V.env, V.path, opts, &V.session),
                 "CreateSession")) {
         V.api->ReleaseSessionOptions(opts);
