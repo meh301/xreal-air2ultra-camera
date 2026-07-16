@@ -21,6 +21,7 @@
 
 #include "xr_map.h"
 #include "xr_slam.h"
+#include "xr_xfeat.h"
 #include "xreal_core.h"
 
 #define DIE(...) do { fprintf(stderr, "xr_replay: " __VA_ARGS__); \
@@ -256,6 +257,7 @@ int main(int argc, char **argv) {
     const char *pack = NULL, *out = NULL, *toml = NULL, *xfeat = NULL;
     const char *vpr = NULL;
     int inflight = 6, fast = 0, use_map = 1, reloc_n = 0;
+    int seed_frontend = 0;   /* set after args: XR_SEED env + xfeat model */
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pack") && i + 1 < argc) pack = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
@@ -316,6 +318,16 @@ int main(int argc, char **argv) {
         }
         if (vpr) xr_map_set_vpr_model(vpr);
     }
+    /* v9 detector unification: XFeat maxima seed Basalt corner detection
+     * (needs --xfeat for the model AND XR_SEED=1; extension is dlsym'd so
+     * stock basalt libs simply ignore the seeds) */
+    {
+        const char *se = getenv("XR_SEED");
+        if (se && *se && *se != '0' && xfeat) {
+            seed_frontend = 1;
+            fprintf(stderr, "xr_replay: XFeat frontend seeding ON\n");
+        }
+    }
     if (xr_slam_start_raw(&L, &R, meta.imu_hz,
                           have_noises ? noises : NULL) != 0)
         DIE("Basalt failed to start (libbasalt.so on LD_LIBRARY_PATH?)");
@@ -338,6 +350,16 @@ int main(int argc, char **argv) {
             DIE("frames.raw truncated at pair %ld", line);
         if (imu_pushed >= 20) {   /* mirrors xr_slam_start_raw's small gate */
             ring_put(f_ts, fr);
+            /* v9 detector unification (XR_SEED env): XFeat maxima seed
+             * Basalt's corner detection; KLT still does the tracking. Must
+             * be posted BEFORE the frame so addPoints finds them. */
+            if (seed_frontend) {
+                static float suv[512][2];
+                static int8_t sdesc[512][64];
+                int sn = xr_xfeat_extract(fr, suv, sdesc, 512);
+                if (sn > 0)
+                    xr_slam_seed_keypoints(f_ts, 0, &suv[0][0], sn);
+            }
             xr_slam_push_pair(fr, fr + (size_t)XR_OW * XR_OH, f_ts);
             frames_pushed++;
         } else {
