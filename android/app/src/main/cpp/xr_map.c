@@ -1896,13 +1896,12 @@ static void process_keyframe(void) {
                 confirmed = dp2 < CONFIRM_DP_M * CONFIRM_DP_M &&
                             da < CONFIRM_DA_RAD;
             }
-            /* Strong single-frame confirm: with slow VPR embeddings the
-             * query cadence can be seconds (MegaLoc ~1 verified event per
-             * run) — a 2-frame agreement is then unreachable no matter the
-             * window. When the geometry alone is near-unambiguous (well
-             * above the strong gate, high inlier ratio, wide covisibility)
-             * accept a single frame. */
-            if (!confirmed && nin >= 2 * VER_STRONG_INLIERS &&
+            /* Strong single-frame confirm — LOST RECOVERY ONLY. Recovery
+             * benefits from fast re-anchoring and any alignment beats being
+             * lost; healthy tracking must keep the 2-frame agreement, or
+             * transient deviation spikes snap a good VIO onto stale map
+             * error (EuRoC: 12 such snaps turned 6.5cm ATE into 20cm+). */
+            if (!confirmed && lost && nin >= 2 * VER_STRONG_INLIERS &&
                 nin * 100 >= 60 * n3 && covis >= 12)
                 confirmed = 1;
 
@@ -1920,16 +1919,16 @@ static void process_keyframe(void) {
                      "but |t|=%.2fm ang=%.0fdeg exceeds caps — wrong-place "
                      "match, ignored", best_i, nin, n3, covis, (double)dev,
                      (double)(sang * 57.3f));
-            } else if (!worth && !(confirmed && PENDING_D.have)) {
+            } else if (!worth) {
                 /* healthy and the VIO agrees with the map (or we just
                  * snapped): do nothing — a recovery, not a continuous clamp.
-                 * Keep any pending candidate: deviation flickers around
-                 * SNAP_MIN at room scale, and clearing here meant a single
-                 * sub-gate frame destroyed the 2-frame confirmation forever
-                 * (rooms closed zero loops). The pending expires via
-                 * CONFIRM_WINDOW anyway. A frame that AGREES with a pending
-                 * worth-frame falls through and confirms: the drift was
-                 * established by the pending frame, this one corroborates. */
+                 * KEEP any pending candidate: deviation flickers around
+                 * SNAP_MIN at room scale, and clearing here destroyed the
+                 * 2-frame confirmation forever (rooms closed zero loops).
+                 * But do NOT apply on agreement while sub-gate: the apply
+                 * itself must be re-earned by a worth frame, or transient
+                 * spikes snap good VIO onto stale map error (EuRoC). The
+                 * pending expires via CONFIRM_WINDOW. */
                 VER_LAST.outcome = VOUT_GATED;
             } else if (!confirmed) {
                 /* one good frame is not enough — wait for a 2nd that agrees */
