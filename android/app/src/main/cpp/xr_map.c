@@ -2000,14 +2000,14 @@ static void process_keyframe(void) {
             if (PROBE_REQ) {
                 /* reloc-benchmark probe: record the verified alignment (the
                  * query's session-frame pose, since the probe's odom pose is
-                 * identity) and change NOTHING — no apply, no pending. */
-                pthread_mutex_lock(&MAP_LOCK);
+                 * identity) and change NOTHING — no apply, no pending.
+                 * NOTE: this whole section already runs under MAP_LOCK —
+                 * re-locking here self-deadlocked the first live test. */
                 PROBE_RES.ok = 1;
                 PROBE_RES.inliers = nin;
                 PROBE_RES.kf = best_i;
                 memcpy(PROBE_RES.q, Dq, sizeof PROBE_RES.q);
                 memcpy(PROBE_RES.p, Dp, sizeof PROBE_RES.p);
-                pthread_mutex_unlock(&MAP_LOCK);
             } else if (dev > mxt || sang > mxa) {
                 VER_LAST.outcome = VOUT_CAPPED;
                 PENDING_D.have = 0;
