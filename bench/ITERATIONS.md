@@ -291,3 +291,50 @@ xr_replay_drive (800x400) built; /root/out/drive.toml staged.
 convention suspect (TS_cam_imu direction). Variant B (no inversion)
 smoke running; driving toml tuning next. Remaining queue: LighterGlue
 verifier, lifetime descriptors + direct index, stage-3 coupling (parked).
+
+### x Trio verdicts (fastbench, 3 runs/arm, vs v10revisit base)
+- v12react: REJECT as-is. Wins MH_01 (4.9-5.4) + slides2/mag2-megaloc,
+  but corridors collapse (corr2 bad 29->50, corr3 megaloc 40->59): the
+  400ms anchor pin STARVES full retrieval exactly where distant loops
+  pay the rent. Rework = pin as an ADDITIONAL cheap query, never a
+  replacement (or drop anchor on movement > COVIS_R).
+- v13ramp: was 100% NaN-poisoned (first-call blend read uninitialized
+  R.q0 -> normalize(0) -> inf*0). FIXED (init q0/p0 + backdated t0).
+  Salvage-scored (NaN rows stripped): ~ATE-neutral; wins slides2-vpr
+  42->32, mag2-megaloc 97->83; loses corridor3 +4-11. Verdict: keep OFF
+  by default - display-smoothness feature, not an accuracy feature.
+- v14confw: REJECT as-is. slides2-vpr 42->27 headline, but MH_01-bad
+  DOUBLES (5.3->10.6) + megaloc regressions (MH_05 23->32, corr5 24->33).
+  Blending weakens exactly the strong closures it should trust.
+- MOO15 "landing" under all three variants (28-73cm, 1-2/3 runs) vs v10
+  all-div = near-gate coin flips, not signal.
+
+### x RELOC BENCHMARK WAS UNFAIR — gravity fix (probe grav_q)
+Full 13x3x30 grid exposed it: EuRoC + MSD probes = 0/30 on ALL arms
+while mapping-phase PnP in the SAME runs verifies fine (nin 30-50).
+Root cause: pnp2_ransac is 4-DOF (yaw+translation; roll/pitch TRUSTED
+from the query's odom orientation) and probes passed IDENTITY - fatal
+on any tilted frame / non-level body convention (EuRoC/MSD), partial on
+level-ish handheld TUM-VI (rooms 20-63%, corridors ~3%, corridor4 43-53%).
+Deployed system unaffected (live queries always carry VIO gravity).
+Fix: xr_map_probe(img, grav_q, ...) + harness passes the frame's own
+vio-track quat (gravity true, yaw ignored/solved - a kidnapped device
+still has its accelerometer). v1 no-gravity results archived at
+reloc_batch_v1nograv; full grid RERUNNING. r@10cm ceilings should also
+lift (residual tilt was capping precision).
+
+### x SAME-SESSION SUBMAPS built (the 5588-kf field freeze answer)
+xr_kf.seg + CUR_SEG: LOST > SEG_OPEN_NS (10s, shake over) -> new segment
+opens, mapping resumes in the continued odom frame (quarantined: pc-space
+pooling/clustering/gating all seg-guarded - cross-frame pc distances are
+meaningless). Cross-segment verified+CONFIRMED (always 2-frame: welds
+rewrite stored poses irreversibly) closure -> rigid WELD: older segment
+wins the frame (primary canonical), younger segment's kfs re-registered
+via E, ids merged, CLOUD_DIRTY. Weld while LOST = recovery too. Caps +
+confw skipped for cross-seg D (offset arbitrary by construction).
+Replay NEVER latched LOST (harness never called freeze_storage - MOO15 &
+magistrale1 smokes confirm) -> built --kidnap t0,dur: camera blackout
+with SHAKING held + grace (on_pose's freeze(0) raced the latch away),
+IMU continues, Basalt coasts blind -> genuine post-gap odom discontinuity.
+MH_01 (60,15) + corridor1 (100,15) kidnap smokes running: expect LOST ->
+submap seg=1 -> WELD -> map-track ATE recovers.

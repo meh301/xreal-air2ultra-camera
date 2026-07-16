@@ -164,6 +164,10 @@ typedef struct {
     long n_offers;
 } pose_ctx;
 
+/* --kidnap: absolute time (s) until which on_pose must NOT clear the
+ * SHAKING flag, so the post-blackout offers latch LOST. -1 = inactive. */
+static double KD_NOCLEAR_UNTIL = -1;
+
 static void tum_line(FILE *f, uint64_t ts_ns, const float q_wxyz[4],
                      const float p[3]) {
     fprintf(f, "%.9f %.6f %.6f %.6f %.7f %.7f %.7f %.7f\n",
@@ -236,7 +240,11 @@ static void on_pose(const xr_slam_state *st_in, void *user) {
 
     const uint8_t *img = ring_get(st->ts);
     if (img) {
-        xr_map_freeze_storage(0);
+        /* kidnap grace: keep SHAKING visible to the first post-blackout
+         * offers so the map thread actually latches LOST (this clear
+         * otherwise races the latch away before any offer processes) */
+        if ((double)st->ts * 1e-9 >= KD_NOCLEAR_UNTIL)
+            xr_map_freeze_storage(0);
         xr_map_offer(st->q, st->p, st->ts, img, off_id, off_xyz, off_uv, off_n);
         ctx->n_offers++;
     }
@@ -257,6 +265,7 @@ int main(int argc, char **argv) {
     const char *pack = NULL, *out = NULL, *toml = NULL, *xfeat = NULL;
     const char *vpr = NULL;
     int inflight = 6, fast = 0, use_map = 1, reloc_n = 0;
+    double kd_t0 = -1, kd_dur = 0;
     int seed_frontend = 0;   /* set after args: XR_SEED env + xfeat model */
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pack") && i + 1 < argc) pack = argv[++i];
@@ -268,6 +277,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--fast")) fast = 1;
         else if (!strcmp(argv[i], "--no-map")) use_map = 0;
         else if (!strcmp(argv[i], "--reloc") && i + 1 < argc) reloc_n = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--kidnap") && i + 1 < argc) {
+            /* t0,dur (s): drop ALL camera frames in [t0,t0+dur) while IMU
+             * continues, with SHAKING held through the window + a short
+             * grace — the synthetic twin of the field failure (pocketed
+             * device / violent shake): VIO coasts blind on IMU, comes back
+             * with a drifted frame, the map must latch LOST, then either
+             * reloc-recover or open a submap and weld later. */
+            if (sscanf(argv[++i], "%lf,%lf", &kd_t0, &kd_dur) != 2)
+                DIE("--kidnap wants t0,dur seconds");
+        }
         else DIE("unknown arg '%s'", argv[i]);
     }
     if (!pack || !out) DIE("usage: xr_replay --pack <dir> --out <prefix> "
@@ -348,7 +367,22 @@ int main(int argc, char **argv) {
         }
         if (fread(fr, (size_t)2 * XR_OW * XR_OH, 1, f_raw) != 1)
             DIE("frames.raw truncated at pair %ld", line);
-        if (imu_pushed >= 20) {   /* mirrors xr_slam_start_raw's small gate */
+        /* --kidnap blackout window (see the flag parse) */
+        static uint64_t kd_ts0;
+        static int kd_was, kd_dropped;
+        if (!kd_ts0) kd_ts0 = f_ts;
+        double kd_rel = (double)(f_ts - kd_ts0) * 1e-9;
+        int kd_in = kd_t0 >= 0 && kd_rel >= kd_t0 && kd_rel < kd_t0 + kd_dur;
+        if (kd_in && !kd_was) {
+            xr_map_freeze_storage(1);
+            KD_NOCLEAR_UNTIL = (double)f_ts * 1e-9 + kd_dur + 0.7;
+            printf("KIDNAP begin rel=%.1fs (blackout %.1fs)\n", kd_rel, kd_dur);
+        }
+        if (!kd_in && kd_was)
+            printf("KIDNAP end rel=%.1fs dropped=%d\n", kd_rel, kd_dropped);
+        kd_was = kd_in;
+        if (kd_in) kd_dropped++;
+        if (imu_pushed >= 20 && !kd_in) {   /* mirrors xr_slam_start_raw's small gate */
             ring_put(f_ts, fr);
             /* v9 detector unification (XR_SEED env): XFeat maxima seed
              * Basalt's corner detection; KLT still does the tracking. Must
@@ -427,6 +461,28 @@ int main(int argc, char **argv) {
             }
             fclose(fm);
         }
+        /* the VIO track's odom orientations: the probe's gravity prior.
+         * The map's PnP verifier is 4-DOF (yaw+translation, roll/pitch
+         * trusted from the IMU) — a real kidnapped device still knows
+         * gravity from its accelerometer, so each probe carries the odom
+         * orientation of its frame. Yaw is solved, never trusted. */
+        snprintf(mpath, sizeof mpath, "%s_vio.tum", out);
+        FILE *fv = fopen(mpath, "r");
+        static double vts[120000];
+        static float vq[120000][4];        /* Hamilton wxyz */
+        long vn = 0;
+        if (fv) {
+            double t, x, y, z, qx, qy, qz, qw;
+            while (vn < 120000 &&
+                   fscanf(fv, "%lf %lf %lf %lf %lf %lf %lf %lf",
+                          &t, &x, &y, &z, &qx, &qy, &qz, &qw) == 8) {
+                vts[vn] = t;
+                vq[vn][0] = (float)qw; vq[vn][1] = (float)qx;
+                vq[vn][2] = (float)qy; vq[vn][3] = (float)qz;
+                vn++;
+            }
+            fclose(fv);
+        }
         rewind(f_idx);
         static uint64_t fts[120000];
         long fn = 0;
@@ -444,7 +500,15 @@ int main(int argc, char **argv) {
                 (size_t)XR_OW * XR_OH) continue;
             float pq[4], pp[3];
             int inl = 0;
-            int ok = xr_map_probe(pimg, pq, pp, &inl);
+            const float *gq = NULL;
+            if (vn) {                      /* nearest odom quat = gravity */
+                double t = (double)fts[fi] * 1e-9;
+                long bv = 0;
+                for (long j = 1; j < vn; j++)
+                    if (fabs(vts[j] - t) < fabs(vts[bv] - t)) bv = j;
+                gq = vq[bv];
+            }
+            int ok = xr_map_probe(pimg, gq, pq, pp, &inl);
             float err = -1.f;
             if (ok && mn) {
                 double t = (double)fts[fi] * 1e-9;

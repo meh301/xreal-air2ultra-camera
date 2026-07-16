@@ -187,6 +187,11 @@ typedef struct {
     int has_emb;
     int emb_dim;
     float emb[XR_VPR_MAX_DIM];
+    /* same-session submap id: 0 = the primary (session-frame-registered)
+     * map; >0 = a segment started after an unrecoverable loss, registered
+     * only to its own odom continuation until a cross-segment verification
+     * WELDS it into the primary (Atlas-style merge). */
+    int seg;
 } xr_kf;
 
 static xr_kf KF[XR_MAP_MAX_KF];        /* .bss — physical slot pool */
@@ -201,6 +206,22 @@ static int KF_FREE[XR_MAP_MAX_KF];     /* free-slot stack */
 static int KF_FREE_N;                  /* free-slot count */
 #define KFA(i) KF[KFO[i]]              /* the i-th keyframe in time order */
 
+/* ---- same-session submaps. An unrecoverable loss no longer freezes the
+ * map forever (the 5588-keyframe field freeze): once relocalization has had
+ * SEG_OPEN_NS of LOST to try and the physical shake is over, a NEW segment
+ * opens (CUR_SEG++) and mapping resumes. Segment keyframes are registered
+ * only to their own odom continuation — internally consistent, offset from
+ * the primary by the unknown discontinuity — until a cross-segment
+ * verified+confirmed closure WELDS the frames together rigidly
+ * (Atlas-style merge). Session-frame (pc) distances are meaningless ACROSS
+ * segments, so pooling / clustering / gating are all seg-guarded below. */
+#ifndef SEG_OPEN_NS
+#define SEG_OPEN_NS 10000000000ull     /* LOST this long (shake over) -> new submap */
+#endif
+static int CUR_SEG;                    /* active segment; 0 = primary. Map
+                                          thread writes under MAP_LOCK */
+static uint64_t LOST_SINCE_NS;         /* map thread only: when LOST began */
+
 /* Empty the map: every slot free, no keyframes. Run at load and on every
  * clear (reset / descriptor switch) so KF_FREE is always valid before a
  * store. */
@@ -208,6 +229,7 @@ static void kf_slots_reset(void) {
     KF_N = 0;
     KF_FREE_N = XR_MAP_MAX_KF;
     for (int i = 0; i < XR_MAP_MAX_KF; i++) KF_FREE[i] = i;
+    CUR_SEG = 0;
 }
 __attribute__((constructor)) static void kf_slots_ctor(void) { kf_slots_reset(); }
 
@@ -507,8 +529,13 @@ int xr_map_get_correction(float q[4], float p[3]) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (!R.have) {
+            /* first call: seed START and OUTPUT from the live target and
+             * emit it unramped. (q0/p0 left zero here NaN'd the first pose:
+             * a=0 blend of a zero quaternion normalizes 0 -> inf -> NaN.) */
+            memcpy(R.q0, q, 16); memcpy(R.p0, p, 12);
             memcpy(R.qo, q, 16); memcpy(R.po, p, 12);
-            R.gen = g; R.have = 1; R.t0 = now;
+            R.gen = g; R.have = 1;
+            R.t0.tv_sec = now.tv_sec - 1; R.t0.tv_nsec = now.tv_nsec;
         }
         if (g != R.gen) {                /* new target: ramp from last output */
             memcpy(R.q0, R.qo, 16); memcpy(R.p0, R.po, 12);
@@ -832,6 +859,29 @@ static void graph_deform(int anchor, const float qsp[3],
         corr_interp(dq_old, dp_old, Dq, Dp, a, dq_new, dp_new);
         pose_compose(dq_new, dp_new, KFA(j).q, KFA(j).p, KFA(j).qc, KFA(j).pc);
     }
+}
+
+/* Submap WELD: rigidly re-register every keyframe of segment `from` into
+ * the session frame of segment `to` (E = session_to <- session_from), and
+ * merge the ids. Rigid on purpose — the two segments have NO shared odom
+ * path across the discontinuity, so a graph_deform-style path-weighted
+ * blend has nothing sound to interpolate along; within-segment drift keeps
+ * healing through the normal closure path afterwards. The odom poses (q,p)
+ * are left alone: they are only ever used relative to qc/pc through the
+ * per-keyframe landmark transform (kf_corr / reloc_pnp), which this update
+ * keeps exact. MAP_LOCK held. */
+static int seg_weld(int from, int to, const float Eq[4], const float Ep[3]) {
+    int n = 0;
+    for (int i = 0; i < KF_N; i++) {
+        if (KFA(i).seg != from) continue;
+        float q2[4], p2[3];
+        pose_compose(Eq, Ep, KFA(i).qc, KFA(i).pc, q2, p2);
+        memcpy(KFA(i).qc, q2, sizeof q2);
+        memcpy(KFA(i).pc, p2, sizeof p2);
+        KFA(i).seg = to;
+        n++;
+    }
+    return n;
 }
 
 /* Rebuild the authoritative display cloud from the keyframe graph: every
@@ -1456,7 +1506,9 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     for (int s = 0; s < nkf; s++) {    /* SESSION-frame proximity (pc): pool
                                           physically-adjacent keyframes even
                                           across drifted odom epochs */
-        if (s == best_i || KFA(s).desc_type != w->desc_type) continue;
+        if (s == best_i || KFA(s).desc_type != w->desc_type ||
+            KFA(s).seg != KFA(best_i).seg)   /* pc-space is per-segment */
+            continue;
         float dx = KFA(s).pc[0] - KFA(best_i).pc[0];
         float dy = KFA(s).pc[1] - KFA(best_i).pc[1];
         float dz = KFA(s).pc[2] - KFA(best_i).pc[2];
@@ -1694,18 +1746,36 @@ static void process_keyframe(void) {
     /* confirmed-recovery lifecycle. A shake marks us LOST and FREEZES
      * storage. We stay LOST — relocalizing against the (now frozen,
      * still-correct) map — until a closure is VERIFIED (RECOVERED, storage
-     * resumes). There is deliberately NO time-based give-up: a stable-but-
-     * WRONG post-shake odometry must never quietly resume laying keyframes
-     * in an unregistered frame. Mapping a genuinely NEW area after an
-     * unrecoverable loss needs a reset for now (proper new-submap handling
-     * is the pending same-session-submap work). */
+     * resumes), OR relocalization has had SEG_OPEN_NS with no luck and the
+     * shake is over: then a NEW SUBMAP opens and mapping resumes there.
+     * Post-shake odometry is never trusted back into the OLD frame without
+     * a verified closure — the new segment's keyframes carry their own seg
+     * id and stay quarantined from the primary until a cross-segment
+     * closure welds them. */
     int shaking = atomic_load(&SHAKING);
     int rstate_prev = atomic_load(&REC_STATE);
     int rstate = rstate_prev;
+    int open_seg = 0;
     if (shaking && kfn >= REC_MIN_MAP) {
         rstate = REC_LOST;
     } else if (rstate == REC_RECOVERED) {
         if (work.ts - snap_recovered_ns > REC_STABLE_NS) rstate = REC_HEALTHY;
+    }
+    if (rstate == REC_LOST) {
+        if (!LOST_SINCE_NS) {
+            LOST_SINCE_NS = work.ts;
+            LOGI("session map: LOST (%d keyframes stored) — relocalizing; "
+                 "submap opens in %.0fs if unrecovered", kfn,
+                 (double)(SEG_OPEN_NS * 1e-9));
+        } else if (!shaking && work.ts - LOST_SINCE_NS > SEG_OPEN_NS) {
+            /* the give-up-into-a-new-submap transition. The CUR_SEG bump
+             * itself happens gen-guarded under MAP_LOCK below — never here. */
+            open_seg = 1;
+            rstate = REC_HEALTHY;
+            LOST_SINCE_NS = 0;
+        }
+    } else {
+        LOST_SINCE_NS = 0;
     }
     /* REC_LOST is left ONLY by a confirmed recovery (in the apply branch).
      * Do NOT publish REC_STATE here. A concurrent reset / descriptor switch
@@ -1751,10 +1821,18 @@ static void process_keyframe(void) {
          * flipping HEALTHY->LOST on a pass that neither searches nor stores)
          * must still persist — gen-safely, and only when it actually changed
          * so the common no-work path stays off the lock. */
-        if (rstate != rstate_prev) {
+        if (rstate != rstate_prev || open_seg) {
             pthread_mutex_lock(&MAP_LOCK);
-            if (atomic_load(&RESET_GEN) == rgen0)
+            if (atomic_load(&RESET_GEN) == rgen0) {
+                if (open_seg) {
+                    CUR_SEG++;
+                    LOGI("session map: no verified recovery in %.0fs — "
+                         "SUBMAP seg=%d opened, mapping resumes (weld on "
+                         "cross-segment closure)",
+                         (double)(SEG_OPEN_NS * 1e-9), CUR_SEG);
+                }
                 atomic_store(&REC_STATE, rstate);
+            }
             pthread_mutex_unlock(&MAP_LOCK);
         }
         return;
@@ -1908,7 +1986,12 @@ static void process_keyframe(void) {
     }
     for (int i = scan_lo; i < scan_hi; i++) {
         if (use_vpr && !vpr_pick[i]) continue;
-        if (gate) {
+        /* the spatial gate only means anything within OUR segment; other
+         * segments' pc live in a different frame — leave them always
+         * eligible, they are exactly the weld opportunities. (Only bites
+         * while unwelded segments exist; the VPR shortlist supersedes the
+         * gate anyway on the main arms.) */
+        if (gate && KFA(i).seg == CUR_SEG) {
             float gx = wsp[0] - KFA(i).pc[0], gy = wsp[1] - KFA(i).pc[1],
                   gz = wsp[2] - KFA(i).pc[2];
             if (gx * gx + gy * gy + gz * gz > SHORTLIST_R_M * SHORTLIST_R_M)
@@ -1924,7 +2007,11 @@ static void process_keyframe(void) {
          * review's point). Keep only the strongest keyframe per
          * neighbourhood, so the K slots cover K different places. */
         int near = -1;
-        for (int t = 0; t < ncand; t++) {   /* SESSION-frame distance (pc) */
+        for (int t = 0; t < ncand; t++) {   /* SESSION-frame distance (pc);
+                                               only comparable within a
+                                               segment — different segments
+                                               are always distinct clusters */
+            if (KFA(i).seg != KFA(cand_i[t]).seg) continue;
             float dx = KFA(i).pc[0] - KFA(cand_i[t]).pc[0];
             float dy = KFA(i).pc[1] - KFA(cand_i[t]).pc[1];
             float dz = KFA(i).pc[2] - KFA(cand_i[t]).pc[2];
@@ -1995,6 +2082,12 @@ static void process_keyframe(void) {
     /* generation-safe recovery-state publication (see the note at the rstate
      * computation). The apply branch may still override this to REC_RECOVERED
      * on a confirmed closure, under this same lock hold. */
+    if (open_seg) {
+        CUR_SEG++;
+        LOGI("session map: no verified recovery in %.0fs — SUBMAP seg=%d "
+             "opened, mapping resumes (weld on cross-segment closure)",
+             (double)(SEG_OPEN_NS * 1e-9), CUR_SEG);
+    }
     atomic_store(&REC_STATE, rstate);
     if (did_search) {
         PERF.searched = searched;
@@ -2015,6 +2108,7 @@ static void process_keyframe(void) {
     qrotv(snap_corr_q, work.p, wsp2);
     wsp2[0] += snap_corr_p[0]; wsp2[1] += snap_corr_p[1]; wsp2[2] += snap_corr_p[2];
     for (int i = 0; i < KF_N; i++) {
+        if (KFA(i).seg != CUR_SEG) continue;   /* pc comparable per-segment */
         float dx = wsp2[0] - KFA(i).pc[0], dy = wsp2[1] - KFA(i).pc[1],
               dz = wsp2[2] - KFA(i).pc[2];
         if (dx * dx + dy * dy + dz * dz < KF_NEAR_M * KF_NEAR_M)
@@ -2060,6 +2154,12 @@ static void process_keyframe(void) {
             float Dq[4], Dp[3];
             memcpy(Dq, bDq, sizeof Dq);
             memcpy(Dp, bDp, sizeof Dp);
+            /* cross-segment match: the verified D registers our live odom
+             * into the MATCHED segment's frame. Deviation-vs-CORR and the
+             * jump caps are meaningless across segments (the inter-segment
+             * offset is arbitrary by construction) — the 2-frame
+             * confirmation is the entire gate, and the payoff is a WELD. */
+            int xseg = KFA(best_i).seg != CUR_SEG;
             VER_LAST.pairs = n3;
             VER_LAST.inliers = nin;
             KFA(best_i).last_used = work.ts;   /* geometrically useful */
@@ -2116,16 +2216,17 @@ static void process_keyframe(void) {
              * lost; healthy tracking must keep the 2-frame agreement, or
              * transient deviation spikes snap a good VIO onto stale map
              * error (EuRoC: 12 such snaps turned 6.5cm ATE into 20cm+). */
-            if (!confirmed && lost && nin >= 2 * VER_STRONG_INLIERS &&
+            if (!confirmed && lost && !xseg && nin >= 2 * VER_STRONG_INLIERS &&
                 nin * 100 >= 60 * n3 && covis >= 12)
-                confirmed = 1;
+                confirmed = 1;   /* !xseg: a weld rewrites stored keyframe
+                                  * poses irreversibly — always 2-frame */
 
             /* A verified alignment is worth pursuing when: we are LOST (ANY
              * alignment is a recovery candidate — even a small deviation,
              * from a shake that didn't actually disturb Basalt), OR we are
              * healthy and the VIO has drifted SIGNIFICANTLY from the map and
              * the cooldown has passed. Otherwise the VIO already agrees. */
-            int worth = lost || (significant && cooled);
+            int worth = lost || xseg || (significant && cooled);
 
             if (PROBE_REQ) {
                 /* reloc-benchmark probe: record the verified alignment (the
@@ -2138,7 +2239,7 @@ static void process_keyframe(void) {
                 PROBE_RES.kf = best_i;
                 memcpy(PROBE_RES.q, Dq, sizeof PROBE_RES.q);
                 memcpy(PROBE_RES.p, Dp, sizeof PROBE_RES.p);
-            } else if (dev > mxt || sang > mxa) {
+            } else if (!xseg && (dev > mxt || sang > mxa)) {
                 VER_LAST.outcome = VOUT_CAPPED;
                 PENDING_D.have = 0;
                 LOGI("session map: kf#%d PnP GOOD (%d/%d inliers, %d covis) "
@@ -2184,7 +2285,7 @@ static void process_keyframe(void) {
                 /* confidence weighting: blend the correction toward the
                  * current CORR by verification strength (healthy only —
                  * recovery must snap fully) */
-                if (confw_on() && !lost) {
+                if (confw_on() && !lost && !xseg) {   /* a weld needs exact D */
                     float ratio = n3 > 0 ? (float)nin / (float)n3 : 0.f;
                     float w = CONFW_MIN_W + (1.f - CONFW_MIN_W) *
                               (ratio >= CONFW_FULL_RATIO
@@ -2203,7 +2304,50 @@ static void process_keyframe(void) {
                             Dp[c] = (1 - w) * CORR.p[c] + w * Dp[c];
                     }
                 }
-                if (lost) {
+                if (xseg) {
+                    /* CROSS-SEGMENT WELD (Atlas-style merge): two confirmed
+                     * frames agree on where the live pose sits inside the
+                     * matched segment — fuse the two rigid bodies into one
+                     * frame. Which side moves is an age rule: the older
+                     * segment (ultimately the primary) is the canonical
+                     * frame, so welding never yanks the established map. */
+                    int src = KFA(best_i).seg;     /* matched segment */
+                    float Eq[4], Ep[3], iq[4], ip[3];
+                    int moved, dst;
+                    if (src < CUR_SEG) {
+                        /* matched segment is OLDER: adopt ITS frame. Move
+                         * our whole segment there via E = D ∘ CORR⁻¹, then
+                         * re-register the live odom with CORR = D (the
+                         * shared tail below). */
+                        dst = src;
+                        pose_invert(CORR.q, CORR.p, iq, ip);
+                        pose_compose(Dq, Dp, iq, ip, Eq, Ep);
+                        moved = seg_weld(CUR_SEG, dst, Eq, Ep);
+                        CUR_SEG = dst;
+                    } else {
+                        /* matched segment is YOUNGER (an orphan from a later
+                         * loss episode, revisited from an older frame): pull
+                         * IT onto us via E = CORR ∘ D⁻¹. Our own
+                         * registration is already right — neutralize the
+                         * tail's CORR step. */
+                        dst = CUR_SEG;
+                        pose_invert(Dq, Dp, iq, ip);
+                        pose_compose(CORR.q, CORR.p, iq, ip, Eq, Ep);
+                        moved = seg_weld(src, dst, Eq, Ep);
+                        memcpy(Dq, CORR.q, sizeof Dq);
+                        memcpy(Dp, CORR.p, sizeof Dp);
+                    }
+                    CLOUD_DIRTY = 1;
+                    if (lost) {                    /* a weld IS a recovery */
+                        atomic_store(&REC_STATE, REC_RECOVERED);
+                        RECOVERED_NS = work.ts;
+                    }
+                    LOGI("session map: kf#%d SUBMAP WELD seg=%d -> seg=%d "
+                         "(%d keyframes re-registered, offset %.2fm %.0fdeg, "
+                         "%d/%d inliers, %d covis)%s", best_i, src, dst,
+                         moved, (double)dev, (double)(sang * 57.3f), nin, n3,
+                         covis, snap ? " + pose snapped" : "");
+                } else if (lost) {
                     /* POST-LOSS RECOVERY. Storage was frozen through the
                      * discontinuity, so the stored map is already correct —
                      * only REGISTER the new live odom frame back to it. Do
@@ -2320,14 +2464,15 @@ static void process_keyframe(void) {
          * confirmed closure this same pass already deformed the tail and
          * (if recovering) updated CORR, so the new tip lands consistent. */
         pose_compose(CORR.q, CORR.p, work.q, work.p, work.qc, work.pc);
+        work.seg = CUR_SEG;                        /* tag the live segment */
         int slot = KF_FREE[--KF_FREE_N];           /* a stable slot for life */
         KF[slot] = work;
         KFO[KF_N] = slot;                          /* append in time order */
         KF_N++;
         atomic_store(&KF_COUNT_PUB, KF_N);
         CLOUD_DIRTY = 1;
-        LOGI("session map: kf#%d stored (%d landmarks, %d kps)",
-             KF_N - 1, work.n_lm, work.n_kp);
+        LOGI("session map: kf#%d stored (%d landmarks, %d kps, seg=%d)",
+             KF_N - 1, work.n_lm, work.n_kp, CUR_SEG);
     }
     /* refresh the authoritative display cloud whenever the graph changed
      * (a store, an eviction, or a closure-driven deformation) */
@@ -2363,15 +2508,18 @@ static void *map_thread(void *arg) {
  * against the CURRENT map with an identity odom pose; returns 1 with the
  * query's session-frame pose on a verified match, 0 otherwise. Blocking
  * (worst case one VPR embed + full descriptor scan). Bench/test use. */
-int xr_map_probe(const uint8_t *img, float out_q[4], float out_p[3],
-                 int *out_inliers) {
+int xr_map_probe(const uint8_t *img, const float grav_q[4], float out_q[4],
+                 float out_p[3], int *out_inliers) {
     pthread_once(&THREAD_ONCE, thread_start);
     pthread_mutex_lock(&MAP_LOCK);
     while (MBOX.full) pthread_cond_wait(&MAP_COND, &MAP_LOCK);
     MBOX.query_only = 1;
     MBOX.probe = 1;
     MBOX.ts = LAST_ACCEPT_NS + 1;
-    MBOX.q[0] = 1; MBOX.q[1] = MBOX.q[2] = MBOX.q[3] = 0;
+    /* gravity-consistent orientation (see the header note): the 4-DOF PnP
+     * trusts roll/pitch from here; identity on a tilted frame kills it */
+    if (grav_q) memcpy(MBOX.q, grav_q, sizeof MBOX.q);
+    else { MBOX.q[0] = 1; MBOX.q[1] = MBOX.q[2] = MBOX.q[3] = 0; }
     MBOX.p[0] = MBOX.p[1] = MBOX.p[2] = 0;
     memcpy(MBOX.img, img, sizeof MBOX.img);
     MBOX.n_lm = 0;
