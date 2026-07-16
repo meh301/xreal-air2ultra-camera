@@ -168,6 +168,10 @@ typedef struct {
  * SHAKING flag, so the post-blackout offers latch LOST. -1 = inactive. */
 static double KD_NOCLEAR_UNTIL = -1;
 
+/* latest VIO pose, for XR_MAPSEED's near-keyframe query (the seed block
+ * runs before the frame's own pose exists; one frame stale is fine) */
+static float LASTP_Q[4] = { 1, 0, 0, 0 }, LASTP_P[3];
+
 static void tum_line(FILE *f, uint64_t ts_ns, const float q_wxyz[4],
                      const float p[3]) {
     fprintf(f, "%.9f %.6f %.6f %.6f %.7f %.7f %.7f %.7f\n",
@@ -179,6 +183,8 @@ static void on_pose(const xr_slam_state *st_in, void *user) {
     pose_ctx *ctx = user;
     xr_slam_state *st = (xr_slam_state *)st_in;   /* scratch, mutable */
     ctx->n_poses++;
+    memcpy(LASTP_Q, st->q, sizeof LASTP_Q);
+    memcpy(LASTP_P, st->p, sizeof LASTP_P);
     tum_line(ctx->f_vio, st->ts, st->q, st->p);
     if (!ctx->use_map) return;
 
@@ -264,7 +270,7 @@ static void on_pose(const xr_slam_state *st_in, void *user) {
 int main(int argc, char **argv) {
     const char *pack = NULL, *out = NULL, *toml = NULL, *xfeat = NULL;
     const char *vpr = NULL, *lglue = NULL;
-    int inflight = 6, fast = 0, use_map = 1, reloc_n = 0;
+    int inflight = 6, fast = 0, use_map = 1, reloc_n = 0, reloc_clip = 1;
     double kd_t0 = -1, kd_dur = 0;
     int seed_frontend = 0;   /* set after args: XR_SEED env + xfeat model */
     for (int i = 1; i < argc; i++) {
@@ -278,6 +284,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--fast")) fast = 1;
         else if (!strcmp(argv[i], "--no-map")) use_map = 0;
         else if (!strcmp(argv[i], "--reloc") && i + 1 < argc) reloc_n = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--reloc-clip") && i + 1 < argc) reloc_clip = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--kidnap") && i + 1 < argc) {
             /* t0,dur (s): drop ALL camera frames in [t0,t0+dur) while IMU
              * continues, with SHAKING held through the window + a short
@@ -401,6 +408,11 @@ int main(int argc, char **argv) {
                 static float suv[512][2];
                 static int8_t sdesc[512][64];
                 int sn = xr_xfeat_extract(fr, suv, sdesc, 512);
+                if (sn < 0) sn = 0;
+                /* XR_MAPSEED: append the nearest mapped keyframe's
+                 * landmark uvs — KLT re-acquires the map's own corners */
+                sn += xr_map_get_reseed(LASTP_Q, LASTP_P, &suv[sn],
+                                        512 - sn);
                 if (sn > 0)
                     xr_slam_seed_keypoints(f_ts, 0, &suv[0][0], sn);
             }
@@ -504,21 +516,39 @@ int main(int argc, char **argv) {
         int ok_n = 0, err_n = 0;
         srand(12345);   /* seeded: reproducible probe set */
         for (int k = 0; k < reloc_n && k < 4096; k++) {
-            long fi = (long)((double)rand() / RAND_MAX * (double)(fn - 1));
-            fseeko(f_raw, (off_t)fi * XR_OW * XR_OH * 2, SEEK_SET);
-            if (fread(pimg, 1, (size_t)XR_OW * XR_OH, f_raw) !=
-                (size_t)XR_OW * XR_OH) continue;
+            long fi0 = (long)((double)rand() / RAND_MAX *
+                              (double)(fn - reloc_clip));
+            /* --reloc-clip K: a probe is K CONSECUTIVE frames (a waking
+             * device sees a stream, not a snapshot); the clip verifies if
+             * ANY frame does, and the best-inlier frame's pose lands.
+             * fi/pq/pp/inl below carry the winner. K=1 = the old probe. */
             float pq[4], pp[3];
-            int inl = 0;
-            const float *gq = NULL;
-            if (vn) {                      /* nearest odom quat = gravity */
-                double t = (double)fts[fi] * 1e-9;
-                long bv = 0;
-                for (long j = 1; j < vn; j++)
-                    if (fabs(vts[j] - t) < fabs(vts[bv] - t)) bv = j;
-                gq = vq[bv];
+            int inl = 0, ok = 0;
+            long fi = fi0;
+            for (int c = 0; c < reloc_clip; c++) {
+                long fc = fi0 + c;
+                fseeko(f_raw, (off_t)fc * XR_OW * XR_OH * 2, SEEK_SET);
+                if (fread(pimg, 1, (size_t)XR_OW * XR_OH, f_raw) !=
+                    (size_t)XR_OW * XR_OH) continue;
+                float cq[4], cp[3];
+                int cinl = 0;
+                const float *gq = NULL;
+                if (vn) {                  /* nearest odom quat = gravity */
+                    double t = (double)fts[fc] * 1e-9;
+                    long bv = 0;
+                    for (long j = 1; j < vn; j++)
+                        if (fabs(vts[j] - t) < fabs(vts[bv] - t)) bv = j;
+                    gq = vq[bv];
+                }
+                int cok = xr_map_probe(pimg, gq, cq, cp, &cinl);
+                if (cok && cinl > inl) {
+                    ok = 1;
+                    inl = cinl;
+                    fi = fc;
+                    memcpy(pq, cq, sizeof cq);
+                    memcpy(pp, cp, sizeof cp);
+                }
             }
-            int ok = xr_map_probe(pimg, gq, pq, pp, &inl);
             float err = -1.f;
             if (ok && mn) {
                 double t = (double)fts[fi] * 1e-9;
@@ -560,10 +590,10 @@ int main(int argc, char **argv) {
                 float tswap = errs[j]; errs[j] = errs[j - 1]; errs[j - 1] = tswap;
             }
         printf("RELOC-SUMMARY n=%d verified=%d recall=%.3f "
-               "r@25cm=%.3f r@10cm=%.3f med_err_m=%.3f\n",
+               "r@25cm=%.3f r@10cm=%.3f med_err_m=%.3f clip=%d\n",
                reloc_n, ok_n, (double)ok_n / reloc_n,
                (double)u25 / reloc_n, (double)u10 / reloc_n,
-               err_n ? (double)errs[err_n / 2] : -1.0);
+               err_n ? (double)errs[err_n / 2] : -1.0, reloc_clip);
         free(pimg);
     }
 

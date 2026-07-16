@@ -219,9 +219,39 @@ static int KF_FREE_N;                  /* free-slot count */
 #ifndef SEG_OPEN_NS
 #define SEG_OPEN_NS 10000000000ull     /* LOST this long (shake over) -> new submap */
 #endif
+#ifndef COVK_CELL_M
+#define COVK_CELL_M 1.5f               /* XR_COVKEEP spatial cell (m) */
+#endif
 static int CUR_SEG;                    /* active segment; 0 = primary. Map
                                           thread writes under MAP_LOCK */
 static uint64_t LOST_SINCE_NS;         /* map thread only: when LOST began */
+
+/* ---- lifetime landmark descriptor bank (XR_LMDESC). A direct-mapped
+ * CACHE of the freshest descriptor per landmark id, across every keyframe
+ * that ever observed it — so 2D-3D association stops depending on which
+ * single keyframe retrieval happens to surface (the reloc bestm~0
+ * coverage mode's matching-side half), and the direct relocalization
+ * channel below can match query descriptors straight against landmarks.
+ * Entries reference their newest observer (physical slot + landmark
+ * index); validity is re-checked at use time (slots get reused by
+ * eviction). Written only by the map thread under MAP_LOCK; read only by
+ * the map thread — no locking subtleties. */
+#ifndef LMB_MAX
+#define LMB_MAX 8192                   /* direct-mapped: collisions overwrite */
+#endif
+typedef struct {
+    int32_t id;
+    int8_t desc[64];                   /* 32 used for BAD, 64 for XFeat */
+    uint8_t desc_type;
+    uint8_t li;                        /* landmark index in the owner kf */
+    int16_t slot;                      /* newest observer (PHYSICAL slot) */
+    uint16_t nobs;                     /* 0 = empty */
+    uint64_t ts;
+} lmb_ent;
+static lmb_ent LMB[LMB_MAX];
+static inline uint32_t lmb_slot_of(int32_t id) {
+    return ((uint32_t)id * 2654435761u) % LMB_MAX;
+}
 
 /* Empty the map: every slot free, no keyframes. Run at load and on every
  * clear (reset / descriptor switch) so KF_FREE is always valid before a
@@ -231,6 +261,7 @@ static void kf_slots_reset(void) {
     KF_FREE_N = XR_MAP_MAX_KF;
     for (int i = 0; i < XR_MAP_MAX_KF; i++) KF_FREE[i] = i;
     CUR_SEG = 0;
+    memset(LMB, 0, sizeof LMB);        /* bank references slots: all void */
 }
 __attribute__((constructor)) static void kf_slots_ctor(void) { kf_slots_reset(); }
 
@@ -568,6 +599,72 @@ int xr_map_get_correction(float q[4], float p[3]) {
     return g;
 }
 
+/* XR_MAPSEED (stage-3-lite map->VIO coupling): when the live pose sits
+ * near a stored keyframe in the session frame, hand back that keyframe's
+ * landmark pixel uvs so the caller can seed the VIO's optical-flow
+ * detector (xr_slam_seed_keypoints) — the tracker re-acquires the SAME
+ * physical corners the map already triangulated, densifying
+ * re-observations of mapped structure exactly where closures verify.
+ * Full stage 3 (landmark 3D priors in the estimator) rides on top later;
+ * this needs no camera projection model at all. */
+#ifndef MAPSEED_R_M
+#define MAPSEED_R_M 0.6f
+#endif
+#ifndef MAPSEED_ANG_RAD
+#define MAPSEED_ANG_RAD 0.45f          /* ~25 deg */
+#endif
+static int mapseed_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_MAPSEED");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: MAP-SEED (reseed mapped corners) ON");
+    }
+    return v;
+}
+static void qmul(const float a[4], const float b[4], float o[4]);
+static void qconj(const float a[4], float o[4]);
+static void qrotv(const float q[4], const float v[3], float o[3]);
+static void rv_from_q(const float q[4], float rv[3]);
+
+int xr_map_get_reseed(const float q[4], const float p[3],
+                      float (*uv)[2], int max) {
+    if (!mapseed_on() || max <= 0) return 0;
+    pthread_mutex_lock(&MAP_LOCK);
+    /* live session pose = CORR ∘ odom */
+    float sq[4], sp[3], t[3];
+    qmul(CORR.q, q, sq);
+    qrotv(CORR.q, p, t);
+    sp[0] = t[0] + CORR.p[0]; sp[1] = t[1] + CORR.p[1];
+    sp[2] = t[2] + CORR.p[2];
+    int best = -1;
+    float bd2 = MAPSEED_R_M * MAPSEED_R_M;
+    for (int i = 0; i < KF_N; i++) {
+        if (KFA(i).seg != CUR_SEG) continue;
+        float dx = sp[0] - KFA(i).pc[0], dy = sp[1] - KFA(i).pc[1],
+              dz = sp[2] - KFA(i).pc[2];
+        float d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 >= bd2) continue;
+        float qi[4], qe[4], rv[3];
+        qconj(KFA(i).qc, qi);
+        qmul(qi, sq, qe);
+        rv_from_q(qe, rv);
+        if (rv[0]*rv[0] + rv[1]*rv[1] + rv[2]*rv[2] >
+            MAPSEED_ANG_RAD * MAPSEED_ANG_RAD)
+            continue;
+        bd2 = d2;
+        best = i;
+    }
+    int n = 0;
+    if (best >= 0) {
+        n = KFA(best).n_lm;
+        if (n > max) n = max;
+        memcpy(uv, KFA(best).lm_uv, sizeof(float) * 2 * (size_t)n);
+    }
+    pthread_mutex_unlock(&MAP_LOCK);
+    return n;
+}
+
 /* ---- small quaternion / rotation kit (Hamilton wxyz, R row-major) ------------- */
 
 static void qmul(const float a[4], const float b[4], float o[4]) {
@@ -722,6 +819,62 @@ static int confw_on(void) {
     }
     return v;
 }
+
+/* A/B iteration flags (all default OFF; see bench/ITERATIONS.md):
+ *   XR_COVKEEP  — coverage-aware eviction (viewpoint diversity)
+ *   XR_SEGQUIET — no display snaps from within-segment closures while an
+ *                 unwelded submap is active
+ *   XR_PGO      — Gauss-Seidel pose-graph relaxation instead of the
+ *                 path-weighted graph_deform
+ *   XR_LMDESC   — lifetime landmark descriptor bank + direct 2D-3D
+ *                 relocalization channel
+ *   XR_REACT2   — reactivation anchor as an ADDITIONAL candidate (never
+ *                 pins/replaces the main scan like XR_REACT does) */
+static int covkeep_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_COVKEEP");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: COVERAGE-AWARE eviction ON");
+    }
+    return v;
+}
+static int segquiet_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_SEGQUIET");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: SEGMENT-QUIET display ON");
+    }
+    return v;
+}
+static int pgo_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_PGO");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: POSE-GRAPH relaxation ON");
+    }
+    return v;
+}
+static int lmdesc_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LMDESC");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LANDMARK DESCRIPTOR BANK ON");
+    }
+    return v;
+}
+static int react2_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_REACT2");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: REACTIVATION-AS-CANDIDATE ON");
+    }
+    return v;
+}
 #ifndef CONFW_MIN_W
 #define CONFW_MIN_W 0.4f       /* weakest accepted alignment applies 40% */
 #endif
@@ -866,6 +1019,111 @@ static void graph_deform(int anchor, const float qsp[3],
         kf_corr(&KFA(j), dq_old, dp_old);  /* this keyframe's current corr */
         corr_interp(dq_old, dp_old, Dq, Dp, a, dq_new, dp_new);
         pose_compose(dq_new, dp_new, KFA(j).q, KFA(j).p, KFA(j).qc, KFA(j).pc);
+    }
+}
+
+/* XR_PGO: Gauss-Seidel pose-graph relaxation over the drifted tail —
+ * the principled replacement for graph_deform's path-length-weighted
+ * interpolation. Nodes = keyframes anchor..KF_N-1 (session poses qc/pc)
+ * plus a virtual query node; edges = consecutive ODOM relatives (skipped
+ * across >10s gaps — submap breaks have no valid odometry) and the
+ * closure measurement D∘O_q pinning the query node. Alternating-direction
+ * sweeps propagate the correction both ways along the chain; each node
+ * settles at the weighted blend of its neighbours' predictions, so
+ * multiple constraints distribute consistently instead of by the single
+ * path heuristic. Anchor stays fixed (the reference side of the loop).
+ * MAP_LOCK held; ~200 nodes x 12 sweeps = microseconds. */
+#ifndef PGO_SWEEPS
+#define PGO_SWEEPS 12
+#endif
+#ifndef PGO_W_CLOSE
+#define PGO_W_CLOSE 4.0f              /* closure prior vs odom edge weight */
+#endif
+#define PGO_GAP_NS 10000000000ull     /* no odom edge across this gap */
+
+static void pgo_blend(const float qa[4], const float pa[3], float wa,
+                      const float qb[4], const float pb[3], float wb,
+                      float qo[4], float po[3]) {
+    float s = 1.0f / (wa + wb);
+    float dot = qa[0]*qb[0] + qa[1]*qb[1] + qa[2]*qb[2] + qa[3]*qb[3];
+    float sgn = dot < 0 ? -1.f : 1.f, n2 = 0;
+    for (int c = 0; c < 4; c++) {
+        qo[c] = (wa * qa[c] + wb * sgn * qb[c]) * s;
+        n2 += qo[c] * qo[c];
+    }
+    n2 = 1.0f / sqrtf(n2);
+    for (int c = 0; c < 4; c++) qo[c] *= n2;
+    for (int c = 0; c < 3; c++) po[c] = (wa * pa[c] + wb * pb[c]) * s;
+}
+
+static void pgo_deform(int anchor, const float wq[4], const float wp[3],
+                       const float Dq[4], const float Dp[3]) {
+    if (anchor < 0 || anchor >= KF_N) return;
+    int n = KF_N - anchor;               /* keyframe nodes */
+    if (n < 2) return;
+    /* odom relatives Z_i: node i -> i+1 (last edge: last kf -> query) */
+    static float Zq[XR_MAP_MAX_KF + 1][4], Zp[XR_MAP_MAX_KF + 1][3];
+    static uint8_t Zok[XR_MAP_MAX_KF + 1];
+    for (int i = 0; i < n; i++) {
+        const float *qa = KFA(anchor + i).q, *pa = KFA(anchor + i).p;
+        const float *qb, *pb;
+        uint64_t dt;
+        if (i < n - 1) {
+            qb = KFA(anchor + i + 1).q; pb = KFA(anchor + i + 1).p;
+            dt = KFA(anchor + i + 1).ts - KFA(anchor + i).ts;
+        } else {
+            qb = wq; pb = wp;
+            dt = 0;                       /* query follows the last kf */
+        }
+        Zok[i] = dt < PGO_GAP_NS;
+        float qai[4], t[3];
+        qconj(qa, qai);
+        qmul(qai, qb, Zq[i]);
+        t[0] = pb[0] - pa[0]; t[1] = pb[1] - pa[1]; t[2] = pb[2] - pa[2];
+        qrotv(qai, t, Zp[i]);
+    }
+    /* states: X[0..n-1] = keyframes (init current session pose),
+     * X[n] = query (init pre-closure CORR∘odom; prior = D∘odom) */
+    static float Xq[XR_MAP_MAX_KF + 1][4], Xp[XR_MAP_MAX_KF + 1][3];
+    for (int i = 0; i < n; i++) {
+        memcpy(Xq[i], KFA(anchor + i).qc, sizeof Xq[i]);
+        memcpy(Xp[i], KFA(anchor + i).pc, sizeof Xp[i]);
+    }
+    float Tq[4], Tp[3];                  /* query prior (the closure) */
+    pose_compose(Dq, Dp, wq, wp, Tq, Tp);
+    pose_compose(CORR.q, CORR.p, wq, wp, Xq[n], Xp[n]);
+    for (int s = 0; s < PGO_SWEEPS; s++) {
+        int fwd = (s & 1) == 0;
+        for (int k = 1; k <= n; k++) {
+            int i = fwd ? k : n - k + 1;           /* 1..n or n..1 */
+            float lq[4], lp[3], rq[4], rp[3];
+            int has_l = Zok[i - 1], has_r = 0;
+            if (has_l)                    /* prediction from the left */
+                pose_compose(Xq[i - 1], Xp[i - 1], Zq[i - 1], Zp[i - 1],
+                             lq, lp);
+            if (i < n && Zok[i]) {        /* prediction from the right */
+                float ziq[4], zip[3];
+                pose_invert(Zq[i], Zp[i], ziq, zip);
+                pose_compose(Xq[i + 1], Xp[i + 1], ziq, zip, rq, rp);
+                has_r = 1;
+            }
+            if (i == n) {                 /* query: closure prior is the
+                                             right-side constraint */
+                memcpy(rq, Tq, sizeof rq);
+                memcpy(rp, Tp, sizeof rp);
+                has_r = 1;
+            }
+            if (has_l && has_r)
+                pgo_blend(lq, lp, 1.0f,
+                          rq, rp, i == n ? PGO_W_CLOSE : 1.0f,
+                          Xq[i], Xp[i]);
+            else if (has_l) { memcpy(Xq[i], lq, 16); memcpy(Xp[i], lp, 12); }
+            else if (has_r) { memcpy(Xq[i], rq, 16); memcpy(Xp[i], rp, 12); }
+        }
+    }
+    for (int i = 1; i < n; i++) {        /* write back (anchor unchanged) */
+        memcpy(KFA(anchor + i).qc, Xq[i], sizeof Xq[i]);
+        memcpy(KFA(anchor + i).pc, Xp[i], sizeof Xp[i]);
     }
 }
 
@@ -1754,6 +2012,129 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     return 1;
 }
 
+/* XR_LMDESC direct relocalization: match the query's descriptors straight
+ * against the lifetime landmark bank (no keyframe retrieval at all) and
+ * PnP the pairs. Runs ONLY when the normal retrieval channel produced no
+ * verified candidate while relocalizing — the coverage-failure fallback:
+ * a landmark seen from anywhere is matchable, no matter which keyframe
+ * retrieval would have surfaced. Covis proxy = distinct LIVE owner
+ * keyframes among the geometric inliers. */
+static int lmb_reloc(const xr_kf *w, float Dq[4], float Dp[3],
+                     int *out_n3, int *out_nin, int *out_covis,
+                     int *out_best) {
+    *out_n3 = *out_nin = *out_covis = 0;
+    *out_best = -1;
+    if (!GEOM.have || w->n_kp <= 0) return 0;
+    int bad = w->desc_type == DESC_BAD;
+    static int ord_of[XR_MAP_MAX_KF];      /* slot -> time-order, live only */
+    for (int i = 0; i < XR_MAP_MAX_KF; i++) ord_of[i] = -1;
+    for (int k = 0; k < KF_N; k++) ord_of[KFO[k]] = k;
+
+    static float Sw[COVIS_MAX_CAND][3], Pw[COVIS_MAX_CAND][3];
+    static int16_t owner[COVIS_MAX_CAND];
+    static uint8_t used[LMB_MAX / 8];      /* one query kp per bank entry */
+    memset(used, 0, sizeof used);
+    int n = 0;
+    float Rq[9];
+    q2R(w->q, Rq);
+    for (int i = 0; i < w->n_kp && n < COVIS_MAX_CAND; i++) {
+        int best = bad ? 999 : -(1 << 30), second = best, bt = -1;
+        for (int t = 0; t < LMB_MAX; t++) {
+            const lmb_ent *e = &LMB[t];
+            if (e->nobs == 0 || e->desc_type != (uint8_t)w->desc_type)
+                continue;
+            if (used[t >> 3] & (1u << (t & 7))) continue;
+            if (bad) {
+                int d = hamming256(w->desc.bad[i], e->desc);
+                if (d < best) { second = best; best = d; bt = t; }
+                else if (d < second) second = d;
+            } else {
+                int d = dot64_i8(w->desc.xfeat[i], e->desc);
+                if (d > best) { second = best; best = d; bt = t; }
+                else if (d > second) second = d;
+            }
+        }
+        if (bt < 0) continue;
+        int accept = bad
+            ? (best <= BAD_MAX_DIST && best + BAD_MARGIN <= second)
+            : (best >= XF_MIN_DOT && best - XF_MARGIN >= second);
+        if (!accept) continue;
+        const lmb_ent *e = &LMB[bt];
+        int oo = ord_of[e->slot];
+        if (oo < 0) continue;              /* owner evicted: 3D untrusted */
+        const xr_kf *kf = &KF[e->slot];
+        if (kf->lm_id[e->li] != e->id) continue;      /* slot reused */
+        float dk2 = 0;
+        for (int c = 0; c < 3; c++) {
+            float d = kf->lm_xyz[e->li][c] - kf->p[c];
+            dk2 += d * d;
+        }
+        if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) continue;
+        /* landmark -> session frame via the owner's live correction */
+        float qoi[4], poi[3], qd[4], pd[3], ps[3];
+        pose_invert(kf->q, kf->p, qoi, poi);
+        pose_compose(kf->qc, kf->pc, qoi, poi, qd, pd);
+        qrotv(qd, kf->lm_xyz[e->li], ps);
+        /* query bearing in the (gravity-true) odom frame */
+        float rc[3], rb[3];
+        if (GEOM.unproject(w->kp_uv[i][0], w->kp_uv[i][1], rc)) continue;
+        rb[0] = GEOM.R_ic[0]*rc[0] + GEOM.R_ic[1]*rc[1] + GEOM.R_ic[2]*rc[2];
+        rb[1] = GEOM.R_ic[3]*rc[0] + GEOM.R_ic[4]*rc[1] + GEOM.R_ic[5]*rc[2];
+        rb[2] = GEOM.R_ic[6]*rc[0] + GEOM.R_ic[7]*rc[1] + GEOM.R_ic[8]*rc[2];
+        Sw[n][0] = Rq[0]*rb[0] + Rq[1]*rb[1] + Rq[2]*rb[2];
+        Sw[n][1] = Rq[3]*rb[0] + Rq[4]*rb[1] + Rq[5]*rb[2];
+        Sw[n][2] = Rq[6]*rb[0] + Rq[7]*rb[1] + Rq[8]*rb[2];
+        Pw[n][0] = ps[0] + pd[0];
+        Pw[n][1] = ps[1] + pd[1];
+        Pw[n][2] = ps[2] + pd[2];
+        owner[n] = e->slot;
+        used[bt >> 3] |= (uint8_t)(1u << (bt & 7));
+        n++;
+    }
+    *out_n3 = n;
+    if (n < VER_MIN_PAIRS) return 0;
+    float Rz[9], C[3];
+    int nin = pnp2_ransac(Sw, Pw, n, Rz, C);
+    *out_nin = nin;
+    if (nin < VER_MIN_PAIRS || nin * 100 < 33 * n) return 0;
+    /* covis proxy + dominant owner over the geometric inliers */
+    float cy = Rz[0], sy = Rz[3];
+    static int16_t seen_own[COVIS_MAX_CAND];
+    static int own_cnt[COVIS_MAX_CAND];
+    int nown = 0;
+    for (int m = 0; m < n; m++) {
+        float qx = Pw[m][0]-C[0], qy = Pw[m][1]-C[1], qz = Pw[m][2]-C[2];
+        float nq = sqrtf(qx*qx + qy*qy + qz*qz);
+        if (nq < VER_MIN_RANGE_M) continue;
+        float rx = cy*Sw[m][0] - sy*Sw[m][1];
+        float ry = sy*Sw[m][0] + cy*Sw[m][1];
+        if ((qx*rx + qy*ry + qz*Sw[m][2]) / nq <= VER_COS_TOL) continue;
+        int f = -1;
+        for (int u = 0; u < nown; u++)
+            if (seen_own[u] == owner[m]) { f = u; break; }
+        if (f < 0) { seen_own[nown] = owner[m]; own_cnt[nown] = 0; f = nown++; }
+        own_cnt[f]++;
+    }
+    *out_covis = nown;
+    int bo = 0;
+    for (int u = 1; u < nown; u++) if (own_cnt[u] > own_cnt[bo]) bo = u;
+    if (nown == 0) return 0;
+    *out_best = ord_of[seen_own[bo]];
+    /* D (odom -> session), same composition as reloc_pnp step 4 */
+    R2q(Rz, Dq);
+    float qsb[4], t3[3], body_s[3];
+    qmul(Dq, w->q, qsb);
+    qrotv(qsb, GEOM.p_ic, t3);
+    body_s[0] = C[0] - t3[0];
+    body_s[1] = C[1] - t3[1];
+    body_s[2] = C[2] - t3[2];
+    qrotv(Dq, w->p, t3);
+    Dp[0] = body_s[0] - t3[0];
+    Dp[1] = body_s[1] - t3[1];
+    Dp[2] = body_s[2] - t3[2];
+    return 1;
+}
+
 /* ---- map thread ----------------------------------------------------------------- */
 
 static void process_keyframe(void) {
@@ -2005,9 +2386,12 @@ static void process_keyframe(void) {
      * recall is preserved because every keyframe is ranked, not windowed. */
     static uint8_t vpr_pick[XR_MAP_MAX_KF];    /* map thread only */
     /* reactivation-lite: pin the scan to the fresh anchor — no retrieval,
-     * no gate; one match+PnP against a known-good keyframe */
+     * no gate; one match+PnP against a known-good keyframe.
+     * XR_REACT2 instead keeps the FULL scan and only force-includes the
+     * anchor as an extra candidate afterwards — the v12 fastbench showed
+     * pinning starves distant-loop retrieval (corridor2 29->50). */
     int scan_lo = 0, scan_hi = lim;
-    if (react_active && REACT_A.kf < lim) {
+    if (react_active && REACT_A.kf < lim && !react2_on()) {
         scan_lo = REACT_A.kf;
         scan_hi = REACT_A.kf + 1;
         gate = 0;
@@ -2106,6 +2490,20 @@ static void process_keyframe(void) {
         cand_i[pos] = i;
     }
 
+    /* XR_REACT2: the fresh anchor rides along as an EXTRA candidate —
+     * full retrieval above is untouched, so distant loops keep their
+     * shot while the anchor gets its cheap fast-cadence verify. */
+    if (react2_on() && react_active && REACT_A.kf < lim) {
+        int have = 0;
+        for (int t = 0; t < ncand; t++)
+            if (cand_i[t] == REACT_A.kf) { have = 1; break; }
+        if (!have && ncand < RELOC_TOPK) {
+            cand_i[ncand] = REACT_A.kf;
+            cand_m[ncand] = CAND_MIN_MATCHES;      /* nominal score */
+            ncand++;
+        }
+    }
+
     /* verify every candidate cluster; keep the geometrically strongest
      * (most inliers, covisibility-backed) — still lock-free */
     for (int c = 0; c < ncand; c++) {
@@ -2118,6 +2516,32 @@ static void process_keyframe(void) {
             best_n3 = cn3; best_nin = cnin; best_covis = ccov;
             memcpy(bDq, cDq, sizeof bDq);
             memcpy(bDp, cDp, sizeof bDp);
+        }
+    }
+    /* XR_LMDESC fallback: retrieval surfaced nothing verifiable while
+     * relocalizing — go straight at the landmark bank (coverage-
+     * independent). Result feeds the SAME apply chain below. */
+    if (lmdesc_on() && relocalizing && best_i < 0) {
+        int bi2, n32, nin2, cov2;
+        float dq2[4], dp2[3];
+        if (lmb_reloc(&work, dq2, dp2, &n32, &nin2, &cov2, &bi2) &&
+            bi2 >= 0) {
+            best_i = bi2;
+            best_n3 = n32;
+            best_nin = nin2;
+            best_covis = cov2;
+            memcpy(bDq, dq2, sizeof bDq);
+            memcpy(bDp, dp2, sizeof bDp);
+            if (n32 > any_pairs) any_pairs = n32;
+            if (ncand == 0) {              /* apply branch needs a candidate */
+                cand_i[0] = bi2;
+                cand_m[0] = raw_best_m > CAND_MIN_MATCHES ? raw_best_m
+                                                          : CAND_MIN_MATCHES;
+                ncand = 1;
+            }
+            if (best_m < cand_m[0]) best_m = cand_m[0];
+            LOGI("session map: LMIDX direct reloc — %d pairs, %d inliers, "
+                 "%d live owners (kf#%d)", n32, nin2, cov2, bi2);
         }
     }
     match_us = (unsigned)(map_mono_us() - t_match0);
@@ -2348,6 +2772,13 @@ static void process_keyframe(void) {
                  * keyframes attach in the healed frame; the DISPLAY
                  * correction only snaps when recovery is on. */
                 int snap = atomic_load(&RECOVERY);
+                /* XR_SEGQUIET: while an unwelded submap is active, its
+                 * registration is arbitrary — a within-segment display
+                 * snap just moves the output around in the GT/primary
+                 * frame (MH01 kidnap: 133->181 cm transient). Keep the
+                 * map-internal healing, skip the display step; the WELD
+                 * is the one snap that means something. */
+                if (segquiet_on() && CUR_SEG != 0 && !xseg) snap = 0;
                 int tight_applied = 0;
                 /* confidence weighting: blend the correction toward the
                  * current CORR by verification strength (healthy only —
@@ -2456,7 +2887,8 @@ static void process_keyframe(void) {
                     float qsp[3];
                     qrotv(CORR.q, work.p, qsp);
                     qsp[0] += CORR.p[0]; qsp[1] += CORR.p[1]; qsp[2] += CORR.p[2];
-                    graph_deform(best_i, qsp, Dq, Dp);
+                    if (pgo_on()) pgo_deform(best_i, work.q, work.p, Dq, Dp);
+                    else          graph_deform(best_i, qsp, Dq, Dp);
                     CLOUD_DIRTY = 1;
                     LOGI("session map: LOOP kf#%d CLOSURE %.2fm %.0fdeg "
                          "(%d/%d inliers, %d covis) — map deformed%s", best_i,
@@ -2521,8 +2953,43 @@ static void process_keyframe(void) {
              * it from the time order. Only the small order array shifts (a few
              * hundred ints), never the ~4 MB of keyframe structs. */
             int vpos = 0;
+            if (covkeep_on()) {
+                /* XR_COVKEEP: viewpoint-diversity-aware eviction. Redundancy
+                 * of a keyframe = how many others share its spatial cell AND
+                 * yaw quadrant (same segment — pc is per-segment); evict the
+                 * most redundant, ties to least-recently-useful. A corridor
+                 * walked once in each direction keeps BOTH headings alive —
+                 * the reloc bestm~0 coverage mode's storage-side half. */
+                static int cx[XR_MAP_MAX_KF], cy[XR_MAP_MAX_KF],
+                           cz[XR_MAP_MAX_KF], yb[XR_MAP_MAX_KF];
+                for (int i = 0; i < KF_N; i++) {
+                    cx[i] = (int)floorf(KFA(i).pc[0] / COVK_CELL_M);
+                    cy[i] = (int)floorf(KFA(i).pc[1] / COVK_CELL_M);
+                    cz[i] = (int)floorf(KFA(i).pc[2] / (2.f * COVK_CELL_M));
+                    float fwd[3], zax[3] = { 0, 0, 1 };
+                    qrotv(KFA(i).qc, zax, fwd);
+                    float yaw = atan2f(fwd[1], fwd[0]);
+                    yb[i] = ((int)floorf((yaw + 3.14159265f) /
+                                         1.5707963f)) & 3;
+                }
+                int best_red = -1;
+                for (int i = 0; i < KF_N; i++) {
+                    int red = 0;
+                    for (int j = 0; j < KF_N; j++)
+                        if (KFA(j).seg == KFA(i).seg && cx[j] == cx[i] &&
+                            cy[j] == cy[i] && cz[j] == cz[i] && yb[j] == yb[i])
+                            red++;
+                    if (red > best_red ||
+                        (red == best_red &&
+                         KFA(i).last_used < KFA(vpos).last_used)) {
+                        best_red = red;
+                        vpos = i;
+                    }
+                }
+            } else {
             for (int i = 1; i < KF_N; i++)
                 if (KFA(i).last_used < KFA(vpos).last_used) vpos = i;
+            }
             KF_FREE[KF_FREE_N++] = KFO[vpos];      /* slot returns to the pool */
             memmove(&KFO[vpos], &KFO[vpos + 1],
                     sizeof(int) * (size_t)(KF_N - 1 - vpos));
@@ -2538,6 +3005,30 @@ static void process_keyframe(void) {
         KF[slot] = work;
         KFO[KF_N] = slot;                          /* append in time order */
         KF_N++;
+        if (lmdesc_on()) {
+            /* lifetime bank upsert: freshest descriptor per landmark id.
+             * Anchored keypoints are appended LAST, so when both a maxima
+             * kp and an anchor observe a landmark, the anchor's exact-uv
+             * descriptor wins. */
+            for (int j = 0; j < work.n_kp; j++) {
+                int lk = work.lm_of_kp[j];
+                if (lk < 0) continue;
+                lmb_ent *e = &LMB[lmb_slot_of(work.lm_id[lk])];
+                if (e->nobs == 0 || e->id != work.lm_id[lk]) {
+                    e->id = work.lm_id[lk];        /* new / collision evict */
+                    e->nobs = 0;
+                }
+                memcpy(e->desc, work.desc_type == DESC_XFEAT
+                                    ? (const void *)work.desc.xfeat[j]
+                                    : (const void *)work.desc.bad[j],
+                       work.desc_type == DESC_XFEAT ? 64 : 32);
+                e->desc_type = (uint8_t)work.desc_type;
+                e->slot = (int16_t)slot;
+                e->li = (uint8_t)lk;
+                if (e->nobs < 65535) e->nobs++;
+                e->ts = work.ts;
+            }
+        }
         atomic_store(&KF_COUNT_PUB, KF_N);
         CLOUD_DIRTY = 1;
         LOGI("session map: kf#%d stored (%d landmarks, %d kps, seg=%d)",

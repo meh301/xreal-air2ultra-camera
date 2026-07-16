@@ -425,3 +425,37 @@ Remaining corridor failures = bestm~0 probes: viewpoints never mapped
 IN FLIGHT: dense_batch.sh (92 jobs) = full 13-seq reloc grid x
 {xdense, xdenselg6} + hunt-list ATE x3 runs (does anchoring move the
 corridor1-3 LOOP-CLOSURE hunt + the rooms-xfeat 13cm outlier?).
+
+### x A/B FEATURE SET COMPLETE (user: "implement them all, flag-gated")
+All remaining architecture items now built behind env flags (default
+OFF), one binary A/B-tests everything:
+- XR_COVKEEP  - viewpoint-diversity eviction (spatial cell 1.5m + yaw
+  quadrant, per-segment; evict most-redundant, ties to LRU)
+- XR_SEGQUIET - no display snaps from within-segment closures while a
+  submap is unwelded (kidnap 133->181cm transient)
+- XR_PGO      - Gauss-Seidel pose-graph relaxation replaces graph_deform
+  (odom edges skip >10s gaps; closure prior w=4 on a virtual query node;
+  12 alternating sweeps)
+- XR_LMDESC   - lifetime landmark descriptor bank (8192 direct-mapped,
+  freshest desc per landmark id, anchors win) + DIRECT 2D-3D reloc
+  channel when retrieval fails while relocalizing (coverage-independent;
+  covis proxy = distinct live owners among inliers)
+- XR_REACT2   - reactivation anchor as ADDITIONAL candidate (fixes v12's
+  pin-starves-retrieval corridor collapse)
+- XR_MAPSEED  - stage-3-lite coupling: near a stored keyframe, reseed the
+  VIO detector with the map's own landmark uvs (works with XR_SEED=1);
+  full landmark-3D priors ride on this later
+- --reloc-clip K (harness) - probes become K consecutive frames (waking
+  device sees a stream); best-inlier frame lands; summary carries clip=K
+All-flags room1 smoke: clean, 10/10 reloc @ clip=5, r@25 100%.
+DENSE-STACK VERDICTS (dense_batch, arrived mid-implementation):
+- Full reloc grid: MH_01+LG6 100% recall (BAD 30-47%), room4+LG6 93%
+  (was 27%), corridors 27-37% w/ LG6 (was 3-13%), med 3-12cm. ANOMALY:
+  corridor4 0/30 on both dense arms (was 43-73% everywhere else) - run
+  mapped fine, probes never verify; OPEN.
+- Hunt ATE (3 runs): corridor2 25.5 NEW BEST (VIO 50.1, v11 28.2),
+  corridor1 27.8 new best; LG6 = closure-quality gate (MH_01 xdense 19.0
+  -> lg6 6.6). corridor5-lg6 45 (vs xdense 25.1) + corridor3 mixed =
+  needs fleet-scale runs. room1 map==vio 13.1 (no closure gain yet).
+NEXT: A/B matrix over the new flags on the hunt list (one flag at a
+time vs xdenselg6 base), then union of winners -> fleet.

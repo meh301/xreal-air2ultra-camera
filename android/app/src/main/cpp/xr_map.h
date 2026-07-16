@@ -100,6 +100,13 @@ int xr_map_num_keyframes(void);      /* thread-safe (atomic) */
  * learned set matching. Cheap; lazy bring-up on first use. */
 void xr_map_set_lglue_model(const char *onnx_path);
 
+/* XR_MAPSEED: when the live pose (odom q,p) sits near a stored keyframe,
+ * fill uv[] with that keyframe's landmark pixel coordinates for seeding
+ * the VIO detector (pair with xr_slam_seed_keypoints). Returns the count
+ * (0 when the flag is off or nothing is near). Thread-safe. */
+int xr_map_get_reseed(const float q[4], const float p[3],
+                      float (*uv)[2], int max);
+
 /* Reloc-benchmark probe (bench/test): retrieval + PnP verification for a
  * bare left image against the current map — returns 1 with the query's
  * SESSION-frame pose on a verified match. grav_q (Hamilton wxyz, may be
