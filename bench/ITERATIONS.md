@@ -338,3 +338,31 @@ with SHAKING held + grace (on_pose's freeze(0) raced the latch away),
 IMU continues, Basalt coasts blind -> genuine post-gap odom discontinuity.
 MH_01 (60,15) + corridor1 (100,15) kidnap smokes running: expect LOST ->
 submap seg=1 -> WELD -> map-track ATE recovers.
+
+### x SUBMAP + WELD VALIDATED (kidnap smokes, b228d96/f299ca8)
+--kidnap v2 = black frames not dropped pairs (dropped pairs deadlock
+Basalt's bounded IMU queue; black is also the honest pocket-cam sim).
+MH_01 (60,15): LOST -> seg=1 opens @+10s -> 153 kfs mapped in orphan
+frame -> return to hall -> WELD (offset 1.50m 4deg, 2-frame confirmed)
+-> post-weld map 36cm vs VIO 99cm (pre-blackout-aligned GT frame).
+corridor1 (100,15): seg=1, 181 kfs, WELD offset 0.76m 1deg -> final
+mocap window map 30.9cm vs VIO 94.3cm. Within-segment closure fired
+correctly during the orphan phase (seg guards hold).
+WRINKLE for later: pre-weld, within-segment display snaps move the
+(arbitrary) segment registration - MH01 transiently 133->181cm vs GT.
+Option: suppress display snaps while CUR_SEG unwelded.
+FIELD IMPLICATION: the 5588-kf freeze becomes: 10s LOST -> mapping
+resumes seamlessly; map heals when any old ground is re-seen.
+
+### x Reloc grid v2 (gravity-fair) - the real portrait
+recall / r@25 / med(when verified): MOO07 70%/70%/5cm (was 0),
+MH_01 30-47%/17-33%/12-25cm (was 0), rooms 47-77% with r@25 ~= recall
+(med 2-11cm - PRECISION IS FINE, the old 'single-kf PnP imprecise'
+story was the gravity artifact), corridors still 7-13% (corridor4
+50-57% - it re-walks its map). Retrieval arms ~equal on rooms; nothing
+lifts corridors yet -> recall on repetitive/sparse-coverage areas is
+THE reloc hunt (LighterGlue verifier + coverage-aware retrieval).
+4Seasons drive: NOT units/extrinsics/images (all verified clean +
+in-spec; VIO tracks ~30s then scale error compounds 3.2x @2min ->
+explosion). Suspects: lever arm, cam-IMU time offset, BMI160 noise
+config under engine vibration. PARKED pending core program.
