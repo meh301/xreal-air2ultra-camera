@@ -252,3 +252,6 @@ probes + recall/r@25/r@10/med); site 'Reloc' tab = summary bars + spatial
 plot on the orbit canvas (trajectory + expected->landed lines colored by
 error, failures as X at expected). Cross-system blackout-reloc protocol
 queued (OKVIS2 public code lacks loadMap - clip probes impossible there).
+
+### ? Fleet v9 — confirmed-always-snap: rooms CURED (xfeat 13->5.55), EuRoC ok, long STILL lost (megaloc 31->43).
+Eliminates the confirmed-closure routing as the cause. Root cause = SUB-GATE priors: on corridors they glue VIO to recently-mapped (equally drifted) kfs, preventing drift from ever crossing the gate where the big closure fires. v6 (no tight) = only config holding long 31. NEXT (v10): sub-gate prior ONLY when matched kf is a genuine revisit (age > ~30s) - old-kf agreement = loop info; recent-kf agreement = teaching VIO its own drift. Site stays on v6 until v10.
