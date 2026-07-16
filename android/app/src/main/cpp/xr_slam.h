@@ -93,6 +93,12 @@ int xr_slam_pose_prior(const float E_q_xyzw[4], const float E_p[3],
                        float sigma_t_m, float sigma_r_rad,
                        uint64_t expiry_t_ns);
 
+/* Detector unification (optional backend extension): post external keypoint
+ * seeds (u,v interleaved, pixel coords) for frame ts/cam BEFORE pushing that
+ * frame; the VIO's optical flow merges them with FAST detection.
+ * Returns 1 if delivered, 0 when unsupported/stopped. */
+int xr_slam_seed_keypoints(uint64_t ts_ns, int cam, const float *uv, int n);
+
 /* Left-camera geometry for the session map's PnP relocalization: unit
  * ray (CAMERA frame) for a pixel, and the camera->IMU extrinsics.
  * Return 0 when available (after xr_slam_start configured the kb4 fit). */

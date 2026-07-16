@@ -35,9 +35,10 @@ static struct {
     PFN_vit_pose_destroy pose_destroy;
     PFN_vit_pose_get_data pose_data;
     PFN_vit_pose_get_features pose_features;
-    /* optional XREAL extension (dlsym'd; NULL on stock VIT libs) */
+    /* optional XREAL extensions (dlsym'd; NULL on stock VIT libs) */
     vit_result_t (*xreal_pose_prior)(vit_tracker_t *, const double[4], const double[3],
                                      double, double, int64_t);
+    vit_result_t (*xreal_seed_kps)(vit_tracker_t *, int64_t, int, const float *, int);
 
     vit_tracker_t *tracker;
     atomic_int running;
@@ -139,8 +140,9 @@ int xr_slam_load(void) {
     SYM(pose_data, "vit_pose_get_data");
     SYM(pose_features, "vit_pose_get_features");
 #undef SYM
-    /* optional XREAL tight-coupling extension — absent on stock VIT libs */
+    /* optional XREAL tight-coupling extensions — absent on stock VIT libs */
     *(void **)&B.xreal_pose_prior = dlsym(B.dl, "vit_tracker_xreal_pose_prior");
+    *(void **)&B.xreal_seed_kps = dlsym(B.dl, "vit_tracker_xreal_seed_keypoints");
     uint32_t maj = 0, min = 0, pat = 0;
     B.get_version(&maj, &min, &pat);
     LOGI("Basalt VIT backend loaded, interface %u.%u.%u%s", maj, min, pat,
@@ -162,6 +164,17 @@ int xr_slam_pose_prior(const float E_q_xyzw[4], const float E_p[3],
     return B.xreal_pose_prior(B.tracker, q, p, (double)sigma_t_m,
                               (double)sigma_r_rad,
                               (int64_t)expiry_t_ns) == VIT_SUCCESS;
+}
+
+/* Detector unification: post external keypoint seeds (u,v interleaved,
+ * pixel coords) for frame ts/cam BEFORE pushing that frame. The optical
+ * flow merges them with FAST detection. Returns 1 if delivered. */
+int xr_slam_seed_keypoints(uint64_t ts_ns, int cam, const float *uv, int n) {
+    if (!B.xreal_seed_kps || !B.tracker ||
+        !atomic_load_explicit(&B.running, memory_order_acquire))
+        return 0;
+    return B.xreal_seed_kps(B.tracker, (int64_t)ts_ns, cam, uv, n) ==
+           VIT_SUCCESS;
 }
 
 /* fit the kb4 radial polynomial r/f = theta + k1 th^3 + k2 th^5 + k3 th^7
