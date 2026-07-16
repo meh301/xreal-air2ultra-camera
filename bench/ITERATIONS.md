@@ -275,3 +275,19 @@ Standalone container converter replicating pack formats exactly (pinhole
 GT, ADIS16465-inflated noises). 3 recordings converting in parallel ->
 /mnt/processing/packs4s/{drive1_city,drive2_city,drive3_country};
 xr_replay_drive (800x400) built; /root/out/drive.toml staged.
+
+### ? Iteration-2 trio IMPLEMENTED (04614dd) — fastbench series running
+- Reactivation-lite (XR_REACT): anchor-pinned single-kf verify @400ms
+  inside mapped space; priors via tight channel. fastbench v12react.
+- Correction ramp (XR_RAMP): display correction glides 500ms; map updates
+  instantly. fastbench v13ramp (chained).
+- Confidence-weighted corrections (XR_CONFW): healthy closures blend by
+  inlier-ratio (40% floor, full @0.65). fastbench v14confw (chained).
+- CAVEAT: v12 overlaps fleet v11 (34 jobs on 64 cores) - cadence-
+  sensitive results preliminary; re-run winners on an idle box.
+
+### ? 4Seasons first light: drive3_country replays 100% (24,629 frames,
+1.6M imu) but VIO diverges to 100+km span (GT 1.7km) - extrinsic
+convention suspect (TS_cam_imu direction). Variant B (no inversion)
+smoke running; driving toml tuning next. Remaining queue: LighterGlue
+verifier, lifetime descriptors + direct index, stage-3 coupling (parked).
