@@ -53,10 +53,13 @@ corridors at large drift.
 - **Verdict**: corridor3 retrieval 44→610 queries, 0→1 closures. Replay now
   cadence-representative of Gen 5 NPU. (Device build untouched.)
 
-### ✅ VPR periodic full-recall sweep
+### ✅ VPR periodic full-recall sweep — VALIDATED, KEEP
 - **Commit**: `491b375`. Appearance embeddings alias on repetitive corridors
   (v4: BAD brute 30.8 beat EigenPlaces 38.3 / MegaLoc 44.2 on long).
-- **Validation**: fleet v5 (matrix_v5) — IN FLIGHT.
+- **Fleet v5 verdict**: megaloc long **44.2 → 33.5 (−10.6)**, xvpr −4.4,
+  megaloc EuRoC −1.8; rooms/MSD flat. No regressions beyond noise.
+- **Noise floor measured**: BAD arm (code-identical v4→v5) moved +4.3 on
+  long → treat ±4 cm as the long-group significance bar for fleet deltas.
 
 ### ❌ Sub-gate correction servo (falsified)
 - **Commits**: `491b375` (in), `ba5cc70` (revert).
@@ -167,5 +170,5 @@ corridors at large drift.
 | v2/matrix1+all | 6 arms baseline (broken closures) | matrix_all | superseded |
 | v3 | closure fixes (over-eager confirm) | matrix_v3 | EuRoC regression — rolled back |
 | v4 | `1e4073c` tightened confirm | matrix_v4 | current site baseline |
-| v5 | + VPR full-recall sweep | matrix_v5 | in flight |
-| v6 | + SNAP_MIN 0.50 | matrix_v6 | queued behind v5 |
+| v5 | + VPR full-recall sweep | matrix_v5 | ✅ keep (megaloc long −10.6) |
+| v6 | + SNAP_MIN 0.50 | matrix_v6 | in flight |
