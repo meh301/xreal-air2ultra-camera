@@ -2171,6 +2171,8 @@ static void process_keyframe(void) {
     pthread_mutex_unlock(&MAP_LOCK);
 }
 
+static void thread_start(void);        /* fwd: used by xr_map_probe below */
+
 static void *map_thread(void *arg) {
     (void)arg;
     setpriority(PRIO_PROCESS, (id_t)gettid(), 19);   /* never outrank VIO */
