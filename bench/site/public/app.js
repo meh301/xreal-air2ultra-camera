@@ -85,13 +85,30 @@ function aggBaselines() {
 
 /* ---------- bar chart (click-to-filter legend) ---------- */
 function barChart({ title, cats, series, refs = [], note = "", onBar }) {
-  series.forEach(s => { if (s.on === undefined) s.on = true; });
+  series.forEach(s => { if (s.on === undefined) s.on = !s.defaultOff; });
   const refGroups = [...new Set(refs.map(r => r.cls || "pub"))];
   const refOn = Object.fromEntries(refGroups.map(g => [g, true]));
   const card = el("div", { class: "card" });
   card.append(el("h3", {}, title));
+  const vsHost = el("div", { class: "vs-strip" });   // dynamic ranking of enabled series
+  card.append(vsHost);
   const holder = el("div");
   card.append(holder);
+
+  function drawVs() {
+    const act = series.filter(s => s.on);
+    const rank = act.map(s => {
+      const v = s.values.filter(x => x != null);
+      return v.length ? { label: s.label, color: s.color,
+                          mean: v.reduce((a, b) => a + b, 0) / v.length, n: v.length } : null;
+    }).filter(Boolean).sort((a, b) => a.mean - b.mean);
+    vsHost.innerHTML = !rank.length ? "" :
+      rank.map((r, i) =>
+        `<span class="vs-item${i === 0 ? " best" : ""}">` +
+        `<span class="dot" style="background:${r.color}"></span>` +
+        `${r.label} <b>${fmt(r.mean)}</b><small>·${r.n} seq</small></span>`
+      ).join(`<span class="vs-gt">&lt;</span>`);
+  }
 
   function draw() {
     const act = series.filter(s => s.on);
@@ -132,11 +149,12 @@ function barChart({ title, cats, series, refs = [], note = "", onBar }) {
       s += `<text x="${(ml + pw / 2).toFixed(0)}" y="${(mt + ph / 2).toFixed(0)}" class="tick" text-anchor="middle" font-size="13">no data for the selected series</text>`;
     s += "</svg>";
     holder.innerHTML = s;
+    drawVs();
     if (onBar) holder.querySelectorAll(".bar,.cat").forEach(b => b.onclick = () => onBar(+b.dataset.cat));
   }
   const leg = el("div", { class: "legend" });
   for (const sr of series) {
-    const c = el("span", { class: "chip", title: "toggle series" }, `<span class="dot" style="background:${sr.color}"></span>${sr.label}`);
+    const c = el("span", { class: "chip" + (sr.on ? "" : " off"), title: "toggle series" }, `<span class="dot" style="background:${sr.color}"></span>${sr.label}`);
     c.onclick = () => { sr.on = !sr.on; c.classList.toggle("off"); draw(); };
     leg.append(c);
   }
@@ -438,6 +456,7 @@ function datasetBar(group, view) {
   for (const k of sysKeys) series.push({
     label: BASE_LABEL[k] || k.replace("_", " "),
     color: BASE_COLORS[k] || "#888",
+    defaultOff: k.startsWith("orb3"),   // causal snaps make ORB3 dominate the scale
     values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === k); return b ? (S.useRte ? b.rte : b.ate) : null; }),
   });
   let curSeq = seqs[0];
@@ -486,6 +505,7 @@ function systemsView() {
     { label: "ours: VIO", color: col("vio"), values: seqs.map(s => med[s]?.bad?.vio) },
     { label: "ours: +map (best arm)", color: col("vpr"), values: seqs.map(bestArm) },
     ...sysArms.map(sa => ({ label: BASE_LABEL[sa] || sa.replace("_", " "), color: BASE_COLORS[sa] || "#888",
+      defaultOff: sa.startsWith("orb3"),
       values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === sa); return b ? (S.useRte ? b.rte : b.ate) : null; }) })),
   ];
   view.append(barChart({
