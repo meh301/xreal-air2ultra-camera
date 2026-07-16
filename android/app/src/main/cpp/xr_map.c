@@ -23,6 +23,7 @@
 
 #include <android/log.h>
 
+#include "xr_slam.h"
 #include "xr_vpr.h"
 #include "xr_xfeat.h"
 #include "xr_teblid_params.h"
@@ -529,6 +530,39 @@ static void qrotv(const float q[4], const float v[3], float o[3]) {
     o[0] = R[0] * v[0] + R[1] * v[1] + R[2] * v[2];
     o[1] = R[3] * v[0] + R[4] * v[1] + R[5] * v[2];
     o[2] = R[6] * v[0] + R[7] * v[1] + R[8] * v[2];
+}
+
+/* --- map->VIO tight coupling (XR_TIGHT env, bench A/B) ------------------
+ * Instead of stepping CORR / deforming on a verified alignment, hand the
+ * residual E = CORR^-1 * D to the VIO optimizer as a weak unary pose prior
+ * (target = E * T_newest). The estimator arbitrates the pull against IMU
+ * and vision factors, spreading the correction smoothly; our subsequent
+ * deviation measurements shrink as it absorbs. */
+#define TIGHT tight_mode()
+static int tight_mode(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_TIGHT");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: TIGHT map->VIO coupling ON");
+    }
+    return v;
+}
+#define TIGHT_SIGMA_T 0.07f
+#define TIGHT_SIGMA_R 0.035f            /* ~2 deg */
+#define TIGHT_EXPIRY_NS 700000000ull    /* prior lives 0.7 s of frame time */
+static void tight_post_prior(const float Dq[4], const float Dp[3],
+                             uint64_t ts) {
+    float ci[4], Eq[4], Ep[3], d[3];
+    qconj(CORR.q, ci);
+    qmul(ci, Dq, Eq);                       /* E.q = CORR.q^-1 * D.q */
+    d[0] = Dp[0] - CORR.p[0];
+    d[1] = Dp[1] - CORR.p[1];
+    d[2] = Dp[2] - CORR.p[2];
+    qrotv(ci, d, Ep);                       /* E.p = R(q^-1)(D.p - CORR.p) */
+    float q_xyzw[4] = { Eq[1], Eq[2], Eq[3], Eq[0] };   /* wxyz -> xyzw */
+    xr_slam_pose_prior(q_xyzw, Ep, TIGHT_SIGMA_T, TIGHT_SIGMA_R,
+                       ts + TIGHT_EXPIRY_NS);
 }
 
 /* rotation vector (axis*angle) <-> quaternion */
@@ -1946,7 +1980,13 @@ static void process_keyframe(void) {
                  * NOTE a continuous sub-gate servo was tried here and pulled
                  * EuRoC map ATE 12→40 cm: with a biased map ANY steady pull
                  * toward it compounds error. Needs map-vs-VIO confidence
-                 * weighting first (see bench notes). */
+                 * weighting first (see bench notes).
+                 * TIGHT mode is different: the pull goes INTO the VIO
+                 * optimizer as a weak prior, arbitrated against IMU and
+                 * vision factors — post it when this verified frame agrees
+                 * with the previous one (2-frame consistency). */
+                if (TIGHT && confirmed)
+                    tight_post_prior(Dq, Dp, work.ts);
                 VER_LAST.outcome = VOUT_GATED;
             } else if (!confirmed) {
                 /* one good frame is not enough — wait for a 2nd that agrees */
@@ -1977,6 +2017,22 @@ static void process_keyframe(void) {
                          "stored map held fixed%s", best_i, (double)dev,
                          (double)(sang * 57.3f), nin, n3, covis,
                          snap ? " + pose snapped" : "");
+                } else if (TIGHT) {
+                    /* TIGHT: hand the confirmed closure to the VIO optimizer
+                     * as a weak prior instead of stepping CORR + deforming.
+                     * The estimator spreads the correction against IMU and
+                     * vision factors; our deviation measurements shrink as
+                     * it absorbs, so the map layer converges without ever
+                     * discontinuity-stepping the output (OKVIS2 property). */
+                    tight_post_prior(Dq, Dp, work.ts);
+                    LAST_SNAP_NS = work.ts;
+                    PENDING_D.have = 0;
+                    LOOP_STATS.count++;
+                    LOOP_STATS.matches = best_m;
+                    VER_LAST.outcome = VOUT_APPLIED;
+                    LOGI("session map: LOOP kf#%d TIGHT-PRIOR %.2fm %.0fdeg "
+                         "(%d/%d inliers, %d covis) — posted to VIO", best_i,
+                         (double)dev, (double)(sang * 57.3f), nin, n3, covis);
                 } else {
                     /* HEALTHY accumulated-drift closure: DEFORM the drifted
                      * tail onto the reference (real co-localization). Pass
@@ -1993,19 +2049,21 @@ static void process_keyframe(void) {
                          (double)dev, (double)(sang * 57.3f), nin, n3, covis,
                          snap ? " + pose snapped" : "");
                 }
-                memcpy(CORR.q, Dq, sizeof CORR.q);
-                memcpy(CORR.p, Dp, sizeof CORR.p);
-                CORR.gen++;
-                LAST_SNAP_NS = work.ts;
-                if (snap) {
-                    memcpy(LIVE.q, Dq, sizeof LIVE.q);
-                    memcpy(LIVE.p, Dp, sizeof LIVE.p);
-                    LIVE.gen++;
+                if (!(TIGHT && !lost)) {
+                    memcpy(CORR.q, Dq, sizeof CORR.q);
+                    memcpy(CORR.p, Dp, sizeof CORR.p);
+                    CORR.gen++;
+                    LAST_SNAP_NS = work.ts;
+                    if (snap) {
+                        memcpy(LIVE.q, Dq, sizeof LIVE.q);
+                        memcpy(LIVE.p, Dp, sizeof LIVE.p);
+                        LIVE.gen++;
+                    }
+                    PENDING_D.have = 0;
+                    LOOP_STATS.count++;
+                    LOOP_STATS.matches = best_m;
+                    VER_LAST.outcome = VOUT_APPLIED;
                 }
-                PENDING_D.have = 0;
-                LOOP_STATS.count++;
-                LOOP_STATS.matches = best_m;
-                VER_LAST.outcome = VOUT_APPLIED;
             }
 
             /* AR flash + panel marker: the winner's landmarks in session */

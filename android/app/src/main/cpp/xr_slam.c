@@ -35,6 +35,9 @@ static struct {
     PFN_vit_pose_destroy pose_destroy;
     PFN_vit_pose_get_data pose_data;
     PFN_vit_pose_get_features pose_features;
+    /* optional XREAL extension (dlsym'd; NULL on stock VIT libs) */
+    vit_result_t (*xreal_pose_prior)(vit_tracker_t *, const double[4], const double[3],
+                                     double, double, int64_t);
 
     vit_tracker_t *tracker;
     atomic_int running;
@@ -136,10 +139,29 @@ int xr_slam_load(void) {
     SYM(pose_data, "vit_pose_get_data");
     SYM(pose_features, "vit_pose_get_features");
 #undef SYM
+    /* optional XREAL tight-coupling extension — absent on stock VIT libs */
+    *(void **)&B.xreal_pose_prior = dlsym(B.dl, "vit_tracker_xreal_pose_prior");
     uint32_t maj = 0, min = 0, pat = 0;
     B.get_version(&maj, &min, &pat);
-    LOGI("Basalt VIT backend loaded, interface %u.%u.%u", maj, min, pat);
+    LOGI("Basalt VIT backend loaded, interface %u.%u.%u%s", maj, min, pat,
+         B.xreal_pose_prior ? " (+xreal pose prior)" : "");
     return 1;
+}
+
+/* Map->VIO tight coupling: post a weak world-frame pose prior (target =
+ * E * T_newest) into the estimator. Returns 1 if delivered, 0 when the
+ * backend lacks the extension or the tracker is down. */
+int xr_slam_pose_prior(const float E_q_xyzw[4], const float E_p[3],
+                       float sigma_t_m, float sigma_r_rad,
+                       uint64_t expiry_t_ns) {
+    if (!B.xreal_pose_prior || !B.tracker ||
+        !atomic_load_explicit(&B.running, memory_order_acquire))
+        return 0;
+    double q[4] = { E_q_xyzw[0], E_q_xyzw[1], E_q_xyzw[2], E_q_xyzw[3] };
+    double p[3] = { E_p[0], E_p[1], E_p[2] };
+    return B.xreal_pose_prior(B.tracker, q, p, (double)sigma_t_m,
+                              (double)sigma_r_rad,
+                              (int64_t)expiry_t_ns) == VIT_SUCCESS;
 }
 
 /* fit the kb4 radial polynomial r/f = theta + k1 th^3 + k2 th^5 + k3 th^7

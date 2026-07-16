@@ -85,6 +85,14 @@ void xr_slam_stop(void);
 void xr_slam_reset(void);
 int xr_slam_running(void);
 
+/* Map->VIO tight coupling (optional backend extension): weak world-frame
+ * pose prior, target = E * T_newest inside the VIO optimizer. E as
+ * quaternion xyzw + translation; expiry compared against frame timestamps.
+ * Returns 1 if delivered, 0 when unsupported/stopped. */
+int xr_slam_pose_prior(const float E_q_xyzw[4], const float E_p[3],
+                       float sigma_t_m, float sigma_r_rad,
+                       uint64_t expiry_t_ns);
+
 /* Left-camera geometry for the session map's PnP relocalization: unit
  * ray (CAMERA frame) for a pixel, and the camera->IMU extrinsics.
  * Return 0 when available (after xr_slam_start configured the kb4 fit). */
