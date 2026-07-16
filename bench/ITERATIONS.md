@@ -488,3 +488,23 @@ retrieval exactly where it fails. clip15 similar except corridor1 0/30
 IN FLIGHT: clean 5-wide corridor reloc rerun (xdense/xdenselg6/sweep) ->
 union_batch chained (union=COVKEEP+PGO+LMDESC vs base + clean retests of
 react2/mapseed/tight + union reloc grid) at 10-wide.
+
+### x ROOT CAUSE OF THE STARVATION EPIDEMIC: my gpuenv rewrite dropped curand
+The PID-spread gpuenv.sh rewrite omitted $SP/curand/lib from
+LD_LIBRARY_PATH -> libonnxruntime_providers_cuda.so failed to load ->
+EVERY run after that rewrite (the SCORED A/B matrix, reloc_clean v1,
+reloc_sweep, union v1) ran MegaLoc on CPU at ~229ms/embed. That - not
+LG alone - is the primary map-thread starvation source; LG-on-CPU
+(30-80ms x up to 32 calls/search) compounded it. FIXES:
+- gpuenv.sh: curand restored (verified "VPR: CUDA EP enabled" in live logs)
+- xr_lighterglue.c: CUDA EP (same dlsym contract as vpr)
+- reloc_pnp: LG budget = candidate keyframe only (was every pooled kf: 8x)
+- XR_STOREGUARD flag: store-only passes skip the embed (device-relevant)
+STATUS OF PRIOR VERDICTS: the A/B matrix numbers (COVKEEP corridor1 7.1,
+magistrale2 39.9; PGO corridor1 10.5; LMDESC reloc corridors 37-83%) were
+measured on CPU-VPR degraded maps - directionally promising, magnitudes
+unconfirmed. Clean re-measurement running: clean corridors -> union_batch
+with 8 arms (union, base2, covkeepc, pgoc, lmdescc, react2c, mapseedc,
+tightc) x hunt list x3 at 10-wide, all-CUDA verified. Watchdog monitor
+live; adversarial code-review workflow over the session's changes in
+flight.
