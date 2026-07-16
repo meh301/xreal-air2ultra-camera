@@ -2,7 +2,7 @@
  * Data: data/{results,baselines,published,ledger,meta}.json + data/traj/<seq>_<arm>.json */
 "use strict";
 
-const ARMS = ["bad", "vpr", "megaloc", "xfeat", "xvpr", "xmegaloc"];
+const ARMS = ["bad", "vpr", "megaloc", "xfeat", "xvpr", "xmegaloc", "xdlg6", "full"];
 const ARM_LABEL = {
   bad: "BAD/TEBLID", vpr: "BAD + EigenPlaces", megaloc: "BAD + MegaLoc",
   xfeat: "XFeat", xvpr: "XFeat + EigenPlaces", xmegaloc: "XFeat + MegaLoc",
@@ -11,6 +11,8 @@ const ARM_LABEL = {
   orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
   xdense: "XFeat-dense + MegaLoc", xdenselg6: "XFeat-dense + MegaLoc + LGlue",
   lmdesc: "dense+LGlue + landmark bank", clip15: "dense+LGlue, clip-15 probes",
+  xdlg6: "dense + MegaLoc + LGlue", full: "FULL (dense+LGlue+union+tight)",
+  utf: "FULL (dense+LGlue+union+tight)",
 };
 /* deterministic color for arms without a CSS variable (new A/B arms) */
 function armColor(a) {

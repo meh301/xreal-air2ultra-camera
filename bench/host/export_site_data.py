@@ -346,7 +346,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     ours_re = re.compile(
-        r"(?P<seq>.+)_(?P<arm>bad|vpr|megaloc|xfeat|xvpr|xmegaloc)"
+        r"(?P<seq>.+)_(?P<arm>bad|vpr|megaloc|xfeat|xvpr|xmegaloc|xdlg6|full)"
         r"_r(?P<run>\d+)_(?P<track>vio|map)\.tum$")
     base_re = re.compile(
         r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins)_lc(?P<lc>[01])\.tum$")
