@@ -81,13 +81,15 @@ corridors at large drift.
 
 ## In flight
 
-### ⏳ Fleet v5 — retrieval sweep fix in isolation
-- v4 + `491b375`. Success = vpr/megaloc arms close toward BAD's 30.8 on long,
-  no EuRoC/rooms regression.
-
-### ⏳ Fleet v6 — v5 + SNAP_MIN_M=0.50 (sweep-validated)
-- Chained to auto-launch after v5. Success = EuRoC +map ≈ VIO (≤6.5),
-  long ≤31 held, mag2 improves.
+### ✅ Fleet v6 — SNAP_MIN_M=0.50 — VALIDATED, NEW BASELINE (on site)
+- **v5→v6**: EuRoC bad/vpr 7.6→6.45 (VIO 5.82 — map penalty now ~0.6 cm);
+  rooms XFeat-family outlier CURED (xmegaloc 16.2→5.56 ≈ VIO, xvpr −5.3);
+  long megaloc 33.5→**31.1 (best arm)**, xfeat −4.2, no losses past noise;
+  MSD flat. All three success criteria met.
+- **Cumulative v4→v6**: EuRoC +map 8.3→6.45 · rooms outliers gone ·
+  long best ~31 (VIO 45) · MSD flat. SNAP_MIN 0.50 is the new default for
+  bench builds (still 0.30 in device code — promote after iteration 2
+  confirms it isn't masking what confidence-weighting should fix).
 
 ---
 
@@ -171,4 +173,4 @@ corridors at large drift.
 | v3 | closure fixes (over-eager confirm) | matrix_v3 | EuRoC regression — rolled back |
 | v4 | `1e4073c` tightened confirm | matrix_v4 | current site baseline |
 | v5 | + VPR full-recall sweep | matrix_v5 | ✅ keep (megaloc long −10.6) |
-| v6 | + SNAP_MIN 0.50 | matrix_v6 | in flight |
+| v6 | + SNAP_MIN 0.50 | matrix_v6 | ✅ new baseline (site) |
