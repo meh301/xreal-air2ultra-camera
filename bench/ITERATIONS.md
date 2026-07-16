@@ -542,3 +542,20 @@ LG6 fixed matching, LMDESC bank fixed retrieval-independence, healthy
 maps fixed density.
 FLEET v12 LAUNCHED: 600 jobs, 5 arms (bad/vpr/megaloc/xdlg6/full), all
 40 seqs x3, 10-wide, sparse-xfeat arms retired. Watchdog live.
+
+### x FLEET V12 VALIDATED — 'full' IS THE NEW BASELINE; LONG GROUP WON
+600 jobs (40 seqs x 5 arms x 3 runs, review-fixed binaries, all-CUDA; 6
+CPU-fallback runs detected via vpr_ep telemetry and re-run clean).
+Group medians (map): euroc full 6.61 (VIO 6.47 = parity; best map arm),
+rooms 5.21 (=VIO, closures gated), **LONG full 27.04 — OKVIS2+LC 31.78
+BEATEN by 15% on the group median**, msd 6.20 (=VIO).
+Long per-seq full vs OKVIS2+LC: corridor5 15.8/101.5 WIN, slides2
+43.5/160.5 WIN, slides1 27.0/31.8 WIN, magistrale2 58.5/66.4 WIN,
+magistrale1 195.9/179.8 close, corridor4 18.0/11.4 close, corridor2
+21.8/9.2, corridor3 15.9/4.9 (was 49.7 on megaloc!), corridor1 32.2/2.8
+(the remaining sore spot — their corridor1 LC is near-perfect).
+Site exported with v12 + utf reloc grid. REMAINING GAPS (the next arc):
+euroc 6.6 vs 3.82, rooms 5.2 vs 1.20, msd 6.2 vs 2.05 — all the same
+mechanism (continuous map reuse below VIO drift level) = stage-3
+landmark reprojection + reactivation, now unblocked by the lifetime
+descriptor bank.
