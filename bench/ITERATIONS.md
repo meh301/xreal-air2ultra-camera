@@ -6,10 +6,13 @@ the measured verdict. Nothing ships on intuition; the benchmark decides.
 
 ## Protocol
 
-- **Tune on the subset, validate on the fleet.** Subset = 9 sequences spanning
-  every failure regime (MH_01, MH_05, V2_03 · room1, room6 · corridor3,
-  corridor5, magistrale2 · MOO07), arms bad+vpr, 3 runs — ~1 h alongside other
-  work. Full fleet = 6 arms × 42 seqs × 5 runs (1,260 jobs, ~2–3 h GPU).
+- **Tune on the subset, validate on the fleet.** Standard fast loop:
+  `/root/fastbench.sh <label> [defines] [env]` — hunt-list sequences we
+  LOSE (corridor1/2/3, magistrale2, MH_05) + regression guards we WIN
+  (corridor5, slides2, MH_01, room6) + room1 (unlockable) + MOO07/MOO15,
+  arms bad+vpr+megaloc × 3 runs ≈ 40 min on GPU. Score with
+  F:\slam_bench\score_sweep.py (adjust dir). Only subset winners earn a
+  full fleet = 6 arms × 42 seqs × 5 runs (1,260 jobs, ~2–3 h GPU).
 - **One change per fleet** so attribution stays clean (v4 → v5 → v6 …).
 - **EuRoC is the canary**: the map layer must never hurt a healthy VIO.
   Any "improvement" that regresses EuRoC +map is trust-weighting done wrong.
