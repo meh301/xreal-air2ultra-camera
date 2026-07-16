@@ -9,7 +9,17 @@ const ARM_LABEL = {
   "bad-vio": "VIO only", "xfeat-vio": "VIO only (XFeat)",
   okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
   orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
+  xdense: "XFeat-dense + MegaLoc", xdenselg6: "XFeat-dense + MegaLoc + LGlue",
+  lmdesc: "dense+LGlue + landmark bank", clip15: "dense+LGlue, clip-15 probes",
 };
+/* deterministic color for arms without a CSS variable (new A/B arms) */
+function armColor(a) {
+  const c = col(a);
+  if (c && c !== "#888") return c;
+  let h = 0;
+  for (const ch of a) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return `hsl(${h % 360},62%,50%)`;
+}
 /* every plot key the trajectory panel may offer, in display order */
 const TRAJ_KEYS = ["bad-vio", "xfeat-vio", ...ARMS,
   "okvis2lc0", "okvis2lc1", "orb3lc0", "orb3lc1", "openvinslc0"];
@@ -85,7 +95,8 @@ function aggBaselines() {
 }
 
 /* ---------- bar chart (click-to-filter legend) ---------- */
-function barChart({ title, cats, series, refs = [], note = "", onBar }) {
+function barChart({ title, cats, series, refs = [], note = "", onBar,
+                    unit = "cm", higherBetter = false }) {
   series.forEach(s => { if (s.on === undefined) s.on = !s.defaultOff; });
   const refGroups = [...new Set(refs.map(r => r.cls || "pub"))];
   const refOn = Object.fromEntries(refGroups.map(g => [g, true]));
@@ -102,14 +113,14 @@ function barChart({ title, cats, series, refs = [], note = "", onBar }) {
       const v = s.values.filter(x => x != null);
       return v.length ? { label: s.label, color: s.color, med: median(v),
                           mean: v.reduce((a, b) => a + b, 0) / v.length, n: v.length } : null;
-    }).filter(Boolean).sort((a, b) => a.med - b.med);
+    }).filter(Boolean).sort((a, b) => higherBetter ? b.med - a.med : a.med - b.med);
     vsHost.innerHTML = !rank.length ? "" :
-      `<span class="hint">median over sequences (mean on hover) · lower is better:</span>` +
+      `<span class="hint">median over sequences (mean on hover) · ${higherBetter ? "higher" : "lower"} is better:</span>` +
       rank.map((r, i) =>
-        `<span class="vs-item${i === 0 ? " best" : ""}" title="mean ${fmt(r.mean)} cm over ${r.n} sequences">` +
+        `<span class="vs-item${i === 0 ? " best" : ""}" title="mean ${fmt(r.mean)} ${unit} over ${r.n} sequences">` +
         `<span class="dot" style="background:${r.color}"></span>` +
         `${r.label} <b>${fmt(r.med)}</b><small>·${r.n} seq</small></span>`
-      ).join(`<span class="vs-gt">&lt;</span>`);
+      ).join(`<span class="vs-gt">${higherBetter ? "&gt;" : "&lt;"}</span>`);
   }
 
   function draw() {
@@ -133,7 +144,7 @@ function barChart({ title, cats, series, refs = [], note = "", onBar }) {
       act.forEach((sr, j) => {
         const v = sr.values[i]; if (v == null) return;
         const x = x0 + j * (bw + 2), y = Y(v);
-        s += `<rect class="bar" data-cat="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${(mt + ph - y).toFixed(1)}" rx="3" fill="${sr.color}"><title>${c} — ${sr.label}: ${fmt(v)} cm${v > ymax ? " (clipped)" : ""}</title></rect>`;
+        s += `<rect class="bar" data-cat="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${(mt + ph - y).toFixed(1)}" rx="3" fill="${sr.color}"><title>${c} — ${sr.label}: ${fmt(v)} ${unit}${v > ymax ? " (clipped)" : ""}</title></rect>`;
         if (act.length * cats.length <= 60)
           s += `<text x="${(x + bw / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}" class="vlab" text-anchor="middle">${fmt(v)}</text>`;
       });
@@ -535,87 +546,142 @@ async function relocView() {
       "<code>--reloc &lt;logdir&gt;</code>.</p>"));
     return;
   }
-  // summary table
+  const entries = data.entries;
+  const seqs = [...new Set(entries.map(e => e.seq))].sort();
+  const arms = [...new Set(entries.map(e => e.arm))].sort();
+  const M = {};
+  entries.forEach(e => M[`${e.seq}|${e.arm}`] = e);
+
+  /* summary bar charts — same barChart component as every other tab,
+   * arms as toggleable series, sequences as categories */
+  const mk = (title, get, unit, higherBetter, note) => barChart({
+    title, cats: seqs.map(shortName), unit, higherBetter, note,
+    series: arms.map(a => ({ label: ARM_LABEL[a] || a, color: armColor(a),
+      values: seqs.map(s => { const e = M[`${s}|${a}`]; return e ? get(e) : null; }) })),
+  });
+  view.append(mk("Relocalization recall [%]", e => e.recall * 100, "%", true,
+    "Cold probes (seeded-random frames, no VIO context) against the run's own finished map. Click a legend chip to toggle an arm."));
+  view.append(mk("Recall @25 cm [%]", e => e.r25 * 100, "%", true, ""));
+  view.append(mk("Median landing error [cm] (verified probes)",
+    e => e.med >= 0 ? e.med * 100 : null, "cm", false, ""));
+
+  /* spatial panel — trajPanel-style comparative plotting: sequence
+   * selector + multi-arm chips + persistent-camera orbit. Arms overlay in
+   * their own colors; single-arm selection switches to error coloring. */
+  const pseqs = seqs.filter(s => arms.some(a => M[`${s}|${a}`]?.probes?.some(p => p.exp)));
+  if (!pseqs.length) {
+    view.append(el("div", { class: "note" },
+      "spatial plot needs probe positions (runs made after the exp/got extension)"));
+  } else {
+    const pc = el("div", { class: "card" });
+    pc.append(el("h3", {}, "Where relocalization landed"));
+    const ctr = el("div", { class: "traj-controls" });
+    const seqSel = el("select");
+    pseqs.forEach(sq => seqSel.append(el("option", { value: sq }, shortName(sq))));
+    ctr.append(el("label", {}, "sequence "), seqSel);
+    const armBox = el("span", { class: "traj-arms" });
+    ctr.append(el("span", { class: "flabel", style: "margin-left:8px" }, "overlay arms"), armBox);
+    pc.append(ctr);
+    const vb = el("div", { class: "viewbox" });
+    const cv = el("canvas", { width: 1000, height: 520 });
+    vb.append(cv); pc.append(vb);
+    const legendHost = el("div", { class: "legend-line" });
+    pc.append(legendHost);
+    view.append(pc);
+
+    const cam = {};                       // persistent across arm toggles
+    let orbit = null, curSeq = pseqs[0];
+    const sel = new Set();
+    const dim = c => c.startsWith("hsl(") ? c.replace(")", ",0.45)").replace("hsl", "hsla") : c;
+    const errCol = v => { const t2 = Math.min(Math.max(v, 0) / 1.0, 1); return `hsl(${(1 - t2) * 214},80%,55%)`; };
+
+    const armsWithProbes = sq => arms.filter(a => M[`${sq}|${a}`]?.probes?.some(p => p.exp));
+    function gridFor(sq) {
+      const e = M[`${sq}|${armsWithProbes(sq)[0]}`];
+      const base = (e.traj || e.probes.filter(p => p.exp).map(p => p.exp)).filter(Boolean);
+      const withO = base.concat([[0, 0, 0]]);
+      const lo = [0, 1, 2].map(k => Math.min(...withO.map(p => p[k] || 0)));
+      const hi = [0, 1, 2].map(k => Math.max(...withO.map(p => p[k] || 0)));
+      const g = { lo, hi, ctr: [0, 1, 2].map(k => (lo[k] + hi[k]) / 2),
+        span: Math.max(1e-3, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2])) };
+      const raw = g.span / 6, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+      g.step = (raw / mag >= 5 ? 5 : raw / mag >= 2 ? 2 : 1) * mag;
+      g.gx0 = Math.floor(lo[0] / g.step) * g.step - g.step;
+      g.gx1 = Math.ceil(hi[0] / g.step) * g.step + g.step;
+      g.gy0 = Math.floor(lo[1] / g.step) * g.step - g.step;
+      g.gy1 = Math.ceil(hi[1] / g.step) * g.step + g.step;
+      return g;
+    }
+    function redraw() {
+      if (!orbit) return;
+      const act = [...sel];
+      const single = act.length === 1;
+      const trajs = [];
+      const s = 0.012 * gridFor(curSeq).span;   // failed-probe X size
+      for (const a of act) {
+        const e = M[`${curSeq}|${a}`];
+        if (!e) continue;
+        const c = armColor(a);
+        if (e.traj) trajs.push({ pts: e.traj, color: single ? col("gt") : dim(c), w: 1.2 });
+        for (const p of e.probes) {
+          if (!p.exp) continue;
+          if (p.ok && p.got) {
+            trajs.push({ pts: [p.exp, p.got], color: single ? errCol(p.err) : c, w: 2.4 });
+          } else {
+            trajs.push({ pts: [[p.exp[0] - s, p.exp[1] - s, p.exp[2]], [p.exp[0] + s, p.exp[1] + s, p.exp[2]]], color: single ? "var(--c-base)" : dim(c), w: 1.6 });
+            trajs.push({ pts: [[p.exp[0] - s, p.exp[1] + s, p.exp[2]], [p.exp[0] + s, p.exp[1] - s, p.exp[2]]], color: single ? "var(--c-base)" : dim(c), w: 1.6 });
+          }
+        }
+      }
+      orbit.set(trajs);
+      legendHost.innerHTML =
+        (single
+          ? `<span><i style="background:var(--c-gt)"></i>session trajectory</span>` +
+            `<span><i style="background:linear-gradient(90deg,#2a78d6,#d83b3b)"></i>expected→landed (color = error 0→1 m)</span>` +
+            `<span><i style="background:var(--c-base)"></i>✕ failed probe (at expected)</span>`
+          : act.map(a => `<span><i style="background:${armColor(a)}"></i>${ARM_LABEL[a] || a}</span>`).join("") +
+            `<span class="hint">solid = landed vector · faint = trajectory / failed ✕</span>`) +
+        `<span class="hint">drag = orbit · wheel = zoom · shift-drag = pan</span>`;
+    }
+    function buildChips() {
+      armBox.innerHTML = "";
+      const avail = armsWithProbes(curSeq);
+      [...sel].forEach(a => { if (!avail.includes(a)) sel.delete(a); });
+      if (!sel.size && avail.length) sel.add(avail[0]);
+      for (const a of avail) {
+        const c = el("span", { class: "chip" + (sel.has(a) ? "" : " off") },
+          `<span class="dot" style="background:${armColor(a)}"></span>${ARM_LABEL[a] || a}`);
+        c.onclick = () => { if (sel.has(a)) { if (sel.size > 1) sel.delete(a); } else sel.add(a); buildChips(); redraw(); };
+        armBox.append(c);
+      }
+    }
+    function loadSeq() {
+      orbit = orbitView(cv, cam, gridFor(curSeq));
+      buildChips();
+      redraw();
+    }
+    seqSel.onchange = () => { curSeq = seqSel.value; loadSeq(); };
+    loadSeq();
+  }
+
+  // full summary table (below the charts)
   const t = el("table");
   t.innerHTML = "<tr><th>sequence</th><th>arm</th><th>probes</th>" +
     "<th>recall</th><th>r@25cm</th><th>r@10cm</th><th>median err [m]</th></tr>" +
-    data.entries.map(e =>
+    entries.map(e =>
       `<tr><td>${shortName(e.seq)}</td><td>${ARM_LABEL[e.arm] || e.arm}</td>` +
       `<td>${e.n}</td><td>${(e.recall * 100).toFixed(0)}%</td>` +
       `<td>${(e.r25 * 100).toFixed(0)}%</td><td>${(e.r10 * 100).toFixed(0)}%</td>` +
       `<td>${e.med >= 0 ? e.med.toFixed(2) : "—"}</td></tr>`).join("");
   const card = el("div", { class: "card" });
-  card.append(el("h3", {}, "Cold single-frame relocalization (probe vs finished map)"), t);
+  card.append(el("h3", {}, "All runs"), t);
   card.append(el("div", { class: "note" },
     "Probes are seeded-random frames re-fed against the run's own finished map " +
-    "with no VIO context. Error = landed pose vs the run's map-track pose at " +
-    "that frame (re-entry precision). OKVIS2 public code lacks loadMap — " +
-    "cross-system comparison uses the blackout protocol (pending); ORB-SLAM3 " +
-    "atlas-reload pending; OpenVINS N/A (no map by design)."));
+    "with no VIO context (gravity from the IMU, as deployment would have). " +
+    "Error = landed pose vs the run's map-track pose at that frame. OKVIS2 " +
+    "public code lacks loadMap — cross-system comparison uses the blackout " +
+    "protocol (pending); ORB-SLAM3 atlas-reload pending; OpenVINS N/A."));
   view.append(card);
-
-  // spatial plot: expected -> landed vectors over the trajectory
-  const first = data.entries.find(e => e.probes.some(p => p.exp));
-  if (!first) {
-    view.append(el("div", { class: "note" },
-      "spatial plot needs probe positions (runs made after the exp/got extension)"));
-    return;
-  }
-  const sel = el("select");
-  data.entries.filter(e => e.probes.some(p => p.exp)).forEach((e, i) => {
-    sel.append(el("option", { value: String(i) }, `${shortName(e.seq)} · ${ARM_LABEL[e.arm] || e.arm}`));
-  });
-  const pc = el("div", { class: "card" });
-  const ctr = el("div", { class: "traj-controls" });
-  ctr.append(el("label", {}, "run "), sel);
-  pc.append(el("h3", {}, "Where relocalization landed"), ctr);
-  const vb = el("div", { class: "viewbox" });
-  const cv = el("canvas", { width: 1000, height: 520 });
-  vb.append(cv); pc.append(vb);
-  pc.append(el("div", { class: "legend-line" },
-    `<span><i style="background:var(--c-gt)"></i>session trajectory</span>` +
-    `<span><i style="background:linear-gradient(90deg,#2a78d6,#d83b3b)"></i>expected→landed (color = error)</span>` +
-    `<span><i style="background:var(--c-base)"></i>✕ failed probe (at expected)</span>` +
-    `<span class="hint">drag = orbit · wheel = zoom · shift-drag = pan</span>`));
-  view.append(pc);
-
-  const cam = {};
-  async function draw() {
-    const entries = data.entries.filter(e => e.probes.some(p => p.exp));
-    const e = entries[+sel.value || 0];
-    /* SESSION-frame trajectory shipped inside the reloc entry — the traj/
-     * jsons are GT-aligned (different frame) and must not be mixed with
-     * session-frame probe positions (that was the floating-blob bug). */
-    const traj = e.traj ? { est: e.traj } : null;
-    const base = traj ? traj.est : e.probes.filter(p => p.exp).map(p => p.exp);
-    const withO = base.filter(Boolean).concat([[0, 0, 0]]);
-    const lo = [0, 1, 2].map(k => Math.min(...withO.map(p => p[k] || 0)));
-    const hi = [0, 1, 2].map(k => Math.max(...withO.map(p => p[k] || 0)));
-    const g = { lo, hi, ctr: [0, 1, 2].map(k => (lo[k] + hi[k]) / 2),
-      span: Math.max(1e-3, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2])), step: 1,
-      gx0: lo[0] - 1, gx1: hi[0] + 1, gy0: lo[1] - 1, gy1: hi[1] + 1 };
-    const raw = g.span / 6, mag = Math.pow(10, Math.floor(Math.log10(raw)));
-    g.step = (raw / mag >= 5 ? 5 : raw / mag >= 2 ? 2 : 1) * mag;
-    g.gx0 = Math.floor(lo[0] / g.step) * g.step - g.step; g.gx1 = Math.ceil(hi[0] / g.step) * g.step + g.step;
-    g.gy0 = Math.floor(lo[1] / g.step) * g.step - g.step; g.gy1 = Math.ceil(hi[1] / g.step) * g.step + g.step;
-    const orbit = orbitView(cv, cam, g);
-    const errCol = v => { const t2 = Math.min(Math.max(v, 0) / 1.0, 1); return `hsl(${(1 - t2) * 214},80%,55%)`; };
-    const trajs = [];
-    if (traj && traj.est) trajs.push({ pts: traj.est, color: col("gt"), w: 1.2 });
-    for (const p of e.probes) {
-      if (!p.exp) continue;
-      if (p.ok && p.got) {
-        trajs.push({ pts: [p.exp, p.got], color: errCol(p.err), w: 2.4 });
-      } else {
-        const s = g.span * 0.012;   // failed: small X at expected
-        trajs.push({ pts: [[p.exp[0] - s, p.exp[1] - s, p.exp[2]], [p.exp[0] + s, p.exp[1] + s, p.exp[2]]], color: "var(--c-base)", w: 2 });
-        trajs.push({ pts: [[p.exp[0] - s, p.exp[1] + s, p.exp[2]], [p.exp[0] + s, p.exp[1] - s, p.exp[2]]], color: "var(--c-base)", w: 2 });
-      }
-    }
-    orbit.set(trajs);
-  }
-  sel.onchange = draw;
-  draw();
 }
 
 function tableView() {
