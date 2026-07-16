@@ -29,8 +29,13 @@ static struct {
     atomic_int ready;
     int failed;                       /* permanent: don't retry every frame */
     int dim;                          /* model output dim, set at bring-up */
+    int on_cuda;                      /* CUDA EP actually active */
     float input[XR_OH * XR_OW];       /* map thread only */
 } V;
+
+/* 1 = the active session runs on the CUDA EP (bench telemetry: a silent
+ * CPU fallback converts a run into the map-density-starved mode) */
+int xr_vpr_on_cuda(void) { return V.on_cuda; }
 
 static int ort_ok(OrtStatus *st, const char *what) {
     if (!st) return 1;
@@ -88,11 +93,12 @@ static int vpr_try_init(void) {
             if (cuda_ep) {
                 OrtStatus *st = cuda_ep(opts, atoi(cud));
                 if (st) {
-                    LOGI("VPR: CUDA EP failed (%s), staying on CPU",
+                    LOGE("VPR: CUDA EP failed (%s), staying on CPU",
                          V.api->GetErrorMessage(st));
                     V.api->ReleaseStatus(st);
                 } else {
                     LOGI("VPR: CUDA EP enabled (device %s)", cud);
+                    V.on_cuda = 1;
                 }
             } else {
                 LOGI("VPR: CUDA EP symbol absent (CPU-only ORT), staying on CPU");
@@ -117,7 +123,9 @@ static int vpr_try_init(void) {
             V.api->ReleaseSessionOptions(opts);
             return 0;
         }
-        LOGI("VPR: GPU session failed — running on CPU instead");
+        V.on_cuda = 0;
+        LOGE("VPR: GPU session failed — running on CPU instead (~20x slower "
+             "embeds: map density WILL degrade)");
     }
     V.api->ReleaseSessionOptions(opts);
     if (!ort_ok(V.api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,

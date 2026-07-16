@@ -249,6 +249,11 @@ typedef struct {
     uint64_t ts;
 } lmb_ent;
 static lmb_ent LMB[LMB_MAX];
+static int LMB_LIVE;                   /* populated entries (map thread) */
+/* Reset must not memset the bank from a JNI thread while the map thread's
+ * lock-free search scans it (review finding): resets bump the epoch and
+ * the MAP THREAD clears the bank lazily at its next dequeue. */
+static atomic_uint LMB_EPOCH;
 static inline uint32_t lmb_slot_of(int32_t id) {
     return ((uint32_t)id * 2654435761u) % LMB_MAX;
 }
@@ -261,7 +266,7 @@ static void kf_slots_reset(void) {
     KF_FREE_N = XR_MAP_MAX_KF;
     for (int i = 0; i < XR_MAP_MAX_KF; i++) KF_FREE[i] = i;
     CUR_SEG = 0;
-    memset(LMB, 0, sizeof LMB);        /* bank references slots: all void */
+    atomic_fetch_add(&LMB_EPOCH, 1);   /* bank voided: map thread clears it */
 }
 __attribute__((constructor)) static void kf_slots_ctor(void) { kf_slots_reset(); }
 
@@ -1013,25 +1018,34 @@ static void graph_deform(int anchor, const float qsp[3],
     static float cum[XR_MAP_MAX_KF];       /* session path length from anchor */
     float total = 0;
     cum[anchor] = 0;
+    /* segment guard (review finding): unwelded-segment keyframes in the
+     * tail live in a DIFFERENT session frame — their pc must neither be
+     * warped toward D nor inflate the path length across the boundary.
+     * Distances accumulate between consecutive SAME-segment keyframes;
+     * other-segment keyframes are marked skipped. */
+    int aseg = KFA(anchor).seg, prev = anchor;
     for (int j = anchor + 1; j < KF_N; j++) {
-        float dx = KFA(j).pc[0] - KFA(j - 1).pc[0];
-        float dy = KFA(j).pc[1] - KFA(j - 1).pc[1];
-        float dz = KFA(j).pc[2] - KFA(j - 1).pc[2];
+        if (KFA(j).seg != aseg) { cum[j] = -1.f; continue; }
+        float dx = KFA(j).pc[0] - KFA(prev).pc[0];
+        float dy = KFA(j).pc[1] - KFA(prev).pc[1];
+        float dz = KFA(j).pc[2] - KFA(prev).pc[2];
         total += sqrtf(dx * dx + dy * dy + dz * dz);
         cum[j] = total;
+        prev = j;
     }
     /* the correction D was estimated for the CURRENT query, not the newest
      * stored keyframe. Extend the path to the query (in session coords) so
      * the newest keyframe gets a fraction < 1 (the drift between it and the
      * query rides on the live pose via CORR); otherwise the newest stored
      * portion is over-deformed. */
-    if (KF_N > anchor + 1) {
-        float dx = qsp[0] - KFA(KF_N - 1).pc[0];
-        float dy = qsp[1] - KFA(KF_N - 1).pc[1];
-        float dz = qsp[2] - KFA(KF_N - 1).pc[2];
+    if (prev > anchor) {
+        float dx = qsp[0] - KFA(prev).pc[0];
+        float dy = qsp[1] - KFA(prev).pc[1];
+        float dz = qsp[2] - KFA(prev).pc[2];
         total += sqrtf(dx * dx + dy * dy + dz * dz);
     }
     for (int j = anchor + 1; j < KF_N; j++) {
+        if (cum[j] < 0) continue;          /* other segment: untouched */
         float a = total > 1e-3f ? cum[j] / total : 1.0f;
         float dq_old[4], dp_old[3], dq_new[4], dp_new[3];
         kf_corr(&KFA(j), dq_old, dp_old);  /* this keyframe's current corr */
@@ -2043,19 +2057,22 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
  * a landmark seen from anywhere is matchable, no matter which keyframe
  * retrieval would have surfaced. Covis proxy = distinct LIVE owner
  * keyframes among the geometric inliers. */
-static int lmb_reloc(const xr_kf *w, float Dq[4], float Dp[3],
+static int lmb_reloc(const xr_kf *w, int nkf, float Dq[4], float Dp[3],
                      int *out_n3, int *out_nin, int *out_covis,
                      int *out_best) {
     *out_n3 = *out_nin = *out_covis = 0;
     *out_best = -1;
     if (!GEOM.have || w->n_kp <= 0) return 0;
+    if (LMB_LIVE < VER_MIN_PAIRS) return 0;   /* bank too thin to solve */
     int bad = w->desc_type == DESC_BAD;
     static int ord_of[XR_MAP_MAX_KF];      /* slot -> time-order, live only */
     for (int i = 0; i < XR_MAP_MAX_KF; i++) ord_of[i] = -1;
-    for (int k = 0; k < KF_N; k++) ord_of[KFO[k]] = k;
+    /* nkf = the DEQUEUE snapshot, never live KF_N (snapshot discipline —
+     * a concurrent reset zeroes KF_N mid-scan; review finding) */
+    for (int k = 0; k < nkf; k++) ord_of[KFO[k]] = k;
 
     static float Sw[COVIS_MAX_CAND][3], Pw[COVIS_MAX_CAND][3];
-    static int16_t owner[COVIS_MAX_CAND];
+    static int16_t owner[COVIS_MAX_CAND], oseg[COVIS_MAX_CAND];
     static uint8_t used[LMB_MAX / 8];      /* one query kp per bank entry */
     memset(used, 0, sizeof used);
     int n = 0;
@@ -2087,6 +2104,8 @@ static int lmb_reloc(const xr_kf *w, float Dq[4], float Dp[3],
         int oo = ord_of[e->slot];
         if (oo < 0) continue;              /* owner evicted: 3D untrusted */
         const xr_kf *kf = &KF[e->slot];
+        if ((int)e->li >= kf->n_lm) continue;   /* slot reused by a smaller
+                                                   frame: tail is stale */
         if (kf->lm_id[e->li] != e->id) continue;      /* slot reused */
         float dk2 = 0;
         for (int c = 0; c < 3; c++) {
@@ -2112,8 +2131,37 @@ static int lmb_reloc(const xr_kf *w, float Dq[4], float Dp[3],
         Pw[n][1] = ps[1] + pd[1];
         Pw[n][2] = ps[2] + pd[2];
         owner[n] = e->slot;
+        oseg[n] = (int16_t)kf->seg;
         used[bt >> 3] |= (uint8_t)(1u << (bt & 7));
         n++;
+    }
+    /* frame consistency: unwelded segments live in DIFFERENT session
+     * frames — one PnP over mixed frames is meaningless. Keep only the
+     * DOMINANT segment's pairs (review finding). */
+    if (n > 0) {
+        int16_t segs[16];
+        int cnt[16], ns = 0;
+        for (int m = 0; m < n; m++) {
+            int f = -1;
+            for (int u = 0; u < ns; u++)
+                if (segs[u] == oseg[m]) { f = u; break; }
+            if (f < 0 && ns < 16) { segs[ns] = oseg[m]; cnt[ns] = 0; f = ns++; }
+            if (f >= 0) cnt[f]++;
+        }
+        int bs = 0;
+        for (int u = 1; u < ns; u++) if (cnt[u] > cnt[bs]) bs = u;
+        if (ns > 1) {
+            int m2 = 0;
+            for (int m = 0; m < n; m++) {
+                if (oseg[m] != segs[bs]) continue;
+                memcpy(Sw[m2], Sw[m], sizeof Sw[0]);
+                memcpy(Pw[m2], Pw[m], sizeof Pw[0]);
+                owner[m2] = owner[m];
+                oseg[m2] = oseg[m];
+                m2++;
+            }
+            n = m2;
+        }
     }
     *out_n3 = n;
     if (n < VER_MIN_PAIRS) return 0;
@@ -2166,6 +2214,16 @@ static void process_keyframe(void) {
     static xr_kf work;                      /* map thread only */
     static uint8_t img[XR_OW * XR_OH];
     pthread_mutex_lock(&MAP_LOCK);
+    /* lazy bank clear (see LMB_EPOCH): map thread only, under the lock */
+    {
+        static unsigned lmb_seen;          /* map thread only */
+        unsigned ep = atomic_load(&LMB_EPOCH);
+        if (lmb_seen != ep) {
+            memset(LMB, 0, sizeof LMB);
+            LMB_LIVE = 0;
+            lmb_seen = ep;
+        }
+    }
     PROBE_REQ = MBOX.probe;
     MBOX.probe = 0;
     int q_only = MBOX.query_only || PROBE_REQ;
@@ -2187,6 +2245,7 @@ static void process_keyframe(void) {
      * abandoned — no stale correction AND no stale/wrong-descriptor store. */
     unsigned rgen0 = atomic_load(&RESET_GEN);
     int kfn = KF_N;
+    int snap_seg = CUR_SEG;                      /* reset zeroes it (review) */
     uint64_t snap_recovered_ns = RECOVERED_NS;   /* reset writes these under */
     uint64_t snap_last_store_ns = LAST_STORE_NS;  /* the lock; snapshot here */
     float snap_corr_q[4], snap_corr_p[3];
@@ -2257,11 +2316,19 @@ static void process_keyframe(void) {
      * map thread becomes a 15-30% duty burner exactly while pose is most
      * fragile. Cap search duty at ~25%: never search more often than 4x the
      * previous search's measured cost. Small maps are unaffected. */
-    if (lost && (uint64_t)last_search_cost_us * 4000ull > search_iv)
+    /* duty cap now applies to EVERY cadence, not just LOST (review: the
+     * healthy cadence was ungoverned while pass costs — extract + embed +
+     * LG — starve offer processing and collapse map density) */
+    if ((uint64_t)last_search_cost_us * 4000ull > search_iv)
         search_iv = (uint64_t)last_search_cost_us * 4000ull;  /* us->ns, x4 */
     /* reactivation-lite: while an anchor is fresh, verify against it at a
      * fast cadence (single-kf query — negligible cost) */
-    int react_active = REACT && !lost && REACT_A.kf >= 0 &&
+    /* REACT2 standalone works (anchor machinery lives under either flag);
+     * probes are EXCLUDED — a pinned scan would test one keyframe instead
+     * of the map, and the shared probe timestamp defeats the fail-out
+     * (review findings #13/#15). */
+    int react_active = (REACT || react2_on()) && !lost && !PROBE_REQ &&
+                       REACT_A.kf >= 0 &&
                        work.ts - REACT_A.ts < REACT_WINDOW_NS;
     if (react_active && search_iv > REACT_IV_NS) search_iv = REACT_IV_NS;
     int do_search = last_search_ns == 0 || q_only ||
@@ -2291,6 +2358,8 @@ static void process_keyframe(void) {
         return;
     }
     if (do_search) last_search_ns = work.ts;
+    uint64_t t_pass0 = map_mono_us();      /* FULL pass cost (extract+embed+
+                                              search) feeds the duty cap */
 
     /* descriptors: XFeat when selected AND available, BAD/TEBLID otherwise */
     if (atomic_load(&USE_XFEAT) && MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);
@@ -2303,8 +2372,15 @@ static void process_keyframe(void) {
          * xfeat regression, and the rooms-xfeat 13 cm fleet outlier). */
         int anchors = xr_xfeat_can_sample() ? work.n_lm : 0;
         if (anchors > XR_MAP_KP_PER_KF / 2) anchors = XR_MAP_KP_PER_KF / 2;
-        int n = xr_xfeat_extract(img, work.kp_uv, work.desc.xfeat,
-                                 XR_MAP_KP_PER_KF - anchors);
+        static int8_t adesc[XR_MAP_KP_PER_KF][64];   /* map thread only */
+        int anchored = 0;
+        /* extract + anchor-sample under ONE xr_xfeat lock hold: a separate
+         * sample call could race the XR_SEED thread's extract and store
+         * descriptors from the WRONG frame's dense map (review finding) */
+        int n = xr_xfeat_extract_anchored(img, work.kp_uv, work.desc.xfeat,
+                                          XR_MAP_KP_PER_KF - anchors,
+                                          (const float (*)[2])work.lm_uv,
+                                          anchors, adesc, &anchored);
         if (n >= 0) {
             work.n_kp = n;
             work.desc_type = DESC_XFEAT;
@@ -2327,9 +2403,9 @@ static void process_keyframe(void) {
                 }
             }
             /* append the anchored descriptors: exact uv, exact landmark */
-            if (anchors > 0 &&
-                xr_xfeat_sample((const float (*)[2])work.lm_uv, anchors,
-                                &work.desc.xfeat[work.n_kp]) == anchors) {
+            if (anchored == anchors && anchors > 0) {
+                memcpy(&work.desc.xfeat[work.n_kp], adesc,
+                       sizeof(int8_t) * 64 * (size_t)anchors);
                 for (int i = 0; i < anchors; i++) {
                     work.kp_uv[work.n_kp + i][0] = work.lm_uv[i][0];
                     work.kp_uv[work.n_kp + i][1] = work.lm_uv[i][1];
@@ -2481,7 +2557,7 @@ static void process_keyframe(void) {
          * eligible, they are exactly the weld opportunities. (Only bites
          * while unwelded segments exist; the VPR shortlist supersedes the
          * gate anyway on the main arms.) */
-        if (gate && KFA(i).seg == CUR_SEG) {
+        if (gate && KFA(i).seg == snap_seg) {
             float gx = wsp[0] - KFA(i).pc[0], gy = wsp[1] - KFA(i).pc[1],
                   gz = wsp[2] - KFA(i).pc[2];
             if (gx * gx + gy * gy + gz * gz > SHORTLIST_R_M * SHORTLIST_R_M)
@@ -2563,7 +2639,7 @@ static void process_keyframe(void) {
     if (lmdesc_on() && relocalizing && best_i < 0) {
         int bi2, n32, nin2, cov2;
         float dq2[4], dp2[3];
-        if (lmb_reloc(&work, dq2, dp2, &n32, &nin2, &cov2, &bi2) &&
+        if (lmb_reloc(&work, kfn, dq2, dp2, &n32, &nin2, &cov2, &bi2) &&
             bi2 >= 0) {
             best_i = bi2;
             best_n3 = n32;
@@ -2574,11 +2650,13 @@ static void process_keyframe(void) {
             if (n32 > any_pairs) any_pairs = n32;
             if (ncand == 0) {              /* apply branch needs a candidate */
                 cand_i[0] = bi2;
-                cand_m[0] = raw_best_m > CAND_MIN_MATCHES ? raw_best_m
-                                                          : CAND_MIN_MATCHES;
+                cand_m[0] = CAND_MIN_MATCHES;
                 ncand = 1;
             }
-            if (best_m < cand_m[0]) best_m = cand_m[0];
+            /* LMDESC carries no image-match evidence of its own — never
+             * unlock the strong-jump caps with an unrelated cluster's
+             * match count (review finding) */
+            best_m = CAND_MIN_MATCHES;
             LOGI("session map: LMIDX direct reloc — %d pairs, %d inliers, "
                  "%d live owners (kf#%d)", n32, nin2, cov2, bi2);
         }
@@ -2624,7 +2702,8 @@ static void process_keyframe(void) {
         PERF.candidates = ncand;
         PERF.match_us = match_us;
         PERF.lock_us = lock_us;
-        last_search_cost_us = match_us;   /* feeds the LOST cadence cost-cap */
+        last_search_cost_us =             /* feeds the cadence duty cap */
+            (unsigned)(map_mono_us() - t_pass0);
     }
     memcpy(LAST_POSE.q, work.q, sizeof LAST_POSE.q);
     memcpy(LAST_POSE.p, work.p, sizeof LAST_POSE.p);
@@ -2693,8 +2772,8 @@ static void process_keyframe(void) {
             VER_LAST.pairs = n3;
             VER_LAST.inliers = nin;
             KFA(best_i).last_used = work.ts;   /* geometrically useful */
-            if (REACT && !lost) {              /* refresh reactivation anchor */
-                REACT_A.kf = best_i;
+            if ((REACT || react2_on()) && !lost && !PROBE_REQ) {
+                REACT_A.kf = best_i;           /* refresh reactivation anchor */
                 REACT_A.ts = work.ts;
                 REACT_A.fails = 0;
             }
@@ -2767,7 +2846,10 @@ static void process_keyframe(void) {
                 PROBE_RES.ok = 1;
                 PROBE_RES.inliers = nin;
                 PROBE_RES.kf = best_i;
-                memcpy(PROBE_RES.q, Dq, sizeof PROBE_RES.q);
+                /* session ORIENTATION of the query = D ∘ odom-quat (the
+                 * gravity prior made work.q non-identity; returning raw D
+                 * was only correct for identity probes) */
+                qmul(Dq, work.q, PROBE_RES.q);
                 memcpy(PROBE_RES.p, Dp, sizeof PROBE_RES.p);
             } else if (!xseg && (dev > mxt || sang > mxa)) {
                 VER_LAST.outcome = VOUT_CAPPED;
@@ -2817,7 +2899,11 @@ static void process_keyframe(void) {
                  * frame (MH01 kidnap: 133->181 cm transient). Keep the
                  * map-internal healing, skip the display step; the WELD
                  * is the one snap that means something. */
-                if (segquiet_on() && CUR_SEG != 0 && !xseg) snap = 0;
+                if (segquiet_on() && CUR_SEG != 0 && !xseg && !lost) snap = 0;
+                /* (!lost: a verified post-loss RECOVERY inside a submap
+                 * removes real coasted-IMU error — suppressing THAT snap
+                 * leaves the live pose permanently wrong; SEGQUIET only
+                 * quiets healthy within-submap drift snaps.) */
                 int tight_applied = 0;
                 /* confidence weighting: blend the correction toward the
                  * current CORR by verification strength (healthy only —
@@ -2862,7 +2948,7 @@ static void process_keyframe(void) {
                         pose_compose(Dq, Dp, iq, ip, Eq, Ep);
                         moved = seg_weld(from, dst, Eq, Ep);
                         CUR_SEG = dst;
-                    } else {
+                    } else if (!lost) {
                         /* matched segment is YOUNGER (an orphan from a later
                          * loss episode, revisited from an older frame): pull
                          * IT onto us via E = CORR ∘ D⁻¹. Our own
@@ -2875,6 +2961,18 @@ static void process_keyframe(void) {
                         moved = seg_weld(from, dst, Eq, Ep);
                         memcpy(Dq, CORR.q, sizeof Dq);
                         memcpy(Dp, CORR.p, sizeof Dp);
+                    } else {
+                        /* LOST + younger orphan match: CORR is the STALE
+                         * pre-loss registration — using it to move the
+                         * orphan would corrupt it and fake a recovery
+                         * (review finding). Recover INTO the orphan's frame
+                         * instead: no keyframes move, CUR_SEG adopts the
+                         * orphan, the tail's CORR <- D registers us there.
+                         * A later old-segment match welds everything. */
+                        dst = src;
+                        from = src;
+                        moved = 0;
+                        CUR_SEG = src;
                     }
                     CLOUD_DIRTY = 1;
                     if (lost) {                    /* a weld IS a recovery */
@@ -3033,6 +3131,11 @@ static void process_keyframe(void) {
             memmove(&KFO[vpos], &KFO[vpos + 1],
                     sizeof(int) * (size_t)(KF_N - 1 - vpos));
             KF_N--;
+            /* REACT_A.kf is a TIME-ORDER index: remap across the shift
+             * (review finding — a stale index pins verification to the
+             * wrong keyframe after eviction) */
+            if (REACT_A.kf == vpos) { REACT_A.kf = -1; REACT_A.fails = 0; }
+            else if (REACT_A.kf > vpos) REACT_A.kf--;
         }
         work.last_used = work.ts;
         /* corrected session pose = current global correction ∘ odom. A
@@ -3054,6 +3157,7 @@ static void process_keyframe(void) {
                 if (lk < 0) continue;
                 lmb_ent *e = &LMB[lmb_slot_of(work.lm_id[lk])];
                 if (e->nobs == 0 || e->id != work.lm_id[lk]) {
+                    if (e->nobs == 0) LMB_LIVE++;  /* fresh slot */
                     e->id = work.lm_id[lk];        /* new / collision evict */
                     e->nobs = 0;
                 }

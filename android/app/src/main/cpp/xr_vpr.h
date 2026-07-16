@@ -31,6 +31,10 @@ void xr_vpr_set_model(const char *onnx_path);
 /* 1 once a session is up (i.e., after the first successful embed). */
 int xr_vpr_ready(void);
 
+/* 1 when the session runs on the CUDA EP (bench telemetry: a silent CPU
+ * fallback starves the map thread and collapses map density). */
+int xr_vpr_on_cuda(void);
+
 /* Embedding dimension of the active model (0 until a session is up). */
 int xr_vpr_dim(void);
 

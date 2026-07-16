@@ -21,6 +21,7 @@
 
 #include "xr_map.h"
 #include "xr_slam.h"
+#include "xr_vpr.h"
 #include "xr_xfeat.h"
 #include "xreal_core.h"
 
@@ -451,9 +452,10 @@ int main(int argc, char **argv) {
     int vpairs = 0, vinl = 0;
     if (use_map) xr_map_verify_stats(&vpairs, &vinl);
     fprintf(stderr,
-            "xr_replay done: pairs=%ld pushed=%ld warmup_skip=%ld imu=%ld "
+            "xr_replay done: vpr_ep=%s pairs=%ld pushed=%ld warmup_skip=%ld imu=%ld "
             "poses=%ld offers=%ld completion=%.1f%% kf=%d loops=%d "
             "last_verify=%d/%d\n",
+            vpr ? (xr_vpr_on_cuda() ? "cuda" : "cpu") : "off",
             line, frames_pushed, frames_skipped, imu_pushed, ctx.n_poses,
             ctx.n_offers, 100.0 * ctx.n_poses / (line ? line : 1), kf, loops,
             vinl, vpairs);
@@ -514,6 +516,15 @@ int main(int argc, char **argv) {
         uint8_t *pimg = malloc((size_t)XR_OW * XR_OH);
         float errs[4096];
         int ok_n = 0, err_n = 0;
+        if (reloc_clip < 1) reloc_clip = 1;
+        if (fn < 1) {
+            fprintf(stderr, "xr_replay: no frames indexed — skipping --reloc\n");
+            reloc_n = 0;
+        } else if (reloc_clip > (int)fn) {
+            fprintf(stderr, "xr_replay: --reloc-clip %d > %ld frames; clamped\n",
+                    reloc_clip, fn);
+            reloc_clip = (int)fn;
+        }
         srand(12345);   /* seeded: reproducible probe set */
         for (int k = 0; k < reloc_n && k < 4096; k++) {
             long fi0 = (long)((double)rand() / RAND_MAX *

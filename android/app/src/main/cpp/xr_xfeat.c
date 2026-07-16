@@ -15,6 +15,7 @@
 
 #include <dlfcn.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,6 +93,13 @@ static int ort_ok(OrtStatus *st, const char *what) {
     X.api->ReleaseStatus(st);
     return 0;
 }
+
+/* Serializes ALL extraction/sampling state (X.input, the static NMS/heap
+ * scratch planes, the dense caches): the map thread AND the XR_SEED
+ * feeding thread both call xr_xfeat_extract — unlocked they tear each
+ * other's zero-copy inference inputs and the dense cache (review finding:
+ * anchored descriptors sampled from the WRONG frame's map). */
+static pthread_mutex_t XF_MU = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---------------- shared ORT bring-up ---------------- */
 
@@ -496,9 +504,14 @@ static void xfeat_sample_one(float x, float y, int8_t out[64]) {
 }
 
 int xr_xfeat_sample(const float (*uv)[2], int n, int8_t (*desc)[64]) {
-    if (!X.dense_kind) return -1;          /* sparse graph: no dense map */
+    pthread_mutex_lock(&XF_MU);
+    if (!X.dense_kind) {                   /* sparse graph: no dense map */
+        pthread_mutex_unlock(&XF_MU);
+        return -1;
+    }
     for (int i = 0; i < n; i++)
         xfeat_sample_one(uv[i][0], uv[i][1], desc[i]);
+    pthread_mutex_unlock(&XF_MU);
     return n;
 }
 
@@ -543,6 +556,26 @@ static int xfeat_cpu_dense_extract(const uint8_t *img, float (*uv)[2],
         !ort_ok(X.api->GetTensorMutableData(ov[2], (void **)&rel), "rel")) {
         for (int k = 0; k < 3; k++) if (ov[k]) X.api->ReleaseValue(ov[k]);
         return -1;
+    }
+    /* validate the runtime feats shape against the compiled grid — a
+     * wrong-resolution model must not be memcpy'd at the compiled size */
+    {
+        OrtTensorTypeAndShapeInfo *ti = NULL;
+        int64_t d[4] = { 0 };
+        size_t nd = 0;
+        if (ort_ok(X.api->GetTensorTypeAndShape(ov[1], &ti), "feats shape")) {
+            X.api->GetDimensionsCount(ti, &nd);
+            X.api->GetDimensions(ti, d, nd < 4 ? nd : 4);
+            X.api->ReleaseTensorTypeAndShapeInfo(ti);
+        }
+        if (d[1] != 64 || d[2] != GRID_H || d[3] != GRID_W) {
+            LOGE("XFeat dense: feats %dx%dx%d != 64x%dx%d — wrong-resolution "
+                 "model, extraction off this frame", (int)d[1], (int)d[2],
+                 (int)d[3], GRID_H, GRID_W);
+            for (int k = 0; k < 3; k++)
+                if (ov[k]) X.api->ReleaseValue(ov[k]);
+            return -1;
+        }
     }
     memcpy(X.dense_f, feats, sizeof X.dense_f);
     X.dense_kind = 1;
@@ -726,15 +759,18 @@ static int xfeat_try_init(const char *model_path) {
     return 1;
 }
 
-/* Thread-safe: one caller runs the slow init; others fall back to ORB
- * until X.ready flips. A failed attempt is retryable (not a permanent
- * one-shot — the model may simply not have been staged yet). */
+/* Thread-safe: concurrent initializers WAIT and then re-check ready
+ * instead of failing — the old busy-flag fast-fail let the preload
+ * thread's in-flight init silently REJECT xr_map_set_use_xfeat(1), and
+ * a whole run would bench BAD/TEBLID under an --xfeat label (review
+ * finding). A failed attempt stays retryable. */
 int xr_xfeat_init(const char *model_path) {
     if (atomic_load_explicit(&X.ready, memory_order_acquire)) return 1;
-    static atomic_int busy;
-    if (atomic_exchange(&busy, 1)) return 0;
-    int ok = xfeat_try_init(model_path);
-    if (!ok) atomic_store(&busy, 0);
+    static pthread_mutex_t init_mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&init_mu);
+    int ok = atomic_load_explicit(&X.ready, memory_order_acquire)
+                 ? 1 : xfeat_try_init(model_path);
+    pthread_mutex_unlock(&init_mu);
     return ok;
 }
 
@@ -751,8 +787,8 @@ int xr_xfeat_npu_active(void) {
     return atomic_load_explicit(&X.npu_ready, memory_order_acquire);
 }
 
-int xr_xfeat_extract(const uint8_t *img, float (*uv)[2],
-                     int8_t (*desc)[64], int max) {
+static int xfeat_extract_inner(const uint8_t *img, float (*uv)[2],
+                               int8_t (*desc)[64], int max) {
     if (!atomic_load_explicit(&X.ready, memory_order_acquire)) return -1;
 
     if (atomic_load_explicit(&X.npu_ready, memory_order_acquire)) {
@@ -815,5 +851,34 @@ int xr_xfeat_extract(const uint8_t *img, float (*uv)[2],
     }
     for (int i = 0; i < 3; i++)
         if (ov[i]) X.api->ReleaseValue(ov[i]);
+    return n;
+}
+
+int xr_xfeat_extract(const uint8_t *img, float (*uv)[2],
+                     int8_t (*desc)[64], int max) {
+    pthread_mutex_lock(&XF_MU);
+    int n = xfeat_extract_inner(img, uv, desc, max);
+    pthread_mutex_unlock(&XF_MU);
+    return n;
+}
+
+/* Compound extract + landmark-anchor sampling under ONE lock hold: the
+ * anchors MUST come from the dense map of THIS extract's image — a
+ * separate sample call can race another thread's extract in between and
+ * silently store descriptors from the wrong frame (review finding). */
+int xr_xfeat_extract_anchored(const uint8_t *img, float (*uv)[2],
+                              int8_t (*desc)[64], int max,
+                              const float (*auv)[2], int n_anchor,
+                              int8_t (*adesc)[64], int *out_anchored) {
+    pthread_mutex_lock(&XF_MU);
+    int n = xfeat_extract_inner(img, uv, desc, max);
+    int a = 0;
+    if (n >= 0 && n_anchor > 0 && X.dense_kind) {
+        for (int i = 0; i < n_anchor; i++)
+            xfeat_sample_one(auv[i][0], auv[i][1], adesc[i]);
+        a = n_anchor;
+    }
+    pthread_mutex_unlock(&XF_MU);
+    if (out_anchored) *out_anchored = a;
     return n;
 }

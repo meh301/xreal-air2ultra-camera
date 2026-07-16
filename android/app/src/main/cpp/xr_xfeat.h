@@ -51,6 +51,15 @@ int xr_xfeat_extract(const uint8_t *img, float (*uv)[2],
  * (no dense map to sample). */
 int xr_xfeat_sample(const float (*uv)[2], int n, int8_t (*desc)[64]);
 
+/* Extract + anchor-sample ATOMICALLY (one internal lock hold): anchors
+ * are guaranteed to come from THIS image's dense map even when another
+ * thread (XR_SEED feeding) extracts concurrently. out_anchored = n_anchor
+ * on success, 0 when the active path has no dense map. */
+int xr_xfeat_extract_anchored(const uint8_t *img, float (*uv)[2],
+                              int8_t (*desc)[64], int max,
+                              const float (*auv)[2], int n_anchor,
+                              int8_t (*adesc)[64], int *out_anchored);
+
 /* 1 when the active path produces a dense map (NPU, or the dense CPU
  * export) — i.e., xr_xfeat_sample will work after the next extract. The
  * map layer uses this to decide whether to reserve keypoint budget for
