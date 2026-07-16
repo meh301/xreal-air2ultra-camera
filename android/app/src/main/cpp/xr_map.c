@@ -581,6 +581,15 @@ static int tight_mode(void) {
 #ifndef TIGHT_MAX_DEV_ANG
 #define TIGHT_MAX_DEV_ANG 0.35f         /* ~20 deg */
 #endif
+/* Sub-gate priors only against GENUINE REVISITS (fleet v9 verdict): an
+ * agreement with a recently-stored keyframe carries the same drift as the
+ * live pose — the prior then glues the VIO to its own drift and prevents
+ * the big correcting closure from ever crossing the snap gate (long lost
+ * 31→43 across every always-on tight config). Old-keyframe agreement is
+ * real loop information. */
+#ifndef TIGHT_REVISIT_NS
+#define TIGHT_REVISIT_NS 30000000000ull /* 30 s */
+#endif
 static void tight_post_prior(const float Dq[4], const float Dp[3],
                              uint64_t ts) {
     float ci[4], Eq[4], Ep[3], d[3];
@@ -2027,8 +2036,11 @@ static void process_keyframe(void) {
                  * TIGHT mode is different: the pull goes INTO the VIO
                  * optimizer as a weak prior, arbitrated against IMU and
                  * vision factors — post it when this verified frame agrees
-                 * with the previous one (2-frame consistency). */
-                if (TIGHT && confirmed)
+                 * with the previous one (2-frame consistency) AND the
+                 * matched keyframe is a genuine revisit (see
+                 * TIGHT_REVISIT_NS). */
+                if (TIGHT && confirmed &&
+                    work.ts - KFA(best_i).ts > TIGHT_REVISIT_NS)
                     tight_post_prior(Dq, Dp, work.ts);
                 VER_LAST.outcome = VOUT_GATED;
             } else if (!confirmed) {
