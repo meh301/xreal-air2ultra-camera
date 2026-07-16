@@ -435,8 +435,23 @@ int main(int argc, char **argv) {
                 errs[err_n++] = err;
                 ok_n++;
             }
-            printf("RELOC k=%d frame=%ld ok=%d inl=%d err_m=%.3f\n",
-                   k, fi, ok, inl, (double)err);
+            /* expected = the run's own session pose at that frame;
+             * landed = the probe's verified session pose (if any) —
+             * both emitted so the site can plot expected->landed */
+            {
+                double t = (double)fts[fi] * 1e-9;
+                long best = 0;
+                for (long j = 1; j < mn; j++)
+                    if (fabs(mts[j] - t) < fabs(mts[best] - t)) best = j;
+                printf("RELOC k=%d frame=%ld ok=%d inl=%d err_m=%.3f "
+                       "exp=%.3f,%.3f,%.3f got=%.3f,%.3f,%.3f\n",
+                       k, fi, ok, inl, (double)err,
+                       mn ? (double)mp[best][0] : 0.0,
+                       mn ? (double)mp[best][1] : 0.0,
+                       mn ? (double)mp[best][2] : 0.0,
+                       ok ? (double)pp[0] : 0.0, ok ? (double)pp[1] : 0.0,
+                       ok ? (double)pp[2] : 0.0);
+            }
         }
         /* summary: recall + median error + recall@0.25m/@0.10m */
         int u25 = 0, u10 = 0;

@@ -243,3 +243,12 @@ target). TODO: clip-probes (temporal accumulation = realistic wake),
 cross-sequence probes, per-arm comparison (MegaLoc should shine here),
 site tab. Two concurrency bugs found by the bench itself: lost-wakeup +
 MAP_LOCK self-deadlock (gdb) - both fixed, both product-relevant.
+
+### ? Reloc site tab (user request) — pipeline extended
+RELOC lines now emit exp=x,y,z (map-track pose at probe frame) and
+got=x,y,z (landed pose) so the site can plot expected->landed vectors.
+NEXT: exporter parses reloc logs -> data/reloc.json (per seq x arm:
+probes + recall/r@25/r@10/med); site 'Reloc' tab = summary bars + spatial
+plot on the orbit canvas (trajectory + expected->landed lines colored by
+error, failures as X at expected). Cross-system blackout-reloc protocol
+queued (OKVIS2 public code lacks loadMap - clip probes impossible there).
