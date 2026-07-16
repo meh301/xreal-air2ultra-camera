@@ -102,8 +102,22 @@ static int vpr_try_init(void) {
 #endif
     if (!ort_ok(V.api->CreateSession(V.env, V.path, opts, &V.session),
                 "CreateSession")) {
+        /* CUDA-EP init can fail TRANSIENTLY (GPU OOM under wide parallel
+         * benches — corridor4 lost its whole run's retrieval to one 536MB
+         * allocation). Retry the same model on plain CPU options before
+         * giving up: slow embeds beat a permanently blind map. */
         V.api->ReleaseSessionOptions(opts);
-        return 0;
+        opts = NULL;
+        if (!ort_ok(V.api->CreateSessionOptions(&opts), "CreateSessionOptions"))
+            return 0;
+        V.api->SetIntraOpNumThreads(opts, 2);
+        V.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL);
+        if (!ort_ok(V.api->CreateSession(V.env, V.path, opts, &V.session),
+                    "CreateSession (CPU retry)")) {
+            V.api->ReleaseSessionOptions(opts);
+            return 0;
+        }
+        LOGI("VPR: GPU session failed — running on CPU instead");
     }
     V.api->ReleaseSessionOptions(opts);
     if (!ort_ok(V.api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,
