@@ -220,3 +220,6 @@ corridors at large drift.
 | v4 | `1e4073c` tightened confirm | matrix_v4 | current site baseline |
 | v5 | + VPR full-recall sweep | matrix_v5 | ✅ keep (megaloc long −10.6) |
 | v6 | + SNAP_MIN 0.50 | matrix_v6 | ✅ new baseline (site) |
+
+### ? Fleet v8 � hybrid verdict: EuRoC/rooms HELD (bad 6.47=VIO, xfeat rooms cured 5.57), long STILL LOST (megaloc 31->44).
+Root cause: TIGHT_MAX_DEV (0.60) > SNAP_MIN (0.50) routed ALL confirmed closures (which arrive at 0.5-0.6m by construction) into the weak-prior path. The EuRoC/rooms wins come from SUB-GATE priors alone. Fix: confirmed closures always snap (TIGHT_MAX_DEV=0) - fastbench v9tight0 running (first 22-wide 15-min loop).
