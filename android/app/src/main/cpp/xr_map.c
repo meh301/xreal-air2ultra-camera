@@ -85,6 +85,14 @@
  * loop closures. 12 s keeps the 2-frame agreement requirement meaningful
  * while surviving slow-embed cadences. */
 #define CONFIRM_WINDOW_NS 12000000000ull
+/* Sub-gate correction servo: agreeing verified frames pull the map
+ * correction a small capped step toward the measured alignment instead of
+ * waiting for SNAP_MIN of drift and jumping. Gain per verified frame;
+ * translation/rotation step caps bound any single update. */
+#define SERVO_ALPHA 0.15f
+#define SERVO_MAX_T_M 0.02f
+#define SERVO_MAX_ANG_RAD 0.01f
+static long SERVO_STATS;
 #define CONFIRM_DP_M 0.25f
 #define CONFIRM_DA_RAD 0.09f       /* ~5 deg */
 /* loop SEARCH is the heavy work (descriptor extraction + match against
@@ -1647,10 +1655,10 @@ static void process_keyframe(void) {
      * is written only by this (map) thread, so reading it lock-free here is
      * safe. */
     static int healthy_search_n;
-    int gate = 0;
+    int gate = 0, sweep = 0;
     float wsp[3] = { 0, 0, 0 };
     if (!relocalizing) {
-        int sweep = (++healthy_search_n % FULL_SWEEP_EVERY) == 0;
+        sweep = (++healthy_search_n % FULL_SWEEP_EVERY) == 0;
         gate = !sweep;
         if (gate) {
             qrotv(snap_corr_q, work.p, wsp);
@@ -1695,6 +1703,13 @@ static void process_keyframe(void) {
         }
         for (int t = 0; t < bn; t++) vpr_pick[bi[t]] = 1;
         gate = 0;                      /* retrieval supersedes the gate */
+        /* Periodic full-recall sweep, same cadence the non-VPR path gets:
+         * appearance embeddings alias on repetitive structure (corridor
+         * segments all "look alike"), pushing the TRUE revisit out of the
+         * shortlist — matrix v4 measured plain descriptor scan beating both
+         * VPR arms on TUM-VI long for exactly this reason. The sweep
+         * restores worst-case recall at the cost the BAD arm already pays. */
+        if (sweep) use_vpr = 0;
     }
     for (int i = 0; i < lim; i++) {
         if (use_vpr && !vpr_pick[i]) continue;
@@ -1920,15 +1935,46 @@ static void process_keyframe(void) {
                      "match, ignored", best_i, nin, n3, covis, (double)dev,
                      (double)(sang * 57.3f));
             } else if (!worth) {
-                /* healthy and the VIO agrees with the map (or we just
-                 * snapped): do nothing — a recovery, not a continuous clamp.
-                 * KEEP any pending candidate: deviation flickers around
-                 * SNAP_MIN at room scale, and clearing here destroyed the
-                 * 2-frame confirmation forever (rooms closed zero loops).
-                 * But do NOT apply on agreement while sub-gate: the apply
-                 * itself must be re-earned by a worth frame, or transient
-                 * spikes snap good VIO onto stale map error (EuRoC). The
-                 * pending expires via CONFIRM_WINDOW. */
+                /* Healthy, deviation under the snap gate. Instead of doing
+                 * nothing until 0.30 m accumulates (and then jumping — the
+                 * causal-ATE-hostile snap OKVIS2 never needs because its
+                 * optimizer corrects continuously), run a low-gain SERVO:
+                 * when this verified frame AGREES with the previous verified
+                 * one (2-frame consistency, same test as confirmation), pull
+                 * the map correction a small capped fraction toward the
+                 * measured alignment. Free at runtime, smooth by
+                 * construction, and self-limiting: wrong-place matches don't
+                 * chain agreements. The full pending stays for the snap path. */
+                if (confirmed) {
+                    float a = SERVO_ALPHA;
+                    float dp[3] = { Dp[0] - CORR.p[0], Dp[1] - CORR.p[1],
+                                    Dp[2] - CORR.p[2] };
+                    float dpl = sqrtf(dp[0] * dp[0] + dp[1] * dp[1] +
+                                      dp[2] * dp[2]);
+                    if (a * dpl > SERVO_MAX_T_M) a = SERVO_MAX_T_M / dpl;
+                    float aq = a;
+                    if (aq * sang > SERVO_MAX_ANG_RAD && sang > 1e-6f)
+                        aq = SERVO_MAX_ANG_RAD / sang;
+                    /* nlerp toward Dq (sign-matched), lerp toward Dp */
+                    float dot = CORR.q[0] * Dq[0] + CORR.q[1] * Dq[1] +
+                                CORR.q[2] * Dq[2] + CORR.q[3] * Dq[3];
+                    float sgn = dot < 0 ? -1.f : 1.f, qn = 0;
+                    for (int c = 0; c < 4; c++) {
+                        CORR.q[c] = (1 - aq) * CORR.q[c] + aq * sgn * Dq[c];
+                        qn += CORR.q[c] * CORR.q[c];
+                    }
+                    qn = 1.f / sqrtf(qn);
+                    for (int c = 0; c < 4; c++) CORR.q[c] *= qn;
+                    for (int c = 0; c < 3; c++) CORR.p[c] += a * dp[c];
+                    CORR.gen++;
+                    SERVO_STATS++;
+                }
+                /* refresh the pending so successive sub-gate frames chain
+                 * their agreement (drift-consistent Ds keep servoing) */
+                PENDING_D.have = 1;
+                PENDING_D.ts = work.ts;
+                memcpy(PENDING_D.q, Dq, sizeof PENDING_D.q);
+                memcpy(PENDING_D.p, Dp, sizeof PENDING_D.p);
                 VER_LAST.outcome = VOUT_GATED;
             } else if (!confirmed) {
                 /* one good frame is not enough — wait for a 2nd that agrees */
