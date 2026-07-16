@@ -99,14 +99,15 @@ function barChart({ title, cats, series, refs = [], note = "", onBar }) {
     const act = series.filter(s => s.on);
     const rank = act.map(s => {
       const v = s.values.filter(x => x != null);
-      return v.length ? { label: s.label, color: s.color,
+      return v.length ? { label: s.label, color: s.color, med: median(v),
                           mean: v.reduce((a, b) => a + b, 0) / v.length, n: v.length } : null;
-    }).filter(Boolean).sort((a, b) => a.mean - b.mean);
+    }).filter(Boolean).sort((a, b) => a.med - b.med);
     vsHost.innerHTML = !rank.length ? "" :
+      `<span class="hint">median over sequences (mean on hover) · lower is better:</span>` +
       rank.map((r, i) =>
-        `<span class="vs-item${i === 0 ? " best" : ""}">` +
+        `<span class="vs-item${i === 0 ? " best" : ""}" title="mean ${fmt(r.mean)} cm over ${r.n} sequences">` +
         `<span class="dot" style="background:${r.color}"></span>` +
-        `${r.label} <b>${fmt(r.mean)}</b><small>·${r.n} seq</small></span>`
+        `${r.label} <b>${fmt(r.med)}</b><small>·${r.n} seq</small></span>`
       ).join(`<span class="vs-gt">&lt;</span>`);
   }
 
