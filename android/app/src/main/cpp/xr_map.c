@@ -471,12 +471,65 @@ void xr_map_reset(void) {
     pthread_mutex_unlock(&MAP_LOCK);
 }
 
+/* Correction RAMP (XR_RAMP env): glide the DISPLAY correction to a new
+ * target over RAMP_MS instead of stepping it — approximates OKVIS2's
+ * optimization-spread corrections for the output pose (causal ATE stops
+ * paying the step penalty; AR display stops visibly snapping). The map
+ * (CORR, keyframes, cloud) still updates instantly — only the emitted
+ * pose is smoothed. */
+#ifndef RAMP_MS
+#define RAMP_MS 500.0f
+#endif
+static int ramp_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_RAMP");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: correction RAMP ON (%.0f ms)", (double)RAMP_MS);
+    }
+    return v;
+}
+
 int xr_map_get_correction(float q[4], float p[3]) {
     pthread_mutex_lock(&MAP_LOCK);
     memcpy(q, LIVE.q, sizeof LIVE.q);   /* the DISPLAY correction */
     memcpy(p, LIVE.p, sizeof LIVE.p);
     int g = LIVE.gen;
     pthread_mutex_unlock(&MAP_LOCK);
+    if (ramp_on()) {
+        static struct {
+            int gen;                     /* target gen being ramped to */
+            float q0[4], p0[3];          /* ramp start (previous output) */
+            float qo[4], po[3];          /* last emitted output */
+            struct timespec t0;
+            int have;
+        } R;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (!R.have) {
+            memcpy(R.qo, q, 16); memcpy(R.po, p, 12);
+            R.gen = g; R.have = 1; R.t0 = now;
+        }
+        if (g != R.gen) {                /* new target: ramp from last output */
+            memcpy(R.q0, R.qo, 16); memcpy(R.p0, R.po, 12);
+            R.gen = g; R.t0 = now;
+        }
+        float dt_ms = (float)(now.tv_sec - R.t0.tv_sec) * 1000.f +
+                      (float)(now.tv_nsec - R.t0.tv_nsec) * 1e-6f;
+        float a = dt_ms >= RAMP_MS ? 1.f : dt_ms / RAMP_MS;
+        if (a < 1.f) {
+            float dot = R.q0[0]*q[0] + R.q0[1]*q[1] + R.q0[2]*q[2] + R.q0[3]*q[3];
+            float sgn = dot < 0 ? -1.f : 1.f, n2 = 0;
+            for (int c = 0; c < 4; c++) {
+                q[c] = (1 - a) * R.q0[c] * sgn + a * q[c];
+                n2 += q[c] * q[c];
+            }
+            n2 = 1.f / sqrtf(n2);
+            for (int c = 0; c < 4; c++) q[c] *= n2;
+            for (int c = 0; c < 3; c++) p[c] = (1 - a) * R.p0[c] + a * p[c];
+        }
+        memcpy(R.qo, q, 16); memcpy(R.po, p, 12);
+    }
     return g;
 }
 
@@ -589,6 +642,56 @@ static int tight_mode(void) {
  * real loop information. */
 #ifndef TIGHT_REVISIT_NS
 #define TIGHT_REVISIT_NS 30000000000ull /* 30 s */
+#endif
+
+/* --- reactivation-lite (XR_REACT env; OKVIS2's segment-reactivation analog)
+ * After a verified alignment, keep verifying against THAT keyframe at a
+ * fast cadence instead of re-running retrieval — "tracking against the
+ * map" while inside mapped space. Each success refreshes the anchor and
+ * (under XR_TIGHT + revisit gate) feeds the optimizer priors; repeated
+ * failures drop back to normal retrieval. Cost: one match+PnP against a
+ * single keyframe per pass — the cheapest query the layer can run. */
+#define REACT react_mode_on()
+static int react_mode_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_REACT");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: REACTIVATION-LITE ON");
+    }
+    return v;
+}
+#ifndef REACT_IV_NS
+#define REACT_IV_NS 400000000ull        /* verify cadence inside mapped space */
+#endif
+#ifndef REACT_WINDOW_NS
+#define REACT_WINDOW_NS 15000000000ull  /* anchor expires w/o a success */
+#endif
+#ifndef REACT_MAX_FAILS
+#define REACT_MAX_FAILS 3
+#endif
+static struct { int kf; uint64_t ts; int fails; } REACT_A = { -1, 0, 0 };
+
+/* --- confidence-weighted correction (XR_CONFW env) -----------------------
+ * The EuRoC finding: a geometrically-correct closure onto a WEAKER map
+ * anchor moves a good VIO toward map error. Weight the applied correction
+ * by verification strength (inlier ratio as the confidence proxy): strong
+ * alignments apply fully, marginal ones fractionally — the map keeps its
+ * evidence, the pose keeps its stability. LOST recovery always snaps. */
+static int confw_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_CONFW");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: CONFIDENCE-WEIGHTED corrections ON");
+    }
+    return v;
+}
+#ifndef CONFW_MIN_W
+#define CONFW_MIN_W 0.4f       /* weakest accepted alignment applies 40% */
+#endif
+#ifndef CONFW_FULL_RATIO
+#define CONFW_FULL_RATIO 0.65f /* inlier ratio at which weight reaches 1 */
 #endif
 static void tight_post_prior(const float Dq[4], const float Dp[3],
                              uint64_t ts) {
@@ -1633,6 +1736,11 @@ static void process_keyframe(void) {
      * previous search's measured cost. Small maps are unaffected. */
     if (lost && (uint64_t)last_search_cost_us * 4000ull > search_iv)
         search_iv = (uint64_t)last_search_cost_us * 4000ull;  /* us->ns, x4 */
+    /* reactivation-lite: while an anchor is fresh, verify against it at a
+     * fast cadence (single-kf query — negligible cost) */
+    int react_active = REACT && !lost && REACT_A.kf >= 0 &&
+                       work.ts - REACT_A.ts < REACT_WINDOW_NS;
+    if (react_active && search_iv > REACT_IV_NS) search_iv = REACT_IV_NS;
     int do_search = last_search_ns == 0 || q_only ||
                     work.ts - last_search_ns >= search_iv;
     int may_store = mapping && !q_only && !lost && !shake_freeze &&
@@ -1751,7 +1859,15 @@ static void process_keyframe(void) {
      * needs no trusted pose, which is exactly what LOST lacks — and full
      * recall is preserved because every keyframe is ranked, not windowed. */
     static uint8_t vpr_pick[XR_MAP_MAX_KF];    /* map thread only */
-    use_vpr = work.has_emb && lim > VPR_MIN_KF;
+    /* reactivation-lite: pin the scan to the fresh anchor — no retrieval,
+     * no gate; one match+PnP against a known-good keyframe */
+    int scan_lo = 0, scan_hi = lim;
+    if (react_active && REACT_A.kf < lim) {
+        scan_lo = REACT_A.kf;
+        scan_hi = REACT_A.kf + 1;
+        gate = 0;
+    }
+    use_vpr = work.has_emb && lim > VPR_MIN_KF && !(scan_hi - scan_lo == 1);
     if (use_vpr) {
         memset(vpr_pick, 0, (size_t)lim);
         float bs[VPR_SHORTLIST];
@@ -1790,7 +1906,7 @@ static void process_keyframe(void) {
          * restores worst-case recall at the cost the BAD arm already pays. */
         if (sweep) use_vpr = 0;
     }
-    for (int i = 0; i < lim; i++) {
+    for (int i = scan_lo; i < scan_hi; i++) {
         if (use_vpr && !vpr_pick[i]) continue;
         if (gate) {
             float gx = wsp[0] - KFA(i).pc[0], gy = wsp[1] - KFA(i).pc[1],
@@ -1947,6 +2063,11 @@ static void process_keyframe(void) {
             VER_LAST.pairs = n3;
             VER_LAST.inliers = nin;
             KFA(best_i).last_used = work.ts;   /* geometrically useful */
+            if (REACT && !lost) {              /* refresh reactivation anchor */
+                REACT_A.kf = best_i;
+                REACT_A.ts = work.ts;
+                REACT_A.fails = 0;
+            }
             /* deviation = how far the VIO has strayed from the map (D vs
              * the live correction, at the current pose) */
             float ns[3], os[3];
@@ -2060,6 +2181,28 @@ static void process_keyframe(void) {
                  * correction only snaps when recovery is on. */
                 int snap = atomic_load(&RECOVERY);
                 int tight_applied = 0;
+                /* confidence weighting: blend the correction toward the
+                 * current CORR by verification strength (healthy only —
+                 * recovery must snap fully) */
+                if (confw_on() && !lost) {
+                    float ratio = n3 > 0 ? (float)nin / (float)n3 : 0.f;
+                    float w = CONFW_MIN_W + (1.f - CONFW_MIN_W) *
+                              (ratio >= CONFW_FULL_RATIO
+                                   ? 1.f : ratio / CONFW_FULL_RATIO);
+                    if (w < 1.f) {
+                        float dot = CORR.q[0]*Dq[0] + CORR.q[1]*Dq[1] +
+                                    CORR.q[2]*Dq[2] + CORR.q[3]*Dq[3];
+                        float sgn = dot < 0 ? -1.f : 1.f, n2 = 0;
+                        for (int c = 0; c < 4; c++) {
+                            Dq[c] = (1 - w) * CORR.q[c] * sgn + w * Dq[c];
+                            n2 += Dq[c] * Dq[c];
+                        }
+                        n2 = 1.f / sqrtf(n2);
+                        for (int c = 0; c < 4; c++) Dq[c] *= n2;
+                        for (int c = 0; c < 3; c++)
+                            Dp[c] = (1 - w) * CORR.p[c] + w * Dp[c];
+                    }
+                }
                 if (lost) {
                     /* POST-LOSS RECOVERY. Storage was frozen through the
                      * discontinuity, so the stored map is already correct —
@@ -2142,6 +2285,15 @@ static void process_keyframe(void) {
         }
     }
     }   /* end apply (verified result, under the lock) */
+
+    /* reactivation-lite bookkeeping: a pinned pass that did NOT refresh the
+     * anchor is a failure — after a few, drop back to normal retrieval */
+    if (react_active && REACT_A.kf >= 0 && REACT_A.ts != work.ts) {
+        if (++REACT_A.fails >= REACT_MAX_FAILS) {
+            REACT_A.kf = -1;
+            REACT_A.fails = 0;
+        }
+    }
 
     /* store (mapping mode only; never for a stationary query — those are
      * matching-only; only frames that carry verifiable geometry, at a
