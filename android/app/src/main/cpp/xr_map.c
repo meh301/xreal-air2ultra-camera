@@ -68,9 +68,17 @@
  * clamp: only snap when the VIO has strayed meaningfully from the map,
  * and then not again for a cooldown (repeated micro-snaps read as
  * jitter). Below the deviation gate the VIO is trusted as-is. */
+/* Tunables below are #ifndef-guarded so the bench can sweep them via
+ * compiler -D without touching source (make EXTRA="-DSNAP_MIN_M=0.15f"). */
+#ifndef SNAP_MIN_M
 #define SNAP_MIN_M 0.30f
+#endif
+#ifndef SNAP_MIN_ANG_RAD
 #define SNAP_MIN_ANG_RAD 0.14f     /* ~8 deg */
+#endif
+#ifndef SNAP_COOLDOWN_NS
 #define SNAP_COOLDOWN_NS 1500000000ull
+#endif
 /* the matched place must be an ESTABLISHED cluster: this many DISTINCT
  * keyframes must each supply a geometric INLIER (not just a raw match) —
  * a lone shake-spawned keyframe or a two-frame junk cluster is rejected */
@@ -126,7 +134,9 @@ enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
  * per-keypoint descriptor scoring. Keyframes stored before the model came
  * up (has_emb=0) stay always-eligible so a mid-session rollout can't hide
  * part of the map. */
+#ifndef VPR_SHORTLIST
 #define VPR_SHORTLIST 12
+#endif
 #define VPR_MIN_SIM 0.25f
 #define VPR_MIN_KF (VPR_SHORTLIST + 4)  /* smaller maps: full scan is cheap */
 /* HEALTHY loop-detection coarse gate: only full-match keyframes whose
@@ -136,7 +146,9 @@ enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
  * recovery ignores the gate (recall must not regress). This cuts the
  * dominant per-search matching from O(all keyframes) toward O(local). */
 #define SHORTLIST_R_M 10.0f
+#ifndef FULL_SWEEP_EVERY
 #define FULL_SWEEP_EVERY 8
+#endif
 /* displayed keyframe-derived cloud cap — a generous safety ceiling, not a
  * budget: the map is really bounded by the 200-keyframe rolling cap, and
  * drawing points is cheap (GL_POINTS, ~linear). This shows essentially the
