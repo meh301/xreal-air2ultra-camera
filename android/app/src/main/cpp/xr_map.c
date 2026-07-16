@@ -551,6 +551,12 @@ static int tight_mode(void) {
 #define TIGHT_SIGMA_T 0.07f
 #define TIGHT_SIGMA_R 0.035f            /* ~2 deg */
 #define TIGHT_EXPIRY_NS 700000000ull    /* prior lives 0.7 s of frame time */
+/* Hybrid split (fleet v7 evidence): weak priors absorb SMALL corrections
+ * perfectly (EuRoC/rooms reached VIO parity) but cannot move meter-scale
+ * corridor drift (long lost its 14cm gains, map==VIO). Above this deviation
+ * a confirmed closure takes the classic snap+deform path even in TIGHT. */
+#define TIGHT_MAX_DEV_M 0.60f
+#define TIGHT_MAX_DEV_ANG 0.35f         /* ~20 deg */
 static void tight_post_prior(const float Dq[4], const float Dp[3],
                              uint64_t ts) {
     float ci[4], Eq[4], Ep[3], d[3];
@@ -2004,6 +2010,7 @@ static void process_keyframe(void) {
                  * keyframes attach in the healed frame; the DISPLAY
                  * correction only snaps when recovery is on. */
                 int snap = atomic_load(&RECOVERY);
+                int tight_applied = 0;
                 if (lost) {
                     /* POST-LOSS RECOVERY. Storage was frozen through the
                      * discontinuity, so the stored map is already correct —
@@ -2017,7 +2024,8 @@ static void process_keyframe(void) {
                          "stored map held fixed%s", best_i, (double)dev,
                          (double)(sang * 57.3f), nin, n3, covis,
                          snap ? " + pose snapped" : "");
-                } else if (TIGHT) {
+                } else if (TIGHT && dev <= TIGHT_MAX_DEV_M &&
+                           sang <= TIGHT_MAX_DEV_ANG) {
                     /* TIGHT: hand the confirmed closure to the VIO optimizer
                      * as a weak prior instead of stepping CORR + deforming.
                      * The estimator spreads the correction against IMU and
@@ -2025,6 +2033,7 @@ static void process_keyframe(void) {
                      * it absorbs, so the map layer converges without ever
                      * discontinuity-stepping the output (OKVIS2 property). */
                     tight_post_prior(Dq, Dp, work.ts);
+                    tight_applied = 1;
                     LAST_SNAP_NS = work.ts;
                     PENDING_D.have = 0;
                     LOOP_STATS.count++;
@@ -2049,7 +2058,7 @@ static void process_keyframe(void) {
                          (double)dev, (double)(sang * 57.3f), nin, n3, covis,
                          snap ? " + pose snapped" : "");
                 }
-                if (!(TIGHT && !lost)) {
+                if (!tight_applied) {
                     memcpy(CORR.q, Dq, sizeof CORR.q);
                     memcpy(CORR.p, Dp, sizeof CORR.p);
                     CORR.gen++;
