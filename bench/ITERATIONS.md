@@ -93,21 +93,24 @@ corridors at large drift.
 
 ---
 
-## In flight (moon shot)
+## Moon shot: map→VIO tight coupling
 
-### ⏳ Fleet v7 — map→VIO tight coupling (`XR_TIGHT`)
-- **Commits**: `e19a061` (app) + basalt fork `55d6563`. Verified alignments
-  become weak unary SE(3) priors (σ 7 cm / 2°, 0.7 s expiry) inside
-  Basalt's sliding-window optimizer (H += W, b += W·r on the newest state
-  after get_dense_H_b; J = I under decoupled increments). Posted on
-  confirmed closures AND agreeing sub-gate frames — the servo done right:
-  the optimizer arbitrates instead of blind stepping. CORR stays fixed and
-  converges as the VIO absorbs. LOST recovery unchanged. dlsym-gated VIT
-  extension; device build untouched (env opt-in).
-- **Smoke**: MH_01 tight map = **4.59 cm = VIO exactly** (v6 ~6.4, v4 12.1,
-  v3 20+) — zero map penalty on the canary, correction absorbed smoothly.
-- Success = EuRoC/rooms +map ≈ VIO fleet-wide, long holds ≤31, and the
-  sub-gate priors unlock part of the rooms reactivation win.
+### ◐ Fleet v7 — pure tight coupling (`XR_TIGHT`) — SPLIT VERDICT
+- **Commits**: `e19a061` (app) + basalt fork `55d6563`. Weak unary SE(3)
+  priors (σ 7 cm / 2°, 0.7 s expiry) in Basalt's optimizer; posted on
+  confirmed closures AND agreeing sub-gate frames; CORR fixed, VIO absorbs.
+- **Fleet verdict**: EuRoC **WON** (bad+map 5.85 = VIO parity exactly);
+  rooms **WON BIG** (xfeat 13.1→5.58, xvpr 12.7→**5.51 = first sub-VIO
+  rooms result**); long **LOST** (megaloc 31→44.8 ≈ VIO — a 7 cm prior
+  cannot absorb meter-scale corridor corrections and tight had replaced
+  the snap entirely); MSD flat.
+- **Lesson**: priors and snaps are complementary regimes, not rivals.
+
+### ⏳ Fleet v8 — HYBRID (`525ef1f`)
+- Confirmed closures: prior path only when dev ≤ 0.60 m and ang ≤ 20°;
+  larger corrections keep classic snap+deform even under XR_TIGHT.
+  CORR-advance follows the path taken. Sub-gate priors unchanged.
+- Success = v7's EuRoC/rooms parity AND v6's long numbers (~31) together.
 
 ## Iteration 2 queue (ordered)
 
