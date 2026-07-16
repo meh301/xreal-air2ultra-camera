@@ -508,3 +508,21 @@ with 8 arms (union, base2, covkeepc, pgoc, lmdescc, react2c, mapseedc,
 tightc) x hunt list x3 at 10-wide, all-CUDA verified. Watchdog monitor
 live; adversarial code-review workflow over the session's changes in
 flight.
+
+### x UNION MATRIX SCORED (10-wide, mostly healthy maps) + 25 REVIEW FIXES
+Union (COVKEEP+PGO+LMDESC on dense+LG6) vs base, hunt medians:
+corridor3 35.1 -> 12.6 (!!), corridor2 36.9 -> 20.7, magistrale2 91.9 ->
+70.8, MOO15 43.0 -> 25.5, slides2 45.4 -> 32.4, corridor1 33.7 -> 28.6.
+EuRoC REGRESSES (MH_01 11.2 -> 19.0); tight alone = 5.9 (parity) -> the
+deploy config is UNION+TIGHT (compose: prior channel vs eviction/deform/
+bank). Residual infra noise: sporadic VPR-CPU fallbacks at 10-wide (GPU
+OOM transients; CPU-retry keeps runs alive; vpr_ep= telemetry added).
+Adversarial review workflow (34 agents): 25 confirmed findings, ALL
+FIXED (ce92fd4): XR_SEED extract race (compound extract_anchored API),
+xfeat init fast-fail (silent BAD-under-xfeat-label!), LMB epoch clear,
+lost+younger weld false recovery, probe react pinning, REACT2
+standalone, SEGQUIET recovery exemption, universal duty cap w/ full pass
+cost, dense shape validation, clip clamp, +15 more.
+IN FLIGHT: fixed_matrix (base/union/tight/union+tight x hunt x3 + utf
+reloc grid, FIXED binaries — the duty-cap fix changes cadence so all
+arms re-measure) -> fleet decision.
