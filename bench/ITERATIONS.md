@@ -1,0 +1,171 @@
+# Iteration ledger — toward best-in-class tracking on an embedded budget
+
+Living document. Every candidate improvement gets an entry: hypothesis, cost
+against the mobile budget, test protocol, and — once run — the commit hash and
+the measured verdict. Nothing ships on intuition; the benchmark decides.
+
+## Protocol
+
+- **Tune on the subset, validate on the fleet.** Subset = 9 sequences spanning
+  every failure regime (MH_01, MH_05, V2_03 · room1, room6 · corridor3,
+  corridor5, magistrale2 · MOO07), arms bad+vpr, 3 runs — ~1 h alongside other
+  work. Full fleet = 6 arms × 42 seqs × 5 runs (1,260 jobs, ~2–3 h GPU).
+- **One change per fleet** so attribution stays clean (v4 → v5 → v6 …).
+- **EuRoC is the canary**: the map layer must never hurt a healthy VIO.
+  Any "improvement" that regresses EuRoC +map is trust-weighting done wrong.
+- **Budget rule**: target is mobile/near-embedded. CPU-side changes must be
+  O(existing work); per-frame NPU additions need a measured ms figure; heavy
+  models only in per-event paths (closure candidates ≈ few Hz worst case).
+- Metric: causal ATE, median-of-per-sequence-medians per dataset group
+  (mean tracked as tail indicator). Scoring: `bench/host/export_site_data.py`
+  (in-process, ~2 min full matrix). Sweep scoring: `F:\slam_bench\score_sweep.py`.
+
+## Reference targets (same machine, same causal protocol)
+
+| group | our VIO | our best +map (v4) | OKVIS2 | OKVIS2+LC | notes |
+|---|---|---|---|---|---|
+| EuRoC | 5.76 | 8.29 (bad) | 5.19 | **3.82** | map must first do no harm |
+| rooms | 5.55 | 5.55 (flat) | 4.43 | **1.22** | their edge = segment reactivation |
+| long | 45.23 | **30.83** (bad) | — | ~63 (mean) | **we lead**: their BoW long-range failure |
+| MSD | 5.31 | 5.30 | 2.0 (LC) | 2.0 | short seqs; closures rarely engage |
+
+OKVIS2 design notes (what the gaps trace to): corrections enter through
+optimization (never pose steps); closures are re-observations of old
+landmarks; segment reactivation = tracking directly against the old map when
+re-entering it. Their weakness: DBoW/BRISK recall on repetitive fisheye
+corridors at large drift.
+
+---
+
+## Completed / verdicts
+
+### ✅ Loop-closure confirmation bugs (the "loops=0" hunt)
+- **Commits**: `95787bc` (pending survives sub-gate flicker; window 4→12 s),
+  `905cc81` (strong single-frame confirm), `1e4073c` (confirm must be
+  re-earned by a worth frame; single-frame confirm LOST-only).
+- **Verdict**: rooms/all-arms zero-closure bug fixed; v3 over-correction
+  (EuRoC 6.5→20 cm) rolled back by `1e4073c` → v4: EuRoC +map 8.3,
+  long 45.2→30.8. **Architectural finding**: map trusts stored anchor over
+  live VIO; when VIO > map quality, correct closures still hurt.
+
+### ✅ MegaLoc query starvation → CUDA EP
+- **Commit**: `0dec840` (`XR_ORT_CUDA` env, dlsym on dlopen handle).
+- **Verdict**: corridor3 retrieval 44→610 queries, 0→1 closures. Replay now
+  cadence-representative of Gen 5 NPU. (Device build untouched.)
+
+### ✅ VPR periodic full-recall sweep
+- **Commit**: `491b375`. Appearance embeddings alias on repetitive corridors
+  (v4: BAD brute 30.8 beat EigenPlaces 38.3 / MegaLoc 44.2 on long).
+- **Validation**: fleet v5 (matrix_v5) — IN FLIGHT.
+
+### ❌ Sub-gate correction servo (falsified)
+- **Commits**: `491b375` (in), `ba5cc70` (revert).
+- **Verdict**: MH_01 map 12→40 cm. With a biased map, any steady pull toward
+  it compounds error; 2-frame agreement trivially satisfied at small dev.
+  **Blocked on**: confidence weighting (below). Do not re-attempt before it.
+
+### ✅ Tunable sweep infrastructure
+- **Commit**: `5dcd1b1` (`#ifndef` guards + Makefile `EXTRA` hook).
+- **Sweep 1 verdict** (216 runs, subset):
+  - **SNAP_MIN 0.50 wins** — EuRoC ≈ VIO (protected), corridors keep gains,
+    magistrale2 91→80. → fleet v6.
+  - SNAP_MIN 0.15: EuRoC/mag2 catastrophic **but room1 13→7.7 cm** — early
+    small corrections DO help rooms; a global gate can't unlock them
+    (evidence for reactivation-lite).
+  - cooldown 6 s, sweep-every-4: no clear win.
+
+---
+
+## In flight
+
+### ⏳ Fleet v5 — retrieval sweep fix in isolation
+- v4 + `491b375`. Success = vpr/megaloc arms close toward BAD's 30.8 on long,
+  no EuRoC/rooms regression.
+
+### ⏳ Fleet v6 — v5 + SNAP_MIN_M=0.50 (sweep-validated)
+- Chained to auto-launch after v5. Success = EuRoC +map ≈ VIO (≤6.5),
+  long ≤31 held, mag2 improves.
+
+---
+
+## Iteration 2 queue (ordered)
+
+### ☐ Confidence-weighted deformation
+- **Hypothesis**: deform the *weaker* side. Weight from map-anchor age /
+  anchor-time VIO health vs live VIO health (tracked-feature count, IMU
+  consistency). When VIO healthy and map old → heal the MAP toward VIO
+  instead of stepping the pose. Directly targets the EuRoC 8.3→5.8 gap and
+  unblocks the servo.
+- **Cost**: zero (bookkeeping + existing graph_deform).
+- **Test**: subset sweep first (weight-function variants), then fleet.
+
+### ☐ Reactivation-lite (OKVIS2's rooms edge, map-layer-only)
+- **Hypothesis**: when retrieval confirms we're inside mapped space, verify
+  continuously (cheap PnP against the matched keyframe neighborhood each
+  keyframe) and apply small confidence-weighted corrections — not gate-based.
+  Sweep-1's snaplo room1 result (13→7.7) bounds the available win.
+- **Cost**: one PnP vs ~5 covis keyframes per kf (~ms, CPU).
+
+### ☐ Correction ramp (causal-ATE-friendly application)
+- **Hypothesis**: apply confirmed corrections as a ramp over N frames instead
+  of one pose step — approximates OKVIS2's optimization-spread correction.
+  Whole-run causal ATE stops paying the step penalty; tail unchanged.
+- **Cost**: zero.
+- **Note**: display-side too (AR comfort: no visible snap).
+
+### ☐ LighterGlue closure verifier (accelerated_features / verlab)
+- **Hypothesis**: learned matching on closure *candidate pairs* raises the
+  candidates→verified conversion (funnel currently dies at MNN association:
+  "26 matches — unverified"). XFeat+LighterGlue ≈ SP+LG at ⅓ cost (MegaDepth
+  0.444/0.610/0.746 vs 0.469/0.633/0.762).
+- **Cost**: per-event only (few Hz worst case) — CPU/GPU fine in replay, NPU
+  port (Gen 5) later. ONNX export via GlueFactory.
+- **Test**: A/B verified-closure counts + inlier ratios on subset, then fleet.
+
+### ☐ Retrieval shortlist tuning
+- **Hypothesis**: VPR_SHORTLIST 12 too narrow under aliasing; sweep K ∈
+  {12, 24, 48} × with/without full-recall sweep interplay.
+- **Cost**: K dot-products of 512-D per query — negligible.
+
+### ☐ Per-keyframe descriptor→landmark direct index
+- **Hypothesis**: BoW systems' direct-index trick; makes post-retrieval
+  association O(matches) not O(pairs). Pure CPU savings, frees budget for
+  LighterGlue.
+
+## Iteration 3 queue (Basalt integration)
+
+### ☐ XFeat keypoints seed Basalt detection (detector unification)
+- **Hypothesis**: one detection pass — XFeat dense (NPU, 3.6 ms A8W8/888)
+  maxima replace FAST as Basalt's corner candidates; KLT still tracks (VIO
+  precision preserved). Frees CPU, better-distributed keypoints.
+- **Cost**: net CPU *saving*; NPU per frame (already budgeted for xfeat arms).
+
+### ☐ Lifetime landmark descriptors
+- **Hypothesis**: sample the (already computed) dense descriptor map at
+  tracked landmark UVs every keyframe → landmarks carry multi-viewpoint
+  descriptor statistics → wide-baseline association robustness up (compounds
+  with LighterGlue). Plumbing half-exists (xr_slam reads Basalt landmark DB).
+
+### ☐ Tight coupling (verified map observations → Basalt factors)
+- **Hypothesis**: the actual OKVIS2 mechanism. Heavy surgery on Basalt's
+  marginalization; hold until the above shows what gap remains.
+
+## Parked / rejected
+
+- ❌ Sub-gate servo without confidence weighting (see above).
+- ❌ RTE as a divergence gate (`7b6b29a`) — structurally kills causal-LC
+  systems; ATE-only gates, RTE reported.
+- ☐ (someday) EVA/CVP fixed-function DFS for stereo — hardware access path
+  documented in F:\slam_bench\CVP_EVA_BRIEF.md.
+
+---
+
+## Fleet history
+
+| fleet | change under test | data | verdict |
+|---|---|---|---|
+| v2/matrix1+all | 6 arms baseline (broken closures) | matrix_all | superseded |
+| v3 | closure fixes (over-eager confirm) | matrix_v3 | EuRoC regression — rolled back |
+| v4 | `1e4073c` tightened confirm | matrix_v4 | current site baseline |
+| v5 | + VPR full-recall sweep | matrix_v5 | in flight |
+| v6 | + SNAP_MIN 0.50 | matrix_v6 | queued behind v5 |
