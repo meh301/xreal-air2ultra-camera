@@ -583,8 +583,11 @@ async function relocView() {
   async function draw() {
     const entries = data.entries.filter(e => e.probes.some(p => p.exp));
     const e = entries[+sel.value || 0];
-    const traj = await loadJSON(`data/traj/${e.seq}_${e.arm}.json`, null);
-    const base = traj && traj.est ? traj.est : e.probes.filter(p => p.exp).map(p => p.exp);
+    /* SESSION-frame trajectory shipped inside the reloc entry — the traj/
+     * jsons are GT-aligned (different frame) and must not be mixed with
+     * session-frame probe positions (that was the floating-blob bug). */
+    const traj = e.traj ? { est: e.traj } : null;
+    const base = traj ? traj.est : e.probes.filter(p => p.exp).map(p => p.exp);
     const withO = base.filter(Boolean).concat([[0, 0, 0]]);
     const lo = [0, 1, 2].map(k => Math.min(...withO.map(p => p[k] || 0)));
     const hi = [0, 1, 2].map(k => Math.max(...withO.map(p => p[k] || 0)));

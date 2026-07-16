@@ -202,11 +202,22 @@ def parse_reloc(reloc_dirs, out):
             s = ps.search(txt)
             if not s:
                 continue
-            entries.append({"seq": seq, "arm": arm,
-                            "n": int(s.group(1)), "verified": int(s.group(2)),
-                            "recall": float(s.group(3)), "r25": float(s.group(4)),
-                            "r10": float(s.group(5)), "med": float(s.group(6)),
-                            "probes": probes})
+            entry = {"seq": seq, "arm": arm,
+                     "n": int(s.group(1)), "verified": int(s.group(2)),
+                     "recall": float(s.group(3)), "r25": float(s.group(4)),
+                     "r10": float(s.group(5)), "med": float(s.group(6)),
+                     "probes": probes}
+            # SESSION-frame trajectory (same frame as exp/got — the aligned
+            # traj jsons are in the GT frame and MUST NOT be mixed in)
+            mt = f.with_name(f.stem + "_map.tum")
+            if mt.exists():
+                import numpy as np
+                a = np.loadtxt(mt)
+                if a.ndim == 2 and len(a) > 2:
+                    step = max(1, len(a) // 800)
+                    entry["traj"] = [[round(float(v), 3) for v in row]
+                                     for row in a[::step, 1:4]]
+            entries.append(entry)
     (out / "reloc.json").write_text(json.dumps({"entries": entries}))
     print(f"reloc.json: {len(entries)} seq-arm entries")
     return len(entries)
