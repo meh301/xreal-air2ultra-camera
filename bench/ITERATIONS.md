@@ -399,3 +399,29 @@ sampling AT landmark uvs (exact 2D-3D association, like BAD's anchoring
 and the device NPU dense tail) -> should fix corridor reloc recall, MSD
 xfeat regression, rooms-xfeat 13cm fleet outlier, AND xfeat-arm loop
 closures in one move.
+
+### x DENSE-ANCHORED XFEAT: THE UNLOCK LANDED (f3e3131)
+Two root-cause fixes shipped together:
+1. SPARSE EXPORT WAS BROKEN OFF-TRACE-SIZE: onnx/xfeat.onnx bakes its
+   InterpolateSparse2d normgrid divisor at the 480x640 trace ([479,639]
+   constant) - at 512x512 y-scale ~25% off, at 640x480 axes TRANSPOSED.
+   Every container xfeat result to date ran warped descriptors ("worked"
+   only because query+store warp identically). Device unaffected (raster
+   = trace; NPU is dense). Replaced by xfeat_dense_dyn.onnx (symbolic
+   shapes, torch-validated at 3 resolutions, cos 0.996).
+2. LANDMARK ANCHORING: dense C tail (float twin of the NPU tail) +
+   xr_xfeat_sample -> descriptors AT landmark uvs, exact lm_of_kp.
+Smoke (30 probes): room1 100% recall / r@25 100% / med 9.6cm (BAD 63%,
+sparse-xfeat 57-73%); MOO07 100% / 9.4cm (was 70% BAD, 17% corrupt);
+corridor3 16.7 -> 26.7% with LG6, med 3.4cm. Funnel healed: bestm=64 ->
+n3=55 -> nin=49 (was 80 -> 13 -> 0).
+LighterGlue L6 (FULL official 6-layer; our L3 was a half-depth cut, and
+torch 2.13's dynamo exporter silently produced a degenerate L6 graph -
+dynamo=False fixed it, validated 406/410) helps on CLEAN descriptors
+(+10pts corridor3); on corrupted ones it was worse than L3 (deep
+attention trusts descriptor-position consistency more).
+Remaining corridor failures = bestm~0 probes: viewpoints never mapped
+(one-way walks) -> map-side coverage is the next axis.
+IN FLIGHT: dense_batch.sh (92 jobs) = full 13-seq reloc grid x
+{xdense, xdenselg6} + hunt-list ATE x3 runs (does anchoring move the
+corridor1-3 LOOP-CLOSURE hunt + the rooms-xfeat 13cm outlier?).
