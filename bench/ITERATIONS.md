@@ -366,3 +366,12 @@ THE reloc hunt (LighterGlue verifier + coverage-aware retrieval).
 in-spec; VIO tracks ~30s then scale error compounds 3.2x @2min ->
 explosion). Suspects: lever arm, cam-IMU time offset, BMI160 noise
 config under engine vibration. PARKED pending core program.
+
+### x FLEET v11 VALIDATED -> NEW SITE BASELINE (matrix_v11, exported)
+Group medians map-track v11 (vs v6): euroc bad 5.79 (6.44) = VIO PARITY,
+megaloc 5.97 (6.91); rooms flat ~5.6; LONG bad 30.46 (38.06), vpr 31.40
+(38.80), megaloc 30.12 (31.12) - ALL THREE ARMS now at/below OKVIS2+LC
+long 31.78; msd flat 5.30. The revisit-age gate (priors only vs kfs >30s
+old) is the unifier: tight-coupling EuRoC wins + long-group gains, no
+regressions. Site exported: results(v11) + baselines + gravity-fair
+reloc.json + 520 traj files.
