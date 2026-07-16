@@ -2185,8 +2185,12 @@ static void *map_thread(void *arg) {
         if (PROBE_REQ) {               /* finalize probe on EVERY exit path */
             PROBE_REQ = 0;
             PROBE_RES.done = 1;        /* .ok filled by verify, else 0 */
-            pthread_cond_broadcast(&MAP_COND);
         }
+        /* ALWAYS wake waiters: a probe submitter may be sleeping on
+         * "mailbox full" from a preceding regular offer — without this
+         * broadcast that wait is a lost-wakeup deadlock (probe hung the
+         * first reloc test for an hour at 0% CPU). */
+        pthread_cond_broadcast(&MAP_COND);
     }
     return NULL;
 }
