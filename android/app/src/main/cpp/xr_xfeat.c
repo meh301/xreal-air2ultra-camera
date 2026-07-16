@@ -54,11 +54,23 @@ static struct {
     OrtMemoryInfo *meminfo;
     int ort_up;              /* api/env/meminfo initialized */
 
-    /* CPU path: full xfeat.onnx (detect+NMS+topK+sampling in-graph) */
+    /* CPU path: full xfeat.onnx (detect+NMS+topK+sampling in-graph), OR the
+     * DENSE export (feats/scores/reliability maps, float IO) with the same
+     * C tail the NPU path uses — the dense variant additionally enables
+     * xr_xfeat_sample (descriptors at arbitrary uvs: landmark anchoring). */
     OrtSession *session;
     char in_name[64];
-    char out_names[3][64];   /* keypoints, descriptors, scores */
+    char out_names[3][64];   /* sparse: keypoints, descriptors, scores;
+                              * dense: by role 0 scores, 1 feats, 2 rel */
+    int cpu_dense;           /* CPU session is the dense export */
+    int dense_in_ch;         /* input channels the dense graph traced (1/3) */
     float input[3 * IMG_H * IMG_W];
+
+    /* last extract's dense descriptor map, for xr_xfeat_sample (map thread
+     * only). kind: 0 none, 1 float (CPU dense), 2 u8 (NPU dense). */
+    int dense_kind;
+    float dense_f[64 * GRID_H * GRID_W];
+    uint8_t dense_u8[64 * GRID_H * GRID_W];
 
     /* NPU path: dense EPContext (score/desc/reliability maps, u8 IO) */
     OrtSession *npu_session;
@@ -298,6 +310,9 @@ static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
         else if (X.role[i] == 1) dns = p;
         else rel = p;
     }
+    /* stash the dense map for xr_xfeat_sample (landmark anchoring) */
+    memcpy(X.dense_u8, dns, sizeof X.dense_u8);
+    X.dense_kind = 2;
 
     /* separable 5x5 max filter, row pass into a static staging plane */
     static uint8_t rowmax[IMG_H * IMG_W];
@@ -423,6 +438,206 @@ static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
     return hn;
 }
 
+/* ---------------- shared bilinear descriptor sampler ---------------- */
+
+/* Bilinear 64-D descriptor at pixel (x,y) from whichever dense map the
+ * last extract cached; L2-normalized, int8-quantized (round(v*127)).
+ *
+ * FLOAT path uses XFeat's exact InterpolateSparse2d convention, validated
+ * against torch grid_sample(align_corners=false) to 5e-7 (dense-export
+ * agent): g = p * GRID / (IMG - 1) - 0.5, out-of-bounds taps contribute
+ * ZERO (no clamp). The u8/NPU path keeps the device-validated
+ * (p+0.5)/8-0.5 + clamp variant it has always used. */
+static void xfeat_sample_one(float x, float y, int8_t out[64]) {
+    const int plane = GRID_H * GRID_W;
+    float v[64], nrm = 0;
+    if (X.dense_kind == 1) {
+        float gx = x * (float)GRID_W / (float)(IMG_W - 1) - 0.5f;
+        float gy = y * (float)GRID_H / (float)(IMG_H - 1) - 0.5f;
+        float fxf = floorf(gx), fyf = floorf(gy);
+        int x0 = (int)fxf, y0 = (int)fyf;
+        float wx = gx - fxf, wy = gy - fyf;
+        float w[4] = { (1 - wy) * (1 - wx), (1 - wy) * wx,
+                       wy * (1 - wx), wy * wx };
+        int xs[4] = { x0, x0 + 1, x0, x0 + 1 };
+        int ys[4] = { y0, y0, y0 + 1, y0 + 1 };
+        for (int c = 0; c < 64; c++) v[c] = 0;
+        for (int t = 0; t < 4; t++) {
+            if (xs[t] < 0 || xs[t] >= GRID_W || ys[t] < 0 || ys[t] >= GRID_H)
+                continue;                  /* grid_sample zeros padding */
+            const float *p = X.dense_f + ys[t] * GRID_W + xs[t];
+            for (int c = 0; c < 64; c++) v[c] += w[t] * p[c * plane];
+        }
+        for (int c = 0; c < 64; c++) nrm += v[c] * v[c];
+    } else {                               /* u8 (NPU): offset -127, scale
+                                              cancels in the L2 norm */
+        float gx = (x + 0.5f) * 0.125f - 0.5f;
+        float gy = (y + 0.5f) * 0.125f - 0.5f;
+        if (gx < 0) gx = 0; if (gx > GRID_W - 1.001f) gx = GRID_W - 1.001f;
+        if (gy < 0) gy = 0; if (gy > GRID_H - 1.001f) gy = GRID_H - 1.001f;
+        int ix = (int)gx, iy = (int)gy;
+        float fx = gx - ix, fy = gy - iy;
+        float w00 = (1 - fy) * (1 - fx), w01 = (1 - fy) * fx;
+        float w10 = fy * (1 - fx), w11 = fy * fx;
+        const uint8_t *base = X.dense_u8 + iy * GRID_W + ix;
+        for (int c = 0; c < 64; c++) {
+            const uint8_t *p = base + c * plane;
+            float d = w00 * (p[0] - 127) + w01 * (p[1] - 127) +
+                      w10 * (p[GRID_W] - 127) + w11 * (p[GRID_W + 1] - 127);
+            v[c] = d;
+            nrm += d * d;
+        }
+    }
+    nrm = nrm > 1e-12f ? 127.0f / sqrtf(nrm) : 0.0f;
+    for (int c = 0; c < 64; c++) {
+        float q = v[c] * nrm;
+        out[c] = (int8_t)(q > 127.f ? 127 : q < -127.f ? -127 : lroundf(q));
+    }
+}
+
+int xr_xfeat_sample(const float (*uv)[2], int n, int8_t (*desc)[64]) {
+    if (!X.dense_kind) return -1;          /* sparse graph: no dense map */
+    for (int i = 0; i < n; i++)
+        xfeat_sample_one(uv[i][0], uv[i][1], desc[i]);
+    return n;
+}
+
+int xr_xfeat_can_sample(void) {
+    return X.cpu_dense ||
+           atomic_load_explicit(&X.npu_ready, memory_order_acquire);
+}
+
+/* ---------------- CPU DENSE path (xfeat_dense_dyn.onnx + C tail) -------- */
+
+/* Float twin of the NPU tail: 5x5 NMS on the float heatmap, reliability-
+ * weighted top-K, bilinear descriptor sampling — and the feats map cached
+ * for xr_xfeat_sample. */
+#define XFC_SCORE_THR 0.05f               /* official detect threshold */
+
+static int xfeat_cpu_dense_extract(const uint8_t *img, float (*uv)[2],
+                                   int8_t (*desc)[64], int max) {
+    const int plane_px = IMG_H * IMG_W;
+    for (int i = 0; i < plane_px; i++) X.input[i] = (float)img[i];
+    if (X.dense_in_ch == 3) {
+        memcpy(X.input + plane_px, X.input, sizeof(float) * plane_px);
+        memcpy(X.input + 2 * plane_px, X.input, sizeof(float) * plane_px);
+    }
+    const int64_t shape[4] = { 1, X.dense_in_ch, IMG_H, IMG_W };
+    OrtValue *in = NULL;
+    if (!ort_ok(X.api->CreateTensorWithDataAsOrtValue(
+                    X.meminfo, X.input,
+                    sizeof(float) * (size_t)X.dense_in_ch * plane_px, shape, 4,
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in),
+                "dense CreateTensor"))
+        return -1;
+    const char *ins[1] = { X.in_name };
+    const char *outs[3] = { X.out_names[0], X.out_names[1], X.out_names[2] };
+    OrtValue *ov[3] = { NULL, NULL, NULL };
+    OrtStatus *st = X.api->Run(X.session, NULL, ins,
+                               (const OrtValue *const *)&in, 1, outs, 3, ov);
+    X.api->ReleaseValue(in);
+    if (!ort_ok(st, "dense Run")) return -1;
+    float *score = NULL, *feats = NULL, *rel = NULL;
+    if (!ort_ok(X.api->GetTensorMutableData(ov[0], (void **)&score), "scores") ||
+        !ort_ok(X.api->GetTensorMutableData(ov[1], (void **)&feats), "feats") ||
+        !ort_ok(X.api->GetTensorMutableData(ov[2], (void **)&rel), "rel")) {
+        for (int k = 0; k < 3; k++) if (ov[k]) X.api->ReleaseValue(ov[k]);
+        return -1;
+    }
+    memcpy(X.dense_f, feats, sizeof X.dense_f);
+    X.dense_kind = 1;
+
+    /* separable 5x5 max filter, row pass (float twin of the NPU tail) */
+    static float frowmax[IMG_H * IMG_W];
+    for (int y = 0; y < IMG_H; y++) {
+        const float *s = score + y * IMG_W;
+        float *r = frowmax + y * IMG_W;
+        for (int x = 0; x < IMG_W; x++) {
+            int x0 = x - 2 < 0 ? 0 : x - 2,
+                x1 = x + 2 >= IMG_W ? IMG_W - 1 : x + 2;
+            float m = 0;
+            for (int k = x0; k <= x1; k++) if (s[k] > m) m = s[k];
+            r[x] = m;
+        }
+    }
+    if (max > XR_XFEAT_MAX_KP) max = XR_XFEAT_MAX_KP;
+    static xfn_peak heap[XR_XFEAT_MAX_KP];
+    int hn = 0;
+    const int plane_g = GRID_H * GRID_W;
+    (void)plane_g;
+    for (int y = XFN_BORDER; y < IMG_H - XFN_BORDER; y++) {
+        const float *s = score + y * IMG_W;
+        for (int x = XFN_BORDER; x < IMG_W - XFN_BORDER; x++) {
+            float v = s[x];
+            if (v < XFC_SCORE_THR) continue;
+            float m = 0;
+            for (int dy = -2; dy <= 2; dy++) {
+                float rm = frowmax[(y + dy) * IMG_W + x];
+                if (rm > m) m = rm;
+            }
+            if (v != m) continue;
+            /* reliability via the same validated InterpolateSparse2d
+             * convention as descriptor sampling (zero-padded taps) */
+            float gx = (float)x * (float)GRID_W / (float)(IMG_W - 1) - 0.5f;
+            float gy = (float)y * (float)GRID_H / (float)(IMG_H - 1) - 0.5f;
+            float fxf = floorf(gx), fyf = floorf(gy);
+            int x0g = (int)fxf, y0g = (int)fyf;
+            float wx = gx - fxf, wy = gy - fyf;
+            float rl = 0;
+            const float wt[4] = { (1 - wy) * (1 - wx), (1 - wy) * wx,
+                                  wy * (1 - wx), wy * wx };
+            const int xs[4] = { x0g, x0g + 1, x0g, x0g + 1 };
+            const int ys[4] = { y0g, y0g, y0g + 1, y0g + 1 };
+            for (int t = 0; t < 4; t++) {
+                if (xs[t] < 0 || xs[t] >= GRID_W ||
+                    ys[t] < 0 || ys[t] >= GRID_H)
+                    continue;
+                rl += wt[t] * rel[ys[t] * GRID_W + xs[t]];
+            }
+            float sc = v * rl;
+            if (hn < max) {
+                int i = hn++;
+                heap[i] = (xfn_peak){ sc, (uint16_t)x, (uint16_t)y };
+                while (i && heap[(i - 1) / 2].sc > heap[i].sc) {
+                    xfn_peak t = heap[i]; heap[i] = heap[(i - 1) / 2];
+                    heap[(i - 1) / 2] = t; i = (i - 1) / 2;
+                }
+            } else if (sc > heap[0].sc) {
+                heap[0] = (xfn_peak){ sc, (uint16_t)x, (uint16_t)y };
+                int i = 0;
+                for (;;) {
+                    int l = 2 * i + 1, r = l + 1, sm = i;
+                    if (l < hn && heap[l].sc < heap[sm].sc) sm = l;
+                    if (r < hn && heap[r].sc < heap[sm].sc) sm = r;
+                    if (sm == i) break;
+                    xfn_peak t = heap[i]; heap[i] = heap[sm]; heap[sm] = t;
+                    i = sm;
+                }
+            }
+        }
+    }
+    for (int end = hn - 1; end > 0; end--) {
+        xfn_peak t = heap[0]; heap[0] = heap[end]; heap[end] = t;
+        int i = 0;
+        for (;;) {
+            int l = 2 * i + 1, r = l + 1, sm = i;
+            if (l < end && heap[l].sc < heap[sm].sc) sm = l;
+            if (r < end && heap[r].sc < heap[sm].sc) sm = r;
+            if (sm == i) break;
+            xfn_peak tt = heap[i]; heap[i] = heap[sm]; heap[sm] = tt;
+            i = sm;
+        }
+    }
+    for (int i = 0; i < hn; i++) {
+        uv[i][0] = (float)heap[i].x;
+        uv[i][1] = (float)heap[i].y;
+        xfeat_sample_one(uv[i][0], uv[i][1], desc[i]);
+    }
+    for (int i = 0; i < 3; i++)
+        if (ov[i]) X.api->ReleaseValue(ov[i]);
+    return hn;
+}
+
 /* ---------------- CPU path (original full graph) ---------------- */
 
 static int xfeat_try_init_cpu(const char *model_path) {
@@ -438,8 +653,13 @@ static int xfeat_try_init_cpu(const char *model_path) {
     }
     X.api->ReleaseSessionOptions(opts);
 
-    /* discover the io names (single input; outputs mapped by position:
-     * the export order is keypoints, descriptors, scores) */
+    /* discover the io names. Two possible graphs behind this path:
+     *  - sparse (original): outputs mapped by position — keypoints,
+     *    descriptors, scores;
+     *  - dense (xfeat_dense_dyn.onnx): outputs named feats / scores /
+     *    reliability, mapped by NAME into role slots (0 scores, 1 feats,
+     *    2 reliability) — shapes are symbolic in the dynamic export, so
+     *    name is the only reliable key. */
     OrtAllocator *alloc = NULL;
     X.api->GetAllocatorWithDefaultOptions(&alloc);
     char *name = NULL;
@@ -448,15 +668,50 @@ static int xfeat_try_init_cpu(const char *model_path) {
         return 0;
     strncpy(X.in_name, name, sizeof X.in_name - 1);
     alloc->Free(alloc, name);
+    int dense_mask = 0;
+    char raw[3][64];
     for (int i = 0; i < 3; i++) {
         if (!ort_ok(X.api->SessionGetOutputName(X.session, (size_t)i, alloc,
                                                 &name), "GetOutputName"))
             return 0;
-        strncpy(X.out_names[i], name, sizeof X.out_names[i] - 1);
+        strncpy(raw[i], name, sizeof raw[i] - 1);
+        raw[i][sizeof raw[i] - 1] = 0;
         alloc->Free(alloc, name);
     }
-    LOGI("XFeat CPU ready: %s (in=%s outs=%s,%s,%s)", model_path, X.in_name,
-         X.out_names[0], X.out_names[1], X.out_names[2]);
+    for (int i = 0; i < 3; i++) {
+        if (!strcmp(raw[i], "scores") || strstr(raw[i], "score")) {
+            strncpy(X.out_names[0], raw[i], sizeof X.out_names[0] - 1);
+            dense_mask |= 1;
+        } else if (!strcmp(raw[i], "feats")) {
+            strncpy(X.out_names[1], raw[i], sizeof X.out_names[1] - 1);
+            dense_mask |= 2;
+        } else if (!strcmp(raw[i], "reliability")) {
+            strncpy(X.out_names[2], raw[i], sizeof X.out_names[2] - 1);
+            dense_mask |= 4;
+        }
+    }
+    X.cpu_dense = dense_mask == 7;
+    if (!X.cpu_dense)                       /* sparse: positional as before */
+        for (int i = 0; i < 3; i++)
+            strncpy(X.out_names[i], raw[i], sizeof X.out_names[i] - 1);
+    /* input channel count (dense export traced 1-ch gray; sparse is 3-ch) */
+    X.dense_in_ch = 3;
+    OrtTypeInfo *ti = NULL;
+    const OrtTensorTypeAndShapeInfo *tsi = NULL;
+    if (X.api->SessionGetInputTypeInfo(X.session, 0, &ti) == NULL && ti) {
+        int64_t d[4] = { 0 };
+        size_t nd = 0;
+        X.api->CastTypeInfoToTensorInfo(ti, &tsi);
+        if (tsi) {
+            X.api->GetDimensionsCount(tsi, &nd);
+            X.api->GetDimensions(tsi, d, nd < 4 ? nd : 4);
+            if (d[1] == 1) X.dense_in_ch = 1;
+        }
+        X.api->ReleaseTypeInfo(ti);
+    }
+    LOGI("XFeat CPU ready: %s (%s graph, in=%s x%dch, outs=%s,%s,%s)",
+         model_path, X.cpu_dense ? "DENSE" : "sparse", X.in_name,
+         X.dense_in_ch, X.out_names[0], X.out_names[1], X.out_names[2]);
     return 1;
 }
 
@@ -507,6 +762,7 @@ int xr_xfeat_extract(const uint8_t *img, float (*uv)[2],
         LOGE("XFeat NPU extract failed — CPU fallback this frame");
     }
     if (!X.session) return -1;
+    if (X.cpu_dense) return xfeat_cpu_dense_extract(img, uv, desc, max);
 
     /* gray u8 -> float, replicated to 3 channels (raw 0..255 range) */
     const int plane = IMG_H * IMG_W;

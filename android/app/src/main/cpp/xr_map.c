@@ -1890,8 +1890,16 @@ static void process_keyframe(void) {
     /* descriptors: XFeat when selected AND available, BAD/TEBLID otherwise */
     if (atomic_load(&USE_XFEAT) && MODEL_PATH[0]) xr_xfeat_init(MODEL_PATH);
     if (atomic_load(&USE_XFEAT) && xr_xfeat_available()) {
+        /* landmark ANCHORING (dense paths): reserve budget so every VIO
+         * landmark gets a descriptor sampled AT its exact uv — the 2D-3D
+         * stage stops being starved by the proximity join below (probe
+         * ledgers: bestm 48-109 image matches collapsing to n3 0-36
+         * landmark-backed pairs = the corridor reloc killer, the MOO07
+         * xfeat regression, and the rooms-xfeat 13 cm fleet outlier). */
+        int anchors = xr_xfeat_can_sample() ? work.n_lm : 0;
+        if (anchors > XR_MAP_KP_PER_KF / 2) anchors = XR_MAP_KP_PER_KF / 2;
         int n = xr_xfeat_extract(img, work.kp_uv, work.desc.xfeat,
-                                 XR_MAP_KP_PER_KF);
+                                 XR_MAP_KP_PER_KF - anchors);
         if (n >= 0) {
             work.n_kp = n;
             work.desc_type = DESC_XFEAT;
@@ -1912,6 +1920,17 @@ static void process_keyframe(void) {
                     float d = du * du + dv * dv;
                     if (d < bd) { bd = d; work.lm_of_kp[j] = i; }
                 }
+            }
+            /* append the anchored descriptors: exact uv, exact landmark */
+            if (anchors > 0 &&
+                xr_xfeat_sample((const float (*)[2])work.lm_uv, anchors,
+                                &work.desc.xfeat[work.n_kp]) == anchors) {
+                for (int i = 0; i < anchors; i++) {
+                    work.kp_uv[work.n_kp + i][0] = work.lm_uv[i][0];
+                    work.kp_uv[work.n_kp + i][1] = work.lm_uv[i][1];
+                    work.lm_of_kp[work.n_kp + i] = i;
+                }
+                work.n_kp += anchors;
             }
         } else {
             bad_extract(img, &work);

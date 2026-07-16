@@ -42,4 +42,19 @@ int xr_xfeat_available(void);
 int xr_xfeat_extract(const uint8_t *img, float (*uv)[2],
                      int8_t (*desc)[64], int max);
 
+/* Sample descriptors at ARBITRARY pixel uvs from the dense map cached by
+ * the LAST xr_xfeat_extract call (same image, same map-thread pass) —
+ * landmark anchoring: every VIO landmark gets an exact descriptor, so
+ * loop/reloc verification is no longer starved by the kp<->landmark
+ * proximity join. Works behind the NPU dense path and the dense CPU
+ * export (xfeat_dense_dyn.onnx); returns -1 under the sparse CPU graph
+ * (no dense map to sample). */
+int xr_xfeat_sample(const float (*uv)[2], int n, int8_t (*desc)[64]);
+
+/* 1 when the active path produces a dense map (NPU, or the dense CPU
+ * export) — i.e., xr_xfeat_sample will work after the next extract. The
+ * map layer uses this to decide whether to reserve keypoint budget for
+ * landmark anchors. */
+int xr_xfeat_can_sample(void);
+
 #endif
