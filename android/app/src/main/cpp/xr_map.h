@@ -95,6 +95,11 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
 
 int xr_map_num_keyframes(void);      /* thread-safe (atomic) */
 
+/* Register the LighterGlue matcher ONNX (XFeat verification only): loop/
+ * reloc correspondence generation switches from greedy NN+margin to
+ * learned set matching. Cheap; lazy bring-up on first use. */
+void xr_map_set_lglue_model(const char *onnx_path);
+
 /* Reloc-benchmark probe (bench/test): retrieval + PnP verification for a
  * bare left image against the current map — returns 1 with the query's
  * SESSION-frame pose on a verified match. grav_q (Hamilton wxyz, may be

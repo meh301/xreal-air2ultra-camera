@@ -375,3 +375,27 @@ long 31.78; msd flat 5.30. The revisit-age gate (priors only vs kfs >30s
 old) is the unifier: tight-coupling EuRoC wins + long-group gains, no
 regressions. Site exported: results(v11) + baselines + gravity-fair
 reloc.json + 520 traj files.
+
+### x XFeat reloc arms + LighterGlue verifier (user callout: reloc had
+### only tested BAD local descriptors - the 3 arms varied retrieval only)
+reloc_xfeat grid (13 seqs x xfeat/xvpr/xmegaloc x 30 probes, EuRoC via
+736-crop): XFeat lifts ROOM recall decisively (room3 90-97% vs BAD
+73-77%, room2 83-90% vs 63-73%, corridor4 67-73% vs 50-57%) but
+precision drops everywhere (med 0.11-0.34m vs BAD 0.02-0.11m) and MSD
+regresses hard (MOO07 17-20% vs BAD 70%). Corridors 1/2/3/5 STILL dead
+(0-13%).
+LighterGlue INTEGRATED (xr_lighterglue.c: dlopen ORT, static-512 export,
+caller-side kpt normalization, int8/127 dequant, pad+index-filter;
+--lglue flag; reloc_pnp routes XFeat correspondence generation through
+learned matching, NN fallback): corridor1 3.3->6.7% - real but marginal.
+ROOT CAUSE isolated (probe LEDGERs): bestm 48-109 image matches collapse
+to n3 0-36 landmark-backed pairs - kp->landmark association (8px join)
+starves the 2D-3D stage; n3>=30 converts (~50% inliers, verifies),
+n3<15 dies. Retrieval fine (vprtop 0.76+), matching fine, geometry
+starved. Second mode: bestm~0 probes = viewpoint never mapped (one-way
+corridor walks) - no matcher can fix that; needs map-side coverage.
+NEXT UNLOCK: dense XFeat export for the ORT path + bilinear descriptor
+sampling AT landmark uvs (exact 2D-3D association, like BAD's anchoring
+and the device NPU dense tail) -> should fix corridor reloc recall, MSD
+xfeat regression, rooms-xfeat 13cm fleet outlier, AND xfeat-arm loop
+closures in one move.

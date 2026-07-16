@@ -24,6 +24,7 @@
 #include <android/log.h>
 
 #include "xr_slam.h"
+#include "xr_lighterglue.h"
 #include "xr_vpr.h"
 #include "xr_xfeat.h"
 #include "xr_teblid_params.h"
@@ -356,6 +357,13 @@ static void *xfeat_preload_thread(void *arg) {
  * brute-scan + spatial-gate behavior. */
 void xr_map_set_vpr_model(const char *onnx_path) {
     xr_vpr_set_model(onnx_path);
+}
+
+/* Register the LighterGlue matcher — XFeat-descriptor verification
+ * switches from greedy NN+margin to learned matching (reloc-recall
+ * feature; retrieval ranking stays NN). No-op for BAD/TEBLID maps. */
+void xr_map_set_lglue_model(const char *onnx_path) {
+    xr_lglue_set_model(onnx_path);
 }
 
 void xr_map_set_model(const char *onnx_path) {
@@ -1528,11 +1536,51 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     }
 
     /* 1b. candidate correspondences (query kp -> map landmark) with
-     * descriptor cost; best_i's matches enter the pool first */
+     * descriptor cost; best_i's matches enter the pool first.
+     * XFeat + LighterGlue (when registered): learned attention matching
+     * over the two keypoint SETS replaces greedy NN+margin — recovers the
+     * repetitive-structure matches NN loses (the corridor reloc-recall
+     * axis). Runs only here (few candidates), never in the retrieval
+     * scan. Falls back to NN on any inference failure. */
     static struct rc_cand cand[COVIS_MAX_CAND];
     int nc = 0;
+    int use_lg = !bad && xr_lglue_wanted();
     for (int c = 0; c < ncov && nc < COVIS_MAX_CAND; c++) {
         int s = cov[c];
+        if (use_lg) {
+            static int li0[XR_LGLUE_N], li1[XR_LGLUE_N];   /* map thread */
+            static float lsc[XR_LGLUE_N];
+            int nm = xr_lglue_match(w->kp_uv, w->desc.xfeat, w->n_kp,
+                                    KFA(s).kp_uv, KFA(s).desc.xfeat,
+                                    KFA(s).n_kp, (float)XR_OW, (float)XR_OH,
+                                    li0, li1, lsc, XR_LGLUE_N);
+            if (nm >= 0) {
+                for (int m = 0; m < nm && nc < COVIS_MAX_CAND; m++) {
+                    int i = li0[m];
+                    int lk = KFA(s).lm_of_kp[li1[m]];
+                    if (lk < 0) continue;          /* kp without a landmark */
+                    float dk2 = 0;
+                    for (int cc = 0; cc < 3; cc++) {
+                        float dd = KFA(s).lm_xyz[lk][cc] - KFA(s).p[cc];
+                        dk2 += dd * dd;
+                    }
+                    if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) continue;
+                    float ps[3];
+                    qrotv(covqd[c], KFA(s).lm_xyz[lk], ps);
+                    cand[nc].qkp = i;
+                    cand[nc].id = KFA(s).lm_id[lk];
+                    cand[nc].kf = s;
+                    /* lower = better, like the NN costs */
+                    cand[nc].cost = (int)((1.0f - lsc[m]) * 1000.0f);
+                    cand[nc].ps[0] = ps[0] + covpd[c][0];
+                    cand[nc].ps[1] = ps[1] + covpd[c][1];
+                    cand[nc].ps[2] = ps[2] + covpd[c][2];
+                    nc++;
+                }
+                continue;                          /* this keyframe done */
+            }
+            use_lg = 0;                /* bring-up failed: NN for the rest */
+        }
         int nkp = bad ? anchored_count(&KFA(s)) : KFA(s).n_kp;
         for (int i = 0; i < w->n_kp && nc < COVIS_MAX_CAND; i++) {
             int best = bad ? 999 : -(1 << 30), second = best, bj = -1;

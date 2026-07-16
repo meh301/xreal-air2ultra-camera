@@ -263,7 +263,7 @@ static void on_pose(const xr_slam_state *st_in, void *user) {
 
 int main(int argc, char **argv) {
     const char *pack = NULL, *out = NULL, *toml = NULL, *xfeat = NULL;
-    const char *vpr = NULL;
+    const char *vpr = NULL, *lglue = NULL;
     int inflight = 6, fast = 0, use_map = 1, reloc_n = 0;
     double kd_t0 = -1, kd_dur = 0;
     int seed_frontend = 0;   /* set after args: XR_SEED env + xfeat model */
@@ -273,6 +273,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--toml") && i + 1 < argc) toml = argv[++i];
         else if (!strcmp(argv[i], "--xfeat") && i + 1 < argc) xfeat = argv[++i];
         else if (!strcmp(argv[i], "--vpr") && i + 1 < argc) vpr = argv[++i];
+        else if (!strcmp(argv[i], "--lglue") && i + 1 < argc) lglue = argv[++i];
         else if (!strcmp(argv[i], "--inflight") && i + 1 < argc) inflight = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fast")) fast = 1;
         else if (!strcmp(argv[i], "--no-map")) use_map = 0;
@@ -336,6 +337,7 @@ int main(int argc, char **argv) {
             xr_map_set_use_xfeat(1);
         }
         if (vpr) xr_map_set_vpr_model(vpr);
+        if (lglue) xr_map_set_lglue_model(lglue);
     }
     /* v9 detector unification: XFeat maxima seed Basalt corner detection
      * (needs --xfeat for the model AND XR_SEED=1; extension is dlsym'd so

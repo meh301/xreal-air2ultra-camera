@@ -17,7 +17,7 @@ CFLAGS := -O3 -std=c11 -Wall -D_GNU_SOURCE -DXR_OW=$(XR_OW) -DXR_OH=$(XR_OH) \
 LDLIBS := -lm -ldl -pthread
 
 SRC := xr_replay_main.c $(CPP)/xr_slam.c $(CPP)/xr_map.c $(CPP)/xr_xfeat.c \
-       $(CPP)/xr_vpr.c $(CPP)/xr_liteanystereo.c
+       $(CPP)/xr_vpr.c $(CPP)/xr_lighterglue.c $(CPP)/xr_liteanystereo.c
 
 $(OUT): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
