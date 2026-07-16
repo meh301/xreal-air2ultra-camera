@@ -223,3 +223,13 @@ corridors at large drift.
 
 ### ? Fleet v8 — hybrid verdict: EuRoC/rooms HELD (bad 6.47=VIO, xfeat rooms cured 5.57), long STILL LOST (megaloc 31->44).
 Root cause: TIGHT_MAX_DEV (0.60) > SNAP_MIN (0.50) routed ALL confirmed closures (which arrive at 0.5-0.6m by construction) into the weak-prior path. The EuRoC/rooms wins come from SUB-GATE priors alone. Fix: confirmed closures always snap (TIGHT_MAX_DEV=0) - fastbench v9tight0 running (first 22-wide 15-min loop).
+
+### ? 4Seasons driving group (NEW dataset — 'see the limit')
+- Stereo GS 30fps 800x400 gray, 30cm baseline, IMU 2000Hz, RTK-fused GT
+  (GNSSPoses.txt 7DOF keyframes; times.txt maps frame_id->unix ts).
+  Downloading 3 training recordings (2 City-Loop-class 8.3/7.6GB + 1 mid
+  5.8GB) to /mnt/processing/4seasons + calibration. TODO: prep converter
+  (undistorted pinhole -> pack; 800x400 -> crop H to 384 for XFeat arms),
+  euroc-style toml, new site group 'drive'. NOTE fastbench v9tight0 was
+  INVALID (bare #define overrode -D; guards added) - v9 fleet relaunched
+  clean and is the real test.
