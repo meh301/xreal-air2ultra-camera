@@ -2313,16 +2313,17 @@ static void process_keyframe(void) {
                      * frame, so welding never yanks the established map. */
                     int src = KFA(best_i).seg;     /* matched segment */
                     float Eq[4], Ep[3], iq[4], ip[3];
-                    int moved, dst;
+                    int moved, dst, from;
                     if (src < CUR_SEG) {
                         /* matched segment is OLDER: adopt ITS frame. Move
                          * our whole segment there via E = D ∘ CORR⁻¹, then
                          * re-register the live odom with CORR = D (the
                          * shared tail below). */
                         dst = src;
+                        from = CUR_SEG;
                         pose_invert(CORR.q, CORR.p, iq, ip);
                         pose_compose(Dq, Dp, iq, ip, Eq, Ep);
-                        moved = seg_weld(CUR_SEG, dst, Eq, Ep);
+                        moved = seg_weld(from, dst, Eq, Ep);
                         CUR_SEG = dst;
                     } else {
                         /* matched segment is YOUNGER (an orphan from a later
@@ -2331,9 +2332,10 @@ static void process_keyframe(void) {
                          * registration is already right — neutralize the
                          * tail's CORR step. */
                         dst = CUR_SEG;
+                        from = src;
                         pose_invert(Dq, Dp, iq, ip);
                         pose_compose(CORR.q, CORR.p, iq, ip, Eq, Ep);
-                        moved = seg_weld(src, dst, Eq, Ep);
+                        moved = seg_weld(from, dst, Eq, Ep);
                         memcpy(Dq, CORR.q, sizeof Dq);
                         memcpy(Dp, CORR.p, sizeof Dp);
                     }
@@ -2344,7 +2346,7 @@ static void process_keyframe(void) {
                     }
                     LOGI("session map: kf#%d SUBMAP WELD seg=%d -> seg=%d "
                          "(%d keyframes re-registered, offset %.2fm %.0fdeg, "
-                         "%d/%d inliers, %d covis)%s", best_i, src, dst,
+                         "%d/%d inliers, %d covis)%s", best_i, from, dst,
                          moved, (double)dev, (double)(sang * 57.3f), nin, n3,
                          covis, snap ? " + pose snapped" : "");
                 } else if (lost) {
