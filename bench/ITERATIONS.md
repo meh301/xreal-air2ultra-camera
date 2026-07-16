@@ -22,12 +22,12 @@ the measured verdict. Nothing ships on intuition; the benchmark decides.
 
 ## Reference targets (same machine, same causal protocol)
 
-| group | our VIO | our best +map (v4) | OKVIS2 | OKVIS2+LC | notes |
+| group | our VIO | our best +map (v6) | OKVIS2 | OKVIS2+LC | notes |
 |---|---|---|---|---|---|
-| EuRoC | 5.76 | 8.29 (bad) | 5.19 | **3.82** | map must first do no harm |
-| rooms | 5.55 | 5.55 (flat) | 4.43 | **1.22** | their edge = segment reactivation |
-| long | 45.23 | **30.83** (bad) | — | ~63 (mean) | **we lead**: their BoW long-range failure |
-| MSD | 5.31 | 5.30 | 2.0 (LC) | 2.0 | short seqs; closures rarely engage |
+| EuRoC | 5.8 | 6.45 (bad) → 5.85 v7 | 5.19 | **3.82** | v7: map penalty = 0; gap is VIO-core |
+| rooms | 5.6 | 5.56 → 5.51 v7 (xvpr) | 4.43 | **1.22** | their edge = segment reactivation |
+| long | 44.9 | 31.1 (megaloc) | 89.6 | **31.8** | **PARITY** (median vs median!). Their profile is BIMODAL: corridor1–3 at 2.8–9.2 but corridor5/mag1/slides2 at 100–180; ours uniform ~20–45. Beating them = moving our working-closure seqs into their 3–9 cm class. (Earlier "we lead 2×" compared their MEAN 63 vs our MEDIAN — wrong, corrected.) |
+| MSD | 5.3 | 5.30 | ~2 | ~2 | short seqs; closures rarely engage |
 
 OKVIS2 design notes (what the gaps trace to): corrections enter through
 optimization (never pose steps); closures are re-observations of old
@@ -150,6 +150,24 @@ corridors at large drift.
 - **Hypothesis**: VPR_SHORTLIST 12 too narrow under aliasing; sweep K ∈
   {12, 24, 48} × with/without full-recall sweep interplay.
 - **Cost**: K dot-products of 512-D per query — negligible.
+
+### ☐ Relocalization benchmark (new evaluation axis — user-proposed)
+- **What**: after a full replay builds the session map, freeze it and feed
+  N randomly sampled frames (seeded; single frames and short 1 s clips)
+  from the raw data as stationary queries with no VIO context. Measure:
+  reloc recall @ (10 cm, 1°) and @ (25 cm, 2°), median position error of
+  successful relocs, and time/attempts-to-reloc. Cross-sequence variant:
+  rooms1–6 share one physical room and the corridors overlap — map on
+  seq A, probe frames from seq B = true VPR generalization.
+- **Why**: isolates retrieval+verification quality from drift/closure
+  dynamics — exactly the capability behind OKVIS2+LC's corridor
+  bimodality, and the axis where MegaLoc-8448 should finally beat BAD.
+  Also directly models the product scenario (headset wake / re-entry).
+- **How**: xr_map already has the stationary-query path (q_only → full
+  scan, RELOC_TOPK, store-suppressed). Needs: a probe API returning the
+  PnP map-frame pose for a query image, a `--reloc N` replay mode, a
+  scorer comparing against map-aligned GT, and a site tab (recall bars +
+  error CDFs per arm).
 
 ### ☐ Per-keyframe descriptor→landmark direct index
 - **Hypothesis**: BoW systems' direct-index trick; makes post-retrieval
