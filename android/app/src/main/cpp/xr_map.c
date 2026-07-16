@@ -875,6 +875,15 @@ static int react2_on(void) {
     }
     return v;
 }
+static int relocsweep_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_RELOCSWEEP");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: RELOC FULL-SWEEP ON (no shortlist when lost)");
+    }
+    return v;
+}
 #ifndef CONFW_MIN_W
 #define CONFW_MIN_W 0.4f       /* weakest accepted alignment applies 40% */
 #endif
@@ -2397,6 +2406,13 @@ static void process_keyframe(void) {
         gate = 0;
     }
     use_vpr = work.has_emb && lim > VPR_MIN_KF && !(scan_hi - scan_lo == 1);
+    /* XR_RELOCSWEEP: while RELOCALIZING, the shortlist is a liability —
+     * MegaLoc aliases repetitive corridors and can push the TRUE revisit
+     * out of the top-12, and unlike healthy loop search there is no
+     * periodic full sweep here. Measured: retrieval-blind corridor1
+     * probes brute-scanned to 23-37%% recall; the shortlist got 3%%.
+     * Full descriptor scan instead (the LOST cost-cap paces cadence). */
+    if (relocsweep_on() && relocalizing) use_vpr = 0;
     if (use_vpr) {
         memset(vpr_pick, 0, (size_t)lim);
         float bs[VPR_SHORTLIST];
