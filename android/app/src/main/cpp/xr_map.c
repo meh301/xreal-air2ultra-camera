@@ -1896,6 +1896,15 @@ static void process_keyframe(void) {
                 confirmed = dp2 < CONFIRM_DP_M * CONFIRM_DP_M &&
                             da < CONFIRM_DA_RAD;
             }
+            /* Strong single-frame confirm: with slow VPR embeddings the
+             * query cadence can be seconds (MegaLoc ~1 verified event per
+             * run) — a 2-frame agreement is then unreachable no matter the
+             * window. When the geometry alone is near-unambiguous (well
+             * above the strong gate, high inlier ratio, wide covisibility)
+             * accept a single frame. */
+            if (!confirmed && nin >= 2 * VER_STRONG_INLIERS &&
+                nin * 100 >= 60 * n3 && covis >= 12)
+                confirmed = 1;
 
             /* A verified alignment is worth pursuing when: we are LOST (ANY
              * alignment is a recovery candidate — even a small deviation,
