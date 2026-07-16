@@ -459,3 +459,32 @@ DENSE-STACK VERDICTS (dense_batch, arrived mid-implementation):
   needs fleet-scale runs. room1 map==vio 13.1 (no closure gain yet).
 NEXT: A/B matrix over the new flags on the hunt list (one flag at a
 time vs xdenselg6 base), then union of winners -> fleet.
+
+### x A/B MATRIX SCORED + THE MAP-DENSITY CONFOUND
+Store-count audit first: 20-wide all-MegaLoc batches STARVE the map
+thread (dense extract + embed per pass under GPU contention) -> corridor
+maps collapse from ~570 kfs (BAD arms, 12-wide) to 45-63 (dense arms,
+20-wide). The dense-arm corridor reloc "collapse" and the RELOCSWEEP
+non-result were DENSITY artifacts, not retrieval aliasing; the OOM-
+tainted 323-store maps were closest to truth. Arms whose flags add
+map-thread cost self-starved in the matrix (react2 60 / mapseed 123 /
+tight 52 stores) - their ATE numbers discarded, clean 10-wide retest
+chained. ARCH QUEUE: protect store throughput under load (skip embed on
+store-only passes; congestion-aware search skip).
+VALID ARMS vs dense+LG6 base (3 runs, hunt list):
+- XR_COVKEEP: corridor1 7.1 (base 27.8!!), corridor3 27.7, MH_05 16.8,
+  magistrale2 39.9 (base 86.9; v11 77-94; OKVIS2+LC 66.4 - FIRST TIME
+  UNDER THEM) - viewpoint-diverse retention keeps closure anchors alive
+  on long routes. Loss: corridor2 33.1 vs 25.5, MOO15 39 vs 31.
+- XR_PGO: corridor1 10.5, corridor3 36.3, magistrale2 73.1; loss
+  corridor2 50 vs 25.5. Composes with COVKEEP (different subsystems).
+- XR_LMDESC (ATE): mixed; its RELOC result is the point:
+### x LMDESC = THE CORRIDOR RELOC BREAKTHROUGH (ab_reloc, dense+LG6+bank)
+corridor1 46.7% recall / r@10 43% / med 4.8cm, corridor2 53.3%,
+corridor3 36.7%, corridor4 83.3% (r@10 77%), corridor5 40%, rooms
+93-100%, MH_01 83%, MOO07 90% - the direct 2D-3D channel bypasses
+retrieval exactly where it fails. clip15 similar except corridor1 0/30
+= starved map (68 stores), not a clips failure.
+IN FLIGHT: clean 5-wide corridor reloc rerun (xdense/xdenselg6/sweep) ->
+union_batch chained (union=COVKEEP+PGO+LMDESC vs base + clean retests of
+react2/mapseed/tight + union reloc grid) at 10-wide.
