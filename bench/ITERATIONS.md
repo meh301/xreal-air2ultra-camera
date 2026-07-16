@@ -255,3 +255,23 @@ queued (OKVIS2 public code lacks loadMap - clip probes impossible there).
 
 ### ? Fleet v9 — confirmed-always-snap: rooms CURED (xfeat 13->5.55), EuRoC ok, long STILL lost (megaloc 31->43).
 Eliminates the confirmed-closure routing as the cause. Root cause = SUB-GATE priors: on corridors they glue VIO to recently-mapped (equally drifted) kfs, preventing drift from ever crossing the gate where the big closure fires. v6 (no tight) = only config holding long 31. NEXT (v10): sub-gate prior ONLY when matched kf is a genuine revisit (age > ~30s) - old-kf agreement = loop info; recent-kf agreement = teaching VIO its own drift. Site stays on v6 until v10.
+
+### ? v10/v11 — revisit-age gate (TIGHT_REVISIT_NS 30s) — SUBSET WINNER
+fastbench v10revisit: EuRoC parity held (5.3-6.0), corridor1 30.1 = v6,
+corridor5 23.8 & slides2-megaloc 29.9 = NEW BESTS, mag2 <=97.5. The gate
+(priors only vs kfs >30s old) keeps tight-coupling wins AND long gains -
+the unifier. Fleet v11 validating (same defines, XR_TIGHT).
+
+### ? Blackout-splice generator (/root/blackout.py)
+pack + mav0 modes: drop camera frames for [t0,t0+dur) while IMU
+continues - the cross-system reloc protocol every baseline can run
+(OKVIS2's forced-reloc path; ORB3 also has atlas save/load for true cold
+probes). Next: generate blackout variants of room1/corridor3/MH_01,
+run ours + okvis2 + orb3, add recovery metrics to reloc tab.
+
+### ? 4Seasons converter (/root/conv4s.py) — CONVERTING
+Standalone container converter replicating pack formats exactly (pinhole
+=kb4-zero-dist, TS_cam_imu inverted for cam->IMU, GNSS scale applied to
+GT, ADIS16465-inflated noises). 3 recordings converting in parallel ->
+/mnt/processing/packs4s/{drive1_city,drive2_city,drive3_country};
+xr_replay_drive (800x400) built; /root/out/drive.toml staged.
