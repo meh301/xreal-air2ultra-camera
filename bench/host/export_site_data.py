@@ -179,6 +179,38 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
                 print(f"  ...{n}/{len(jobs)} scored", flush=True)
     return rows
 
+def parse_reloc(reloc_dirs, out):
+    """Parse reloc-benchmark logs (<seq>__<arm>.log with RELOC k= lines and
+    RELOC-SUMMARY) into reloc.json for the site's Reloc tab."""
+    pk = re.compile(r"RELOC k=(\d+) frame=(\d+) ok=(\d) inl=(\d+) err_m=([-\d.]+)"
+                    r"(?: exp=([-\d.]+),([-\d.]+),([-\d.]+) got=([-\d.]+),([-\d.]+),([-\d.]+))?")
+    ps = re.compile(r"RELOC-SUMMARY n=(\d+) verified=(\d+) recall=([\d.]+) "
+                    r"r@25cm=([\d.]+) r@10cm=([\d.]+) med_err_m=([-\d.]+)")
+    entries = []
+    for d in reloc_dirs:
+        for f in sorted(Path(d).glob("*__*.log")):
+            seq, arm = f.stem.split("__", 1)
+            txt = f.read_text(errors="replace")
+            probes = []
+            for m in pk.finditer(txt):
+                p = {"ok": int(m.group(3)), "inl": int(m.group(4)),
+                     "err": float(m.group(5))}
+                if m.group(6) is not None:
+                    p["exp"] = [float(m.group(i)) for i in (6, 7, 8)]
+                    p["got"] = [float(m.group(i)) for i in (9, 10, 11)]
+                probes.append(p)
+            s = ps.search(txt)
+            if not s:
+                continue
+            entries.append({"seq": seq, "arm": arm,
+                            "n": int(s.group(1)), "verified": int(s.group(2)),
+                            "recall": float(s.group(3)), "r25": float(s.group(4)),
+                            "r10": float(s.group(5)), "med": float(s.group(6)),
+                            "probes": probes})
+    (out / "reloc.json").write_text(json.dumps({"entries": entries}))
+    print(f"reloc.json: {len(entries)} seq-arm entries")
+    return len(entries)
+
 def parse_ledgers(log_dirs):
     out = defaultdict(lambda: {"searches": 0, "cand": 0, "top": []})
     pat = re.compile(r"LEDGER q=\d+ vprtop=([\d.]+) searched=(\d+) cand=(\d+)")
@@ -288,6 +320,8 @@ def main():
     ap.add_argument("--results", nargs="+", default=[])
     ap.add_argument("--baselines", nargs="*", default=[])
     ap.add_argument("--logs", nargs="*", default=[])
+    ap.add_argument("--reloc", nargs="*", default=[],
+                    help="dirs of reloc logs (<seq>__<arm>.log)")
     ap.add_argument("--traj", action="store_true")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -314,6 +348,8 @@ def main():
         (out / "baselines.json").write_text(json.dumps({"runs": rows}))
         print(f"baselines.json: {len(rows)} rows")
     cache_f.write_text(json.dumps(cache))
+    if a.reloc:
+        parse_reloc(a.reloc, out)
     if a.logs:
         led = parse_ledgers(a.logs)
         (out / "ledger.json").write_text(json.dumps(led))
