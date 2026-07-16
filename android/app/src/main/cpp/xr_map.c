@@ -78,7 +78,13 @@
 /* a proposed correction is applied only after a SECOND verified query
  * within this window agrees on the pose — one confident-but-wrong PnP
  * frame never snaps on its own */
-#define CONFIRM_WINDOW_NS 4000000000ull
+/* Confirmation window must span at least two retrieval queries. Heavy VPR
+ * embeddings throttle query cadence (MegaLoc ~229 ms/embed on CPU => one
+ * query per ~6 s in replay; big models on NPU can be slow too) — at 4 s the
+ * window could not contain two MegaLoc queries, structurally zeroing its
+ * loop closures. 12 s keeps the 2-frame agreement requirement meaningful
+ * while surviving slow-embed cadences. */
+#define CONFIRM_WINDOW_NS 12000000000ull
 #define CONFIRM_DP_M 0.25f
 #define CONFIRM_DA_RAD 0.09f       /* ~5 deg */
 /* loop SEARCH is the heavy work (descriptor extraction + match against
@@ -1905,11 +1911,17 @@ static void process_keyframe(void) {
                      "but |t|=%.2fm ang=%.0fdeg exceeds caps — wrong-place "
                      "match, ignored", best_i, nin, n3, covis, (double)dev,
                      (double)(sang * 57.3f));
-            } else if (!worth) {
+            } else if (!worth && !(confirmed && PENDING_D.have)) {
                 /* healthy and the VIO agrees with the map (or we just
-                 * snapped): do nothing — a recovery, not a continuous clamp */
+                 * snapped): do nothing — a recovery, not a continuous clamp.
+                 * Keep any pending candidate: deviation flickers around
+                 * SNAP_MIN at room scale, and clearing here meant a single
+                 * sub-gate frame destroyed the 2-frame confirmation forever
+                 * (rooms closed zero loops). The pending expires via
+                 * CONFIRM_WINDOW anyway. A frame that AGREES with a pending
+                 * worth-frame falls through and confirms: the drift was
+                 * established by the pending frame, this one corroborates. */
                 VER_LAST.outcome = VOUT_GATED;
-                PENDING_D.have = 0;
             } else if (!confirmed) {
                 /* one good frame is not enough — wait for a 2nd that agrees */
                 VER_LAST.outcome = VOUT_PENDING;
