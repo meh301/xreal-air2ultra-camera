@@ -93,6 +93,22 @@ corridors at large drift.
 
 ---
 
+## In flight (moon shot)
+
+### ⏳ Fleet v7 — map→VIO tight coupling (`XR_TIGHT`)
+- **Commits**: `e19a061` (app) + basalt fork `55d6563`. Verified alignments
+  become weak unary SE(3) priors (σ 7 cm / 2°, 0.7 s expiry) inside
+  Basalt's sliding-window optimizer (H += W, b += W·r on the newest state
+  after get_dense_H_b; J = I under decoupled increments). Posted on
+  confirmed closures AND agreeing sub-gate frames — the servo done right:
+  the optimizer arbitrates instead of blind stepping. CORR stays fixed and
+  converges as the VIO absorbs. LOST recovery unchanged. dlsym-gated VIT
+  extension; device build untouched (env opt-in).
+- **Smoke**: MH_01 tight map = **4.59 cm = VIO exactly** (v6 ~6.4, v4 12.1,
+  v3 20+) — zero map penalty on the canary, correction absorbed smoothly.
+- Success = EuRoC/rooms +map ≈ VIO fleet-wide, long holds ≤31, and the
+  sub-gate priors unlock part of the rooms reactivation win.
+
 ## Iteration 2 queue (ordered)
 
 ### ☐ Confidence-weighted deformation
