@@ -218,6 +218,12 @@ def parse_reloc(reloc_dirs, out):
                     entry["traj"] = [[round(float(v), 3) for v in row]
                                      for row in a[::step, 1:4]]
             entries.append(entry)
+    # dedupe by (seq, arm): LAST wins, so later --reloc dirs override
+    # earlier ones (e.g. clean reruns replacing degraded-map runs)
+    dedup = {}
+    for e in entries:
+        dedup[(e["seq"], e["arm"])] = e
+    entries = list(dedup.values())
     (out / "reloc.json").write_text(json.dumps({"entries": entries}))
     print(f"reloc.json: {len(entries)} seq-arm entries")
     return len(entries)
