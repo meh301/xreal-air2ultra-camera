@@ -231,6 +231,7 @@ static pthread_cond_t MAP_COND = PTHREAD_COND_INITIALIZER;
 static struct {                        /* worker -> map thread mailbox */
     int full;
     int query_only;                    /* stationary reloc query: no store */
+    int probe;                         /* reloc-benchmark probe (no apply) */
     uint64_t ts;
     float q[4], p[3];
     uint8_t img[XR_OW * XR_OH];
@@ -239,6 +240,15 @@ static struct {                        /* worker -> map thread mailbox */
     float lm_xyz[XR_MAP_KP_PER_KF][3];
     float lm_uv[XR_MAP_KP_PER_KF][2];
 } MBOX;
+/* Reloc-benchmark probe result mailbox (guarded by MAP_LOCK/MAP_COND).
+ * A probe runs the full retrieval+PnP pipeline on a bare image with an
+ * identity odom pose, so the verified alignment D IS the query's pose in
+ * the SESSION frame. Nothing is applied or stored. */
+static struct {
+    int done, ok, inliers, kf;
+    float q[4], p[3];                  /* session-frame pose of the query */
+} PROBE_RES;
+static int PROBE_REQ;                  /* map thread only (set at dequeue) */
 static struct { float q[4], p[3]; int have; } LAST_POSE;
 static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
 static uint64_t LAST_STORE_NS;         /* keyframe store rate limit */
@@ -1539,7 +1549,9 @@ static void process_keyframe(void) {
     static xr_kf work;                      /* map thread only */
     static uint8_t img[XR_OW * XR_OH];
     pthread_mutex_lock(&MAP_LOCK);
-    int q_only = MBOX.query_only;
+    PROBE_REQ = MBOX.probe;
+    MBOX.probe = 0;
+    int q_only = MBOX.query_only || PROBE_REQ;
     work.ts = MBOX.ts;
     memcpy(work.q, MBOX.q, sizeof work.q);
     memcpy(work.p, MBOX.p, sizeof work.p);
@@ -1985,7 +1997,18 @@ static void process_keyframe(void) {
              * the cooldown has passed. Otherwise the VIO already agrees. */
             int worth = lost || (significant && cooled);
 
-            if (dev > mxt || sang > mxa) {
+            if (PROBE_REQ) {
+                /* reloc-benchmark probe: record the verified alignment (the
+                 * query's session-frame pose, since the probe's odom pose is
+                 * identity) and change NOTHING — no apply, no pending. */
+                pthread_mutex_lock(&MAP_LOCK);
+                PROBE_RES.ok = 1;
+                PROBE_RES.inliers = nin;
+                PROBE_RES.kf = best_i;
+                memcpy(PROBE_RES.q, Dq, sizeof PROBE_RES.q);
+                memcpy(PROBE_RES.p, Dp, sizeof PROBE_RES.p);
+                pthread_mutex_unlock(&MAP_LOCK);
+            } else if (dev > mxt || sang > mxa) {
                 VER_LAST.outcome = VOUT_CAPPED;
                 PENDING_D.have = 0;
                 LOGI("session map: kf#%d PnP GOOD (%d/%d inliers, %d covis) "
@@ -2157,8 +2180,44 @@ static void *map_thread(void *arg) {
         pthread_mutex_unlock(&MAP_LOCK);
         process_keyframe();
         pthread_mutex_lock(&MAP_LOCK);
+        if (PROBE_REQ) {               /* finalize probe on EVERY exit path */
+            PROBE_REQ = 0;
+            PROBE_RES.done = 1;        /* .ok filled by verify, else 0 */
+            pthread_cond_broadcast(&MAP_COND);
+        }
     }
     return NULL;
+}
+
+/* Reloc-benchmark probe: run retrieval + PnP verification for a bare image
+ * against the CURRENT map with an identity odom pose; returns 1 with the
+ * query's session-frame pose on a verified match, 0 otherwise. Blocking
+ * (worst case one VPR embed + full descriptor scan). Bench/test use. */
+int xr_map_probe(const uint8_t *img, float out_q[4], float out_p[3],
+                 int *out_inliers) {
+    pthread_once(&THREAD_ONCE, thread_start);
+    pthread_mutex_lock(&MAP_LOCK);
+    while (MBOX.full) pthread_cond_wait(&MAP_COND, &MAP_LOCK);
+    MBOX.query_only = 1;
+    MBOX.probe = 1;
+    MBOX.ts = LAST_ACCEPT_NS + 1;
+    MBOX.q[0] = 1; MBOX.q[1] = MBOX.q[2] = MBOX.q[3] = 0;
+    MBOX.p[0] = MBOX.p[1] = MBOX.p[2] = 0;
+    memcpy(MBOX.img, img, sizeof MBOX.img);
+    MBOX.n_lm = 0;
+    PROBE_RES.done = 0;
+    PROBE_RES.ok = 0;
+    MBOX.full = 1;
+    pthread_cond_broadcast(&MAP_COND);
+    while (!PROBE_RES.done) pthread_cond_wait(&MAP_COND, &MAP_LOCK);
+    int ok = PROBE_RES.ok;
+    if (ok) {
+        if (out_q) memcpy(out_q, PROBE_RES.q, sizeof PROBE_RES.q);
+        if (out_p) memcpy(out_p, PROBE_RES.p, sizeof PROBE_RES.p);
+        if (out_inliers) *out_inliers = PROBE_RES.inliers;
+    }
+    pthread_mutex_unlock(&MAP_LOCK);
+    return ok;
 }
 
 static void thread_start(void) {

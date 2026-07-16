@@ -255,7 +255,7 @@ static void on_pose(const xr_slam_state *st_in, void *user) {
 int main(int argc, char **argv) {
     const char *pack = NULL, *out = NULL, *toml = NULL, *xfeat = NULL;
     const char *vpr = NULL;
-    int inflight = 6, fast = 0, use_map = 1;
+    int inflight = 6, fast = 0, use_map = 1, reloc_n = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pack") && i + 1 < argc) pack = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
@@ -265,6 +265,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--inflight") && i + 1 < argc) inflight = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fast")) fast = 1;
         else if (!strcmp(argv[i], "--no-map")) use_map = 0;
+        else if (!strcmp(argv[i], "--reloc") && i + 1 < argc) reloc_n = atoi(argv[++i]);
         else DIE("unknown arg '%s'", argv[i]);
     }
     if (!pack || !out) DIE("usage: xr_replay --pack <dir> --out <prefix> "
@@ -380,6 +381,81 @@ int main(int argc, char **argv) {
             vinl, vpairs);
     fclose(ctx.f_vio);
     fclose(ctx.f_map);
+
+    /* ---- relocalization benchmark (--reloc N): probe N random frames of
+     * this sequence against the finished map. Success = verified PnP
+     * (recall); error = probe's session pose vs the run's own map-track
+     * pose at that frame (self-consistent, GT-free: measures re-entry
+     * precision against the map the user would actually resume into). */
+    if (reloc_n > 0 && use_map) {
+        char mpath[1024];
+        snprintf(mpath, sizeof mpath, "%s_map.tum", out);
+        FILE *fm = fopen(mpath, "r");
+        static double mts[120000];
+        static float mp[120000][3];
+        long mn = 0;
+        if (fm) {
+            double t, x, y, z, qx, qy, qz, qw;
+            while (mn < 120000 &&
+                   fscanf(fm, "%lf %lf %lf %lf %lf %lf %lf %lf",
+                          &t, &x, &y, &z, &qx, &qy, &qz, &qw) == 8) {
+                mts[mn] = t;
+                mp[mn][0] = (float)x; mp[mn][1] = (float)y; mp[mn][2] = (float)z;
+                mn++;
+            }
+            fclose(fm);
+        }
+        rewind(f_idx);
+        static uint64_t fts[120000];
+        long fn = 0;
+        char lbuf[256];
+        while (fn < 120000 && fgets(lbuf, sizeof lbuf, f_idx))
+            if (sscanf(lbuf, "%llu", (unsigned long long *)&fts[fn]) == 1) fn++;
+        uint8_t *pimg = malloc((size_t)XR_OW * XR_OH);
+        float errs[4096];
+        int ok_n = 0, err_n = 0;
+        srand(12345);   /* seeded: reproducible probe set */
+        for (int k = 0; k < reloc_n && k < 4096; k++) {
+            long fi = (long)((double)rand() / RAND_MAX * (double)(fn - 1));
+            fseeko(f_raw, (off_t)fi * XR_OW * XR_OH * 2, SEEK_SET);
+            if (fread(pimg, 1, (size_t)XR_OW * XR_OH, f_raw) !=
+                (size_t)XR_OW * XR_OH) continue;
+            float pq[4], pp[3];
+            int inl = 0;
+            int ok = xr_map_probe(pimg, pq, pp, &inl);
+            float err = -1.f;
+            if (ok && mn) {
+                double t = (double)fts[fi] * 1e-9;
+                long best = 0;
+                for (long j = 1; j < mn; j++)
+                    if (fabs(mts[j] - t) < fabs(mts[best] - t)) best = j;
+                float dx = pp[0] - mp[best][0], dy = pp[1] - mp[best][1],
+                      dz = pp[2] - mp[best][2];
+                err = sqrtf(dx * dx + dy * dy + dz * dz);
+                errs[err_n++] = err;
+                ok_n++;
+            }
+            printf("RELOC k=%d frame=%ld ok=%d inl=%d err_m=%.3f\n",
+                   k, fi, ok, inl, (double)err);
+        }
+        /* summary: recall + median error + recall@0.25m/@0.10m */
+        int u25 = 0, u10 = 0;
+        for (int i = 0; i < err_n; i++) {
+            if (errs[i] < 0.25f) u25++;
+            if (errs[i] < 0.10f) u10++;
+        }
+        for (int i = 0; i < err_n; i++)          /* insertion sort (small) */
+            for (int j = i; j > 0 && errs[j] < errs[j - 1]; j--) {
+                float tswap = errs[j]; errs[j] = errs[j - 1]; errs[j - 1] = tswap;
+            }
+        printf("RELOC-SUMMARY n=%d verified=%d recall=%.3f "
+               "r@25cm=%.3f r@10cm=%.3f med_err_m=%.3f\n",
+               reloc_n, ok_n, (double)ok_n / reloc_n,
+               (double)u25 / reloc_n, (double)u10 / reloc_n,
+               err_n ? (double)errs[err_n / 2] : -1.0);
+        free(pimg);
+    }
+
     fclose(f_imu);
     fclose(f_idx);
     fclose(f_raw);

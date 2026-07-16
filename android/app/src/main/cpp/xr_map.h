@@ -95,6 +95,13 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
 
 int xr_map_num_keyframes(void);      /* thread-safe (atomic) */
 
+/* Reloc-benchmark probe (bench/test): retrieval + PnP verification for a
+ * bare left image against the current map, identity odom pose — returns 1
+ * with the query's SESSION-frame pose on a verified match. Blocking; call
+ * only when no offers are in flight (post-run). */
+int xr_map_probe(const uint8_t *img, float out_q[4], float out_p[3],
+                 int *out_inliers);
+
 /* Most recent loop/reloc candidate (descriptor stage): returns 1 and the
  * two keyframe timestamps + match count, or 0 when none happened yet. */
 int xr_map_last_candidate(uint64_t *ts_a, uint64_t *ts_b, int *matches);
