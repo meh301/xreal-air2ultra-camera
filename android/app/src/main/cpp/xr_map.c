@@ -548,15 +548,29 @@ static int tight_mode(void) {
     }
     return v;
 }
+/* All TIGHT_* tunables are #ifndef-guarded for bench -D sweeps (a bare
+ * define silently OVERRODE -DTIGHT_MAX_DEV_M=... — later definition wins —
+ * which invalidated a fastbench round; never leave sweepables unguarded). */
+#ifndef TIGHT_SIGMA_T
 #define TIGHT_SIGMA_T 0.07f
+#endif
+#ifndef TIGHT_SIGMA_R
 #define TIGHT_SIGMA_R 0.035f            /* ~2 deg */
+#endif
+#ifndef TIGHT_EXPIRY_NS
 #define TIGHT_EXPIRY_NS 700000000ull    /* prior lives 0.7 s of frame time */
+#endif
 /* Hybrid split (fleet v7 evidence): weak priors absorb SMALL corrections
  * perfectly (EuRoC/rooms reached VIO parity) but cannot move meter-scale
  * corridor drift (long lost its 14cm gains, map==VIO). Above this deviation
- * a confirmed closure takes the classic snap+deform path even in TIGHT. */
+ * a confirmed closure takes the classic snap+deform path even in TIGHT.
+ * 0.0 = confirmed closures ALWAYS snap; priors remain sub-gate only. */
+#ifndef TIGHT_MAX_DEV_M
 #define TIGHT_MAX_DEV_M 0.60f
+#endif
+#ifndef TIGHT_MAX_DEV_ANG
 #define TIGHT_MAX_DEV_ANG 0.35f         /* ~20 deg */
+#endif
 static void tight_post_prior(const float Dq[4], const float Dp[3],
                              uint64_t ts) {
     float ci[4], Eq[4], Ep[3], d[3];
