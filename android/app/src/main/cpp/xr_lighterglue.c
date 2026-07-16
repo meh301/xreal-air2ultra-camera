@@ -72,6 +72,30 @@ static int lglue_try_init(void) {
         return 0;
     G.api->SetIntraOpNumThreads(opts, 2);
     G.api->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL);
+#ifndef __ANDROID__
+    /* CUDA EP on the bench container (XR_ORT_CUDA=<dev>, same contract as
+     * xr_vpr): a CPU LighterGlue pass costs 30-80 ms and a single search
+     * can trigger many — measured to starve the map thread (room1 stores
+     * 225 -> 40 with LG on). GPU drops it to a few ms. */
+    {
+        const char *cud = getenv("XR_ORT_CUDA");
+        if (cud && *cud) {
+            OrtStatus *(*cuda_ep)(OrtSessionOptions *, int) =
+                (OrtStatus * (*)(OrtSessionOptions *, int))
+                dlsym(dl, "OrtSessionOptionsAppendExecutionProvider_CUDA");
+            if (cuda_ep) {
+                OrtStatus *st = cuda_ep(opts, atoi(cud));
+                if (st) {
+                    LOGI("LGLUE: CUDA EP failed (%s), CPU",
+                         G.api->GetErrorMessage(st));
+                    G.api->ReleaseStatus(st);
+                } else {
+                    LOGI("LGLUE: CUDA EP enabled (device %s)", cud);
+                }
+            }
+        }
+    }
+#endif
     if (!ort_ok(G.api->CreateSession(G.env, G.path, opts, &G.session),
                 "CreateSession")) {
         G.api->ReleaseSessionOptions(opts);

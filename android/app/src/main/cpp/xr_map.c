@@ -884,6 +884,15 @@ static int relocsweep_on(void) {
     }
     return v;
 }
+static int storeguard_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_STOREGUARD");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: STORE-GUARD ON (no embeds on store-only passes)");
+    }
+    return v;
+}
 #ifndef CONFW_MIN_W
 #define CONFW_MIN_W 0.4f       /* weakest accepted alignment applies 40% */
 #endif
@@ -1814,7 +1823,13 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     int use_lg = !bad && xr_lglue_wanted();
     for (int c = 0; c < ncov && nc < COVIS_MAX_CAND; c++) {
         int s = cov[c];
-        if (use_lg) {
+        /* LG budget: learned matching for the CANDIDATE keyframe only
+         * (cov[0] leads the pool by construction); pooled neighbours keep
+         * greedy NN. Running LG per pooled keyframe was 8x the inference
+         * per cluster and starved the map thread (room1 stores 225 -> 40)
+         * for marginal extra pairs — the candidate dominates the
+         * correspondence set, neighbours mostly widen the landmark pool. */
+        if (use_lg && c == 0) {
             static int li0[XR_LGLUE_N], li1[XR_LGLUE_N];   /* map thread */
             static float lsc[XR_LGLUE_N];
             int nm = xr_lglue_match(w->kp_uv, w->desc.xfeat, w->n_kp,
@@ -2331,9 +2346,17 @@ static void process_keyframe(void) {
 
     /* place-recognition embedding for retrieval pre-ranking. Cheap no-op
      * until a VPR model is registered (and permanently off after a failed
-     * bring-up). Runs on this (map) thread at keyframe/search rate. */
-    work.emb_dim = xr_vpr_embed(img, work.emb);
-    work.has_emb = work.emb_dim > 0;
+     * bring-up). Runs on this (map) thread at keyframe/search rate.
+     * XR_STOREGUARD: store-only passes skip the embed — map-thread
+     * throughput IS map density (stores collapse when passes run long);
+     * an embedding-less keyframe stays always-eligible in retrieval. */
+    if (!storeguard_on() || do_search) {
+        work.emb_dim = xr_vpr_embed(img, work.emb);
+        work.has_emb = work.emb_dim > 0;
+    } else {
+        work.emb_dim = 0;
+        work.has_emb = 0;
+    }
 
     /* ---- candidate search + geometric verification: LOCK-FREE. Only the
      * map thread WRITES the keyframe store; a concurrent reset / descriptor
