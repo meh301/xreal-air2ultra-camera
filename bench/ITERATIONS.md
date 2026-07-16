@@ -526,3 +526,19 @@ cost, dense shape validation, clip clamp, +15 more.
 IN FLIGHT: fixed_matrix (base/union/tight/union+tight x hunt x3 + utf
 reloc grid, FIXED binaries — the duty-cap fix changes cadence so all
 arms re-measure) -> fleet decision.
+
+### x FIXED-MATRIX VERDICT (review-fixed binaries, healthy maps ~500/1025)
+ATE medians (hunt, 3 runs): utf (FULL = dense+LG6+COVKEEP+PGO+LMDESC+
+TIGHT): MH_01 6.5 / MH_05 17.5 (EuRoC = tight parity), corridor2 20.1,
+corridor3 14.0 (base 53.0), magistrale2 45.7 (base 90.6; OKVIS2+LC 66.4
+— BEATEN on the hardest long seq), slides2 42.1, MOO15 35.8.残り
+bimodality: corridor1 33.9 (unionf alone 11.6), corridor5 42.6 (unionf
+16.5) — closure hit-or-miss at 3 runs; fleet medians will settle it.
+utf RELOC grid (30 probes, healthy maps): corridor1 46.7%/r@10 43%,
+corridor2 43%, corridor3 46.7%, corridor4 96.7%/r@10 93%, corridor5 60%,
+slides2 76.7%, rooms 93-100% (med 4-9cm), magistrale2 10%. vs BAD arms'
+3-13% corridors = 4-15x. The stack: dense anchoring fixed association,
+LG6 fixed matching, LMDESC bank fixed retrieval-independence, healthy
+maps fixed density.
+FLEET v12 LAUNCHED: 600 jobs, 5 arms (bad/vpr/megaloc/xdlg6/full), all
+40 seqs x3, 10-wide, sparse-xfeat arms retired. Watchdog live.
