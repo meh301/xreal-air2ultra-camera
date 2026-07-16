@@ -176,11 +176,17 @@ corridors at large drift.
 
 ## Iteration 3 queue (Basalt integration)
 
-### ☐ XFeat keypoints seed Basalt detection (detector unification)
+### ◐ XFeat keypoints seed Basalt detection (detector unification) — CHANNEL BUILT
 - **Hypothesis**: one detection pass — XFeat dense (NPU, 3.6 ms A8W8/888)
-  maxima replace FAST as Basalt's corner candidates; KLT still tracks (VIO
-  precision preserved). Frees CPU, better-distributed keypoints.
-- **Cost**: net CPU *saving*; NPU per frame (already budgeted for xfeat arms).
+  maxima seed Basalt's corner candidates; KLT still tracks (VIO precision
+  preserved). Frees CPU, better-distributed keypoints.
+- **Built** (`d4d63b9` app + basalt fork `44fcfa4`): OF-side seed store +
+  merge in addPoints (dedup vs corners/tracks at half grid spacing, FAST
+  stays as fill), VIT export, xr_slam_seed_keypoints wrapper. NOT yet
+  producing: needs replay/app to run XFeat per frame on cam0 and post
+  (XR_SEED env in replay; device uses the existing NPU path). Then subset
+  A/B (VIO-track quality with/without seeds) → fleet v9.
+- **Cost**: net CPU saving on device; GPU-per-frame in replay.
 
 ### ☐ Lifetime landmark descriptors
 - **Hypothesis**: sample the (already computed) dense descriptor map at
