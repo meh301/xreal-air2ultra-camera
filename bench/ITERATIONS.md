@@ -233,3 +233,13 @@ Root cause: TIGHT_MAX_DEV (0.60) > SNAP_MIN (0.50) routed ALL confirmed closures
   euroc-style toml, new site group 'drive'. NOTE fastbench v9tight0 was
   INVALID (bare #define overrode -D; guards added) - v9 fleet relaunched
   clean and is the real test.
+
+### ? Relocalization benchmark LIVE (f53dc62 + deadlock fixes)
+First baselines (vpr arm, 25 cold single-frame probes): room1 recall
+24% / r@25cm 8% / med 0.48m; corridor3 recall 4% / med 0.61m. Cold
+single-shot reloc is our worst axis - funnel dies at association (the
+LighterGlue target) and precision at single-kf PnP (multi-kf refine
+target). TODO: clip-probes (temporal accumulation = realistic wake),
+cross-sequence probes, per-arm comparison (MegaLoc should shine here),
+site tab. Two concurrency bugs found by the bench itself: lost-wakeup +
+MAP_LOCK self-deadlock (gdb) - both fixed, both product-relevant.
