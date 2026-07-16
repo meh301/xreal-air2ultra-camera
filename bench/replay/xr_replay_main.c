@@ -381,8 +381,16 @@ int main(int argc, char **argv) {
         if (!kd_in && kd_was)
             printf("KIDNAP end rel=%.1fs dropped=%d\n", kd_rel, kd_dropped);
         kd_was = kd_in;
-        if (kd_in) kd_dropped++;
-        if (imu_pushed >= 20 && !kd_in) {   /* mirrors xr_slam_start_raw's small gate */
+        if (kd_in) {
+            /* blank the pair, do NOT drop it: a pocketed camera sees
+             * darkness, and Basalt's bounded IMU queue DEADLOCKS if frames
+             * stop while IMU flows (first kidnap run hung here). Black
+             * frames kill every KLT track — vision gone, estimator coasts
+             * on IMU — while the pipeline keeps draining. */
+            memset(fr, 8, (size_t)2 * XR_OW * XR_OH);
+            kd_dropped++;
+        }
+        if (imu_pushed >= 20) {   /* mirrors xr_slam_start_raw's small gate */
             ring_put(f_ts, fr);
             /* v9 detector unification (XR_SEED env): XFeat maxima seed
              * Basalt's corner detection; KLT still does the tracking. Must
