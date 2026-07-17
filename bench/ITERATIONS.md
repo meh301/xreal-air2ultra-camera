@@ -894,3 +894,12 @@ i.e. the marg-persistent-factor frontier). Flag stays, default off.
 Every corridor A/B verdict this session carries that caveat. RULE: the
 held-out confirmation fleet runs corridors at n>=5; single-round corridor
 deltas below ~2x are treated as noise.
+
+### x VKFOBS PORTS: 3-for-3 KEEPER. tumvi: EVERY room improves (room6
+1.59 — okvis2+lc at 1.20; rooms 5.2-5.6 -> 4.5-4.8; RTE down across the
+board) — the FIRST mechanism to move rooms all session. msd: MOO01
+23.3->19.1, MOO13 31->29.6, MOO07 1.48->1.18, no harm — helps but the
+remaining ~2x to okvis2 raw VIO on MSD is beyond config tuning
+(frontend/motion-regime difference; frontier). FLEET v15 launched:
+fzbase (v14 cfg) vs fz15 (vkfobs all-configs + TRUSTVPR), full 40 seqs,
+corridors n=5, held-out seqs included — the freeze decision.
