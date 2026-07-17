@@ -1528,10 +1528,45 @@ static void eg_admit(int ref_ord, const float wq[4], const float wp[3],
     EG[slot].w = nin >= 24 ? 1.0f : (float)nin / 24.0f;
 }
 
+/* total graph inconsistency: odometry-chain translation residuals plus
+ * RAW (un-DCS'd) closure-edge residuals. The relaxation is TRANSACTIONAL:
+ * it must reduce this metric or it is reverted wholesale — v2 diverged
+ * corridors >10m by amplifying one aliased edge through the chain. */
+static float eg_metric(int n, const int *e_ref, const int *e_tip,
+                       const float *e_wbase, int ne) {
+    float m = 0;
+    for (int i = 0; i + 1 < n; i++) {
+        uint64_t dt = KFA(i + 1).ts - KFA(i).ts;
+        if (dt >= PGO_GAP_NS || KFA(i + 1).seg != KFA(i).seg) continue;
+        float qai[4], t[3], zq[4], zp[3], pq[4], pp[3];
+        qconj(KFA(i).q, qai);
+        qmul(qai, KFA(i + 1).q, zq);
+        t[0] = KFA(i + 1).p[0] - KFA(i).p[0];
+        t[1] = KFA(i + 1).p[1] - KFA(i).p[1];
+        t[2] = KFA(i + 1).p[2] - KFA(i).p[2];
+        qrotv(qai, t, zp);
+        pose_compose(KFA(i).qc, KFA(i).pc, zq, zp, pq, pp);
+        float dx = pp[0] - KFA(i + 1).pc[0];
+        float dy = pp[1] - KFA(i + 1).pc[1];
+        float dz = pp[2] - KFA(i + 1).pc[2];
+        m += dx * dx + dy * dy + dz * dz;
+    }
+    for (int e = 0; e < ne; e++) {
+        float pq[4], pp[3];
+        pose_compose(KFA(e_ref[e]).qc, KFA(e_ref[e]).pc,
+                     EG[e].Zq, EG[e].Zp, pq, pp);
+        float dx = pp[0] - KFA(e_tip[e]).pc[0];
+        float dy = pp[1] - KFA(e_tip[e]).pc[1];
+        float dz = pp[2] - KFA(e_tip[e]).pc[2];
+        m += e_wbase[e] * PGO_W_CLOSE * (dx * dx + dy * dy + dz * dz);
+    }
+    return m;
+}
+
 /* whole-chain relaxation with all live edges (MAP_LOCK held) */
-static void eg_relax(void) {
+static int eg_relax(void) {
     int n = KF_N;
-    if (n < 3 || EG_N == 0) return;
+    if (n < 3 || EG_N == 0) return 0;
     static int ord_of[XR_MAP_MAX_KF];
     for (int i = 0; i < XR_MAP_MAX_KF; i++) ord_of[i] = -1;
     for (int k = 0; k < n; k++) ord_of[KFO[k]] = k;
@@ -1557,7 +1592,15 @@ static void eg_relax(void) {
         e_w[ne] = EG[e].w * s * s;
         ne++;
     }
-    if (!ne) return;
+    if (!ne) return 0;
+    static float e_wbase[EG_MAX];      /* raw admit weights for the metric */
+    for (int e = 0; e < ne; e++) e_wbase[e] = 1.0f;
+    float m_before = eg_metric(n, e_ref, e_tip, e_wbase, ne);
+    static float SVq[XR_MAP_MAX_KF][4], SVp[XR_MAP_MAX_KF][3]; /* snapshot */
+    for (int i = 0; i < n; i++) {
+        memcpy(SVq[i], KFA(i).qc, sizeof SVq[i]);
+        memcpy(SVp[i], KFA(i).pc, sizeof SVp[i]);
+    }
     static float Zq[XR_MAP_MAX_KF][4], Zp[XR_MAP_MAX_KF][3];
     static uint8_t Zok[XR_MAP_MAX_KF];
     static float Xq[XR_MAP_MAX_KF][4], Xp[XR_MAP_MAX_KF][3];
@@ -1630,7 +1673,20 @@ static void eg_relax(void) {
         memcpy(KFA(i).qc, Xq[i], sizeof Xq[i]);
         memcpy(KFA(i).pc, Xp[i], sizeof Xp[i]);
     }
+    float m_after = eg_metric(n, e_ref, e_tip, e_wbase, ne);
+    if (m_after > m_before * 0.98f) {  /* must IMPROVE — else revert all */
+        for (int i = 0; i < n; i++) {
+            memcpy(KFA(i).qc, SVq[i], sizeof SVq[i]);
+            memcpy(KFA(i).pc, SVp[i], sizeof SVp[i]);
+        }
+        LOGI("session map: EDGEGRAPH relax REVERTED (%.3f -> %.3f, "
+             "%d edges)", (double)m_before, (double)m_after, ne);
+        return 0;
+    }
+    LOGI("session map: EDGEGRAPH relax accepted (%.3f -> %.3f, %d edges)",
+         (double)m_before, (double)m_after, ne);
     CLOUD_DIRTY = 1;
+    return 1;
 }
 
 
@@ -4518,13 +4574,13 @@ static void process_keyframe(void) {
                     else          graph_deform(best_i, qsp, Dq, Dp);
                     if (edgegraph_on()) {
                         eg_admit(best_i, work.q, work.p, Dq, Dp, nin);
-                        eg_relax();
+                        int eg_ok = eg_relax();
                         /* the chain moved: re-derive the closure correction
                          * from the RELAXED tip so the live pose follows the
                          * graph instead of decohering from it (v1 lesson —
                          * session = CORR o odom, and nobody else tells CORR
-                         * the map moved) */
-                        if (KF_N >= 1) {
+                         * the map moved). Only after an ACCEPTED relax. */
+                        if (eg_ok && KF_N >= 1) {
                             xr_kf *tip = &KFA(KF_N - 1);
                             float qi[4], pi[3];
                             pose_invert(tip->q, tip->p, qi, pi);
