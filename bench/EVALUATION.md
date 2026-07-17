@@ -185,3 +185,11 @@ descriptors at every other resolution.
   bench/site/public/data` (score cache: `.score_cache.json`).
 - Site: `node bench/site/server.js` (run detached from any agent session).
 - Ledger of record: `bench/ITERATIONS.md` — every verdict with commit ids.
+
+## 12. Claim discipline + overfitting (2026-07-17)
+- A "we lead group X" claim must quote the site's group table with EVERY
+  baseline system present (okvis2 lc0+lc1, orb3, openvins). No claims
+  from memory or partial comparisons.
+- Tuning/aug arms are SELECTED on subsets; adoption requires confirmation
+  on the full fleet including sequences the arm never saw during
+  selection. Held-out regression beyond run-to-run noise vetoes.

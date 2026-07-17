@@ -143,7 +143,7 @@ xdlg6 10.71, bad 10.27. Per group (median over per-seq medians):
 | EuRoC (11) | 8.13 | **6.62** | 6.72 | behind OKVIS2+LC (3.82); VIO-bound |
 | TUM-VI long (9) | 30.21 | **23.21** | 41.39 | BEATS OKVIS2+LC (31.8) by 8.6 cm; retrieval flip decisive (EIG ~2x MegaLoc) |
 | rooms (6) | 5.22 | 5.22 | 5.24 | gated = VIO; OKVIS2+LC gap (~1.2 cm) stands, LMFACT rejected |
-| MSD (14) | 6.22 | **6.15** | 6.13 | lead held |
+| MSD (14) | 6.22 | 6.15 | 6.13 | BEHIND OKVIS2+LC (2.29) and OKVIS2 (5.85) — map==VIO gated; the azall ladder is the live attack (CORRECTED 07-17: earlier "lead held" compared only OpenVINS/ORB3) |
 
 TIGHTSUB STAYS: v14 freeze long 23.21 beats the v12 no-TIGHTSUB 27.04
 (v13's harm signal was a MegaLoc-context artifact). Stage-3 LMFACT:

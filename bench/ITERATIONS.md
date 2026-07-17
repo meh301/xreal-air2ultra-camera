@@ -815,3 +815,19 @@ the last outdoor bottleneck either — remaining loss is verify-thresholds
 vs genuine 60m-range aliasing. Next diagnostic: MASt3R oracle on failed
 probes; also consider r@1m as the honest outdoor metric. DEPTHFILL kept
 (free accuracy + denser maps), not a recall unlock.
+
+### x SCOREBOARD CORRECTION (user-caught): MSD is NOT ours — OKVIS2+LC 2.29
+Site MSD tab: okvis2+lc 2.29 (13 seq) < okvis2 5.85 < ours 6.13-6.15.
+Every "MSD: we lead" claim was wrong — it compared against openvins/orb3
+and stale memory, never the okvis2+lc row ON THE SITE. Honest scoreboard:
+we lead LONG (23.2 vs 31.8) and drive robustness; okvis2+lc leads euroc
+(3.82 vs 5.18 tuned), rooms (1.20 vs 5.2), msd (2.29 vs 6.15) — i.e.
+every map==VIO-gated group. The azall matrix (running) is the pivotal
+verdict for all three. RULE (now in EVALUATION.md): never claim a lead
+without quoting the site's own group table for EVERY baseline.
+
+### x OVERFITTING GUARDRAIL (user directive): tuning arms are selected on
+SUBSETS (vkfobs on 5 euroc seqs; azall on hunt seqs). NOTHING enters the
+freeze config on subset evidence alone: every keeper must be confirmed
+on the FULL 40-seq fleet (held-out seqs included) before adoption, and
+per-seq regressions > noise on held-out cells veto the keeper.
