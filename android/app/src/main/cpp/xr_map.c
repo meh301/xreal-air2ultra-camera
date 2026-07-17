@@ -1389,6 +1389,40 @@ static int burstpnp_on(void) {
     }
     return v;
 }
+/* XR_LOOPBURST — multi-frame RETURN-REGISTRATION for healthy loops.
+ * The corridor autopsy (corr10, 40 within-round runs): the bad ATE mode
+ * is one rigid ~60cm residual left by the return closure — single-frame
+ * PnP on shallow wall points is depth-weak along the corridor axis. The
+ * fix is baseline: keep accumulating each verified re-entry frame's
+ * assigned (bearing, session-3D) pairs with VIO-relative camera offsets,
+ * then joint-solve (pnp2_ransac_burst — the wake-up burst machinery) over
+ * the whole 0.5-1.5m of walked baseline and apply the fused registration
+ * as a capped CORR polish. Session-frame P and odom-frame S/O are all
+ * invariant to CORR steps, so the first closure applying mid-window does
+ * not decohere the accumulator. Map thread only. */
+#define LBURST_MAX 320
+#define LBURST_FRAMES 6                /* solve after this many verified frames */
+#define LBURST_MIN_FRAMES 3            /* minimum worth solving at expiry */
+#define LBURST_WINDOW_NS 2500000000ull /* hard window from the anchor */
+#define LBURST_IDLE_NS 1000000000ull   /* give up if verification stops */
+static struct {
+    int active, nframes, n;
+    uint64_t t0_ns, last_ns;
+    float aq[4], ap[3];                /* anchor frame's raw odom pose */
+    float S[LBURST_MAX][3];            /* odom-frame query bearings */
+    float P[LBURST_MAX][3];            /* session-frame landmark points */
+    float O[LBURST_MAX][3];            /* odom camera offset vs anchor */
+    uint8_t fid[LBURST_MAX];
+} LBURST;
+static int loopburst_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LOOPBURST");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LOOPBURST return-registration ON");
+    }
+    return v;
+}
 /* XR_DEPTHFILL — stereo-depth landmark backfill at keyframe store. The
  * outdoor funnel dies at n3: matched keypoints whose landmark never
  * triangulated (VIO's instantaneous baseline is centimetres; the stereo
@@ -4100,6 +4134,9 @@ static void process_keyframe(void) {
      * session-frame landmark), kept for the apply branch (map thread only) */
     static float lf_uv[LMFACT_MAX][2], lf_ps[LMFACT_MAX][3];
     int lf_n = 0;
+    /* XR_LOOPBURST: the WINNING candidate's assigned burst pairs */
+    static float lb_S[BURST_EXPORT_MAX][3], lb_P[BURST_EXPORT_MAX][3];
+    int lb_n = 0;
     if (do_search) {
     did_search = 1;
     uint64_t t_match0 = map_mono_us();
@@ -4336,14 +4373,15 @@ static void process_keyframe(void) {
         int want_lf = lmfact_on();
         static float ebS[BURST_EXPORT_MAX][3], ebP[BURST_EXPORT_MAX][3];
         int ebn = 0;
-        int want_burst = PROBE_REQ && burstpnp_on();
+        int lb_want = loopburst_on() && !relocalizing && !PROBE_REQ;
+        int want_burst = (PROBE_REQ && burstpnp_on()) || lb_want;
         int ok = reloc_pnp(&work, cand_i[c], kfn, cDq, cDp, &cn3, &cnin, &ccov,
                            want_lf ? cuv : NULL, want_lf ? cps : NULL,
                            want_lf ? &cnl : NULL,
                            want_burst ? ebS : NULL, want_burst ? ebP : NULL,
                            want_burst ? &ebn : NULL);
         /* keep the RICHEST candidate's matches for the burst accumulator */
-        if (want_burst && ebn > burst_exp_n) {
+        if (want_burst && PROBE_REQ && ebn > burst_exp_n) {
             memcpy(burst_exp_S, ebS, sizeof(float) * 3 * (size_t)ebn);
             memcpy(burst_exp_P, ebP, sizeof(float) * 3 * (size_t)ebn);
             burst_exp_n = ebn;
@@ -4358,6 +4396,11 @@ static void process_keyframe(void) {
                 memcpy(lf_uv, cuv, sizeof lf_uv);
                 memcpy(lf_ps, cps, sizeof lf_ps);
                 lf_n = cnl;
+            }
+            if (lb_want && ebn > 0) {      /* the WINNER's assigned pairs */
+                memcpy(lb_S, ebS, sizeof(float) * 3 * (size_t)ebn);
+                memcpy(lb_P, ebP, sizeof(float) * 3 * (size_t)ebn);
+                lb_n = ebn;
             }
         }
     }
@@ -4435,6 +4478,99 @@ static void process_keyframe(void) {
                 }
             }
             BURST.active = 0;
+        }
+    }
+    /* XR_LOOPBURST: accumulate verified re-entry frames; joint-solve the
+     * return registration over the walked baseline (healthy loops only) */
+    if (loopburst_on() && !relocalizing && !PROBE_REQ) {
+        int lb_verified = best_i >= 0 && best_nin >= VER_MIN_PAIRS && lb_n > 0;
+        if (lb_verified) {
+            if (!LBURST.active) {
+                LBURST.active = 1;
+                LBURST.n = 0;
+                LBURST.nframes = 0;
+                LBURST.t0_ns = work.ts;
+                memcpy(LBURST.aq, work.q, sizeof LBURST.aq);
+                memcpy(LBURST.ap, work.p, sizeof LBURST.ap);
+            }
+            if (LBURST.nframes < 250) {
+                float co[3], ca[3], ofs[3];
+                qrotv(work.q, GEOM.p_ic, co);
+                qrotv(LBURST.aq, GEOM.p_ic, ca);
+                ofs[0] = work.p[0] + co[0] - (LBURST.ap[0] + ca[0]);
+                ofs[1] = work.p[1] + co[1] - (LBURST.ap[1] + ca[1]);
+                ofs[2] = work.p[2] + co[2] - (LBURST.ap[2] + ca[2]);
+                for (int m = 0; m < lb_n && LBURST.n < LBURST_MAX; m++) {
+                    memcpy(LBURST.S[LBURST.n], lb_S[m], sizeof LBURST.S[0]);
+                    memcpy(LBURST.P[LBURST.n], lb_P[m], sizeof LBURST.P[0]);
+                    memcpy(LBURST.O[LBURST.n], ofs, sizeof LBURST.O[0]);
+                    LBURST.fid[LBURST.n] = (uint8_t)LBURST.nframes;
+                    LBURST.n++;
+                }
+                LBURST.nframes++;
+                LBURST.last_ns = work.ts;
+            }
+        }
+        int lb_expired = LBURST.active &&
+            (work.ts - LBURST.t0_ns > LBURST_WINDOW_NS ||
+             (!lb_verified && work.ts - LBURST.last_ns > LBURST_IDLE_NS));
+        if (LBURST.active && (LBURST.nframes >= LBURST_FRAMES || lb_expired)) {
+            if (LBURST.nframes >= LBURST_MIN_FRAMES &&
+                LBURST.n >= VER_MIN_PAIRS) {
+                float Rz[9], C0[3];
+                int jin = pnp2_ransac_burst(LBURST.S, LBURST.P, LBURST.O,
+                                            LBURST.fid, LBURST.n, Rz, C0);
+                if (jin >= VER_MIN_PAIRS && jin * 100 >= 30 * LBURST.n) {
+                    /* fused D for the ANCHOR frame (anchor offset is zero,
+                     * so C0 IS its camera centre) — reloc_pnp's recipe */
+                    float Dfq[4], Dfp[3], qsb[4], t3[3], body_s[3];
+                    R2q(Rz, Dfq);
+                    qmul(Dfq, LBURST.aq, qsb);
+                    qrotv(qsb, GEOM.p_ic, t3);
+                    body_s[0] = C0[0] - t3[0];
+                    body_s[1] = C0[1] - t3[1];
+                    body_s[2] = C0[2] - t3[2];
+                    qrotv(Dfq, LBURST.ap, t3);
+                    Dfp[0] = body_s[0] - t3[0];
+                    Dfp[1] = body_s[1] - t3[1];
+                    Dfp[2] = body_s[2] - t3[2];
+                    /* deviation of the fused registration vs the CURRENT
+                     * correction, evaluated at the current pose */
+                    float ns2[3], os2[3], st2 = 0;
+                    qrotv(Dfq, work.p, ns2);
+                    qrotv(CORR.q, work.p, os2);
+                    for (int c = 0; c < 3; c++) {
+                        float d = (ns2[c] + Dfp[c]) - (os2[c] + CORR.p[c]);
+                        st2 += d * d;
+                    }
+                    float devf = sqrtf(st2);
+                    float qci2[4], qe2[4], rv2[3];
+                    qconj(CORR.q, qci2);
+                    qmul(Dfq, qci2, qe2);
+                    rv_from_q(qe2, rv2);
+                    float angf = sqrtf(rv2[0] * rv2[0] + rv2[1] * rv2[1] +
+                                       rv2[2] * rv2[2]);
+                    /* polish, not a snap: must disagree beyond noise but
+                     * stay small — a large fused delta means the burst and
+                     * the applied closure disagree structurally: distrust */
+                    if (devf > 0.04f && devf < 1.5f && angf < 0.26f) {
+                        memcpy(CORR.q, Dfq, sizeof CORR.q);
+                        memcpy(CORR.p, Dfp, sizeof CORR.p);
+                        CORR.gen++;
+                        LAST_SNAP_NS = work.ts;
+                        LOGI("session map: LOOPBURST refined registration "
+                             "%.2fm %.0fdeg over %d frames (%d/%d joint "
+                             "inliers)", (double)devf,
+                             (double)(angf * 57.3f), LBURST.nframes, jin,
+                             LBURST.n);
+                    } else if (devf >= 0.04f) {
+                        LOGI("session map: LOOPBURST fused D REJECTED "
+                             "(%.2fm %.0fdeg, %d/%d)", (double)devf,
+                             (double)(angf * 57.3f), jin, LBURST.n);
+                    }
+                }
+            }
+            LBURST.active = 0;
         }
     }
     match_us = (unsigned)(map_mono_us() - t_match0);
