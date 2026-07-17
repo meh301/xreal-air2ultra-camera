@@ -570,3 +570,19 @@ Sub-VIO rooms = landmark-level factors (stage-3) where young
 re-observations are arbitrated per-point, not pose priors.
 MAPSEED rejected AGAIN post-race-fix (V1_02 5.7->21.0, MOO15 div).
 DECISION: XR_TIGHTSUB joins the 'full' arm for the next fleet.
+
+### x 4SEASONS SUPERLONG UNLOCKED — two root causes, both required
+Research-verified (libartipy SDK source): the distributed 'undistorted'
+images are STEREO-RECTIFIED (cv2.fisheye.stereoRectify,
+CALIB_ZERO_DISPARITY); TS_cam_imu is the RAW cam0 frame -> our packs
+carried a 1.484deg cam-IMU rotation error (2.6% gravity leak). AND the
+IMU noises were 40-200x below DM-VIO's proven 4Seasons values
+(vibration-inflated: gyro_nd 0.0412, accel_nd 0.102).
+Short-pack isolation (198s, GT 896m span): old calib 11,980m (12.3x
+path) -> rect extrinsic 1,141m (1.277x) -> rect + DM-VIO noises 834m
+(**1.014x — 1.4% scale error**). Bouguet split numerically self-verified
+(caught a sign-eating yaml parse + a handedness flip before they hit the
+bench). All 3 drive packs rebuilt (calib_orig.txt preserved); full-drive
+first light running: 3 drives x {xdlg6, full+TIGHTSUB}, shutdown-hang
+nanny active (xr_dr_drive hangs in a futex at exit — separate bug,
+harness-side thread join, to fix later).
