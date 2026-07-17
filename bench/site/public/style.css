@@ -131,3 +131,10 @@ th { cursor:pointer; position:sticky; top:0; background:var(--card); font-weight
 .overflow { overflow-x:auto; }
 code { background:var(--card); padding:1px 5px; border-radius:4px; font-size:12.5px; }
 p { max-width:78ch; }
+
+/* ---- overview mini table (drives + wake-up card) ---- */
+table.mini { border-collapse:collapse; width:100%; margin-top:6px; }
+table.mini th, table.mini td { text-align:left; padding:5px 10px;
+  border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
+table.mini th { color:var(--ink2); font-weight:600; font-size:12.5px; }
+table.mini td.best { color:var(--c-fz18); font-weight:700; }

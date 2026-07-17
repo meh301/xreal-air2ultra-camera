@@ -513,6 +513,20 @@ function overviewView() {
   ];
   for (const [v, l] of defs) tiles.append(el("div", { class: "tile" }, `<b>${v}</b><span>${l}</span>`));
   view.append(tiles);
+  /* headline results that live outside the ATE table pipeline: 4Seasons
+   * drives (km-scale, %-of-path scorer) and the wake-up protocol. Numbers
+   * from bench/ITERATIONS.md (2026-07-18 finale, n=3 / n=90 probes);
+   * same machine, same causal protocol as everything else here. */
+  view.append(el("div", { class: "card" }, `
+    <h3>4Seasons drives &amp; wake-up relocalization (fz18 frozen)</h3>
+    <table class="mini"><thead><tr><th></th><th>ours fz18</th><th>OKVIS2+LC</th></tr></thead><tbody>
+      <tr><td>drive1_city (10.6 km), ATE %path, med of 3</td><td class="best">1.44%</td><td>3.32%</td></tr>
+      <tr><td>drive2_city (10.8 km)</td><td class="best">3.35%</td><td>diverged (both LC modes)</td></tr>
+      <tr><td>drive3_country (5.1 km)</td><td>1.88%</td><td class="best">1.22%</td></tr>
+      <tr><td>wake-up burst-15 recall, corridors (90 probes/seq)</td><td class="best">99&ndash;100% (r@10cm 90&ndash;96%, ~55 ms)</td><td>DNF &mdash; reference harness deadlocks at the camera gap</td></tr>
+      <tr><td>wake-up burst-15 recall, magistrale2</td><td class="best">85.6%</td><td>DNF</td></tr>
+    </tbody></table>
+    <p class="note">Wake-up protocol: camera frames removed for a window while IMU continues (a real sleep/pocket event); every system must re-anchor to its own map. Full data on the Reloc tab.</p>`));
   for (const g of ["euroc", "rooms", "long", "msd"]) datasetBar(g, view);
 }
 
