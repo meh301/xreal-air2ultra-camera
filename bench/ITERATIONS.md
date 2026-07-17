@@ -1352,3 +1352,20 @@ NEXT ARC (documented, not started in anger): XR_LOOPBURST — corridor
 return-registration via multi-frame joint solve (autopsy: single rigid
 ~60cm residual; single-frame PnP depth-axis weakness; machinery =
 BURST accumulator + pnp2_ransac_burst over the confirm window).
+
+### > XR_LOOPBURST BUILT (67483ba) + DUAL A/B FIRED; SITE CURATED
+LOOPBURST: healthy-loop return-registration — accumulate each verified
+re-entry frame's assigned (bearing, session-3D) pairs + VIO offsets
+(anchor-relative, odom frame; CORR-step invariant), joint-solve
+pnp2_ransac_burst over the walked baseline (>=3, target 6 verified
+search frames, 2.5s window), apply as capped CORR polish (0.04-1.5m,
+<15deg; larger fused delta = structural disagreement, distrust).
+Targets the corr autopsy's ~60cm single-frame PnP depth-axis residual.
+A/B: fz18 vs fz18+LOOPBURST, corridors 1-5 n=10 + room1/mag2 n=5 —
+fired INDEPENDENTLY on .15 (lb_ab) and .58 (lb_ab2): corridor verdicts
+count only if both rounds agree.
+SITE: curated to two ours arms (fzbase/fz18; s5off/g99fl relabeled —
+flag-identical envs), stage-7-era data only (880 rows from 32k), viewer
+rewritten (headline tiles fixed, fz18 colors, reloc18 tab, 160 trajs),
+drives+wake-up headline card added. Historical arms remain in result
+dirs + this ledger only.
