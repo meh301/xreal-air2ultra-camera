@@ -1312,3 +1312,23 @@ stack: s5e (room1/5) + heldout (rooms2-4/6, corr2/4, slides) + corr10
 n=10 (corr1/3/5) + mag10 n=10 (mag1/2). No tumvi finale rerun needed.
 Remaining finale: .58 euroc+msd fz18 wave, .181 bigtum fz18 wave +
 reloc re-measure (rl18/rb18). Drives banked at n=3.
+
+### x FLEET18 BIGTUM FINALE (.181) + RELOC18 + CORRIDOR AUTOPSY
+- Bigtum ATE (fzbase vs fz18 within-round): slides1 26.3->24.2, slides2
+  42.6->36.1, mag2 ~tie, mag1 ours kept 4/5 runs vs control 1/5.
+  Freeze story replicates on a third container.
+- RELOC18 (wake-up at fz18, n=3): BURST corr1 98.9% / corr3 100% /
+  corr4 100% (r@10cm 90-96%), mag2 85.6% (was 80 pre-stage-7);
+  single-frame 94.4/86.7/96.7/47.8; med err 3-6cm. Best wake-up
+  numbers of the program, now measured at the FROZEN stack.
+- CORRIDOR-1 BIMODALITY AUTOPSY (40 within-round runs, corr10): closure
+  telemetry IDENTICAL between modes (loops 2-3, same caps, similar
+  0.5-0.8m corrections at return). Time-resolved error is FLAT in both
+  GT segments: good runs 4-5cm everywhere, bad runs 29-31cm everywhere
+  -> the bad mode is a SINGLE RIGID RETURN-REGISTRATION RESIDUAL
+  (~60cm split by Umeyama), not drift. Corridor frontier = weld
+  PRECISION at re-entry (okvis2's landmark-BA gets 2.8cm); our factor
+  stack pulls toward the same PnP-derived 3D, hence arm-neutrality.
+  NEXT-ARC candidates: post-weld joint refinement of the re-entry
+  against stored landmarks (LOCALBA machinery exists), multi-closure
+  fusion at return, subpixel PnP refinement.
