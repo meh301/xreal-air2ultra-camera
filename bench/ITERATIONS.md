@@ -1393,3 +1393,23 @@ logs: 0.46-0.80m corrections APPLIED at 46-59% joint consensus (the
 30% gate admits structurally-disagreeing solves — high-consensus
 solves run 90-98%). v2 apply gate must also require >=60% consensus.
 True v2 verdict pending from .15/.58.
+
+### x LOOPBURST v2 VERDICT (dual n=10, .15+.58): PARKED — no gain, adds variance
+v2 policy fixes WORKED (room1 harm gone: 6.7/7.2 and 12.6/12.9 ties;
+one-shot + refractory + floor + TIGHT-channel all behaved). But
+corridors disagree across rounds in BOTH directions (.15: corr1 17->29,
+corr3 25->32 worse; .58: corr3 19->17 better, corr5 15->22 worse);
+aggregates +1.2/+2.9. MECHANISM: the one-shot pass runs at the return
+where accumulated search frames span too little baseline — every
+frame's single-frame PnP shares the same depth-axis bias, the joint
+solve reaches 90%+ consensus ON the bias and reproduces it; genuine
+disagreement (0.5-0.8m) comes only with collapsed consensus (~50%) =
+junk. Short-window fusion cannot observe what single frames cannot.
+PARKED: XR_LOOPBURST ships flag-off; fz18 stays the freeze unchanged.
+NEXT-ARC candidates for the corridor frontier (documented, unbuilt):
+(a) landmark re-triangulation at re-entry (fresh stereo/multi-view
+depth on the matched points before solving), (b) full lmdb-injection
+(revived observations as optimizable states — the OKVIS2 mechanism),
+(c) infra: corridor A/B sharpness is capped by run stochasticity
+(fz18 corr1 17/29/32 across rounds at n=10) — deterministic replay
+scheduling would multiply every future corridor A/B's power.
