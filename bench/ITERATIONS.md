@@ -1111,3 +1111,26 @@ escalation if arbitration fails.
 
 ### x CAUCHY KERNEL: REJECT — rooms identical, corr2 worse (32 vs 22),
 no gain anywhere. Huber stays (okvis2-parity curiosity closed).
+
+### x STAGE-5 DECISIVE A/B (.15, n=5, 120 runs) — AUTO-GATE IS THE KEEPER
+- s5arb (fold-time arbitration alone): FAIL. corr1 12.85->29.30, mag2
+  diverges (all 5 runs unscoreable; runs complete 100% but trajectory
+  degenerate). Fold-time residual-vs-current-state cannot catch
+  aliased-space poison alone — 4th failed gate of that family.
+- s5auto (arb + scene auto-gate <8m): UNIFORM-SAFE. Every seq >= control:
+  rooms 10.4/16.6/1.84 vs 13.0/18.2/1.98, corr1 6.28 vs 12.85, corr3
+  14.5 vs 15.8, mag2 49.6 vs 65.8, mag1/corr5 ~noise. Aggregate 15.54
+  vs 16.96. FIRST composition where LMMARG is safe everywhere.
+- Mechanism: corr1 arb 29.3 -> auto 6.3 proves the scene EMA reads
+  corridors as big-space and BLOCKS folds there; safety comes from the
+  gate, not the arbitration. Arbitration is taxing the rooms prize
+  (12 fold-rejections in room1; rooms recovered only 10.4 vs historical
+  ungated 6.4).
+- FOLLOW-UP LAUNCHED: s5b disambiguation on .15 (160 runs, n=5,
+  within-round): s5off / s5auto(4px) / g8(8px) / g999(gate-only, no
+  arbitration). Prediction: g999 = full rooms prize + identical
+  elsewhere (gate blocks all big-space folds). If confirmed, fz17
+  composition adds XR_LMMARG_FOLD_PX=999 (gate does all the work).
+- fleet17 DRIVES leg fired on .58 (composition-insensitive: scene gate
+  blocks folds at km scale regardless of FOLD_PX). tumvi/euroc legs
+  HELD until s5b verdict fixes the composition.
