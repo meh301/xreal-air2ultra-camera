@@ -407,6 +407,18 @@ int main(int argc, char **argv) {
             fprintf(stderr, "xr_replay: XFeat frontend seeding ON\n");
         }
     }
+    /* XR_IMU_NOISE_SCALE: multiply the pack's continuous-time IMU noise
+     * densities (gyro, gyro_bias, accel, accel_bias) — the MSD noise-model
+     * diagnostic (config JSON has no imu-noise keys; they ride the calib
+     * feed). */
+    {
+        const char *ns = getenv("XR_IMU_NOISE_SCALE");
+        if (ns && *ns && have_noises) {
+            float sc = (float)atof(ns);
+            if (sc > 0.01f && sc < 100.0f)
+                for (int i = 0; i < 4; i++) noises[i] *= sc;
+        }
+    }
     if (xr_slam_start_raw(&L, &R, meta.imu_hz,
                           have_noises ? noises : NULL) != 0)
         DIE("Basalt failed to start (libbasalt.so on LD_LIBRARY_PATH?)");
