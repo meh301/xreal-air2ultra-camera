@@ -987,6 +987,20 @@ static int lmfact_on(void) {
 #ifndef LMFACT_SIGMA_PX
 #define LMFACT_SIGMA_PX 2.0f        /* reprojection measurement std [px] */
 #endif
+/* XR_LMF_SIGMA overrides the measurement std at runtime — the weight is a
+ * per-call channel argument, so strength sweeps need no basalt rebuild.
+ * Smaller sigma = stronger pull toward the map's 3D. */
+static float lmf_sigma(void) {
+    static float v = -1.0f;
+    if (v < 0) {
+        const char *e = getenv("XR_LMF_SIGMA");
+        v = (e && *e) ? (float)atof(e) : LMFACT_SIGMA_PX;
+        if (v <= 0.01f || v > 50.0f) v = LMFACT_SIGMA_PX;
+        if (v != LMFACT_SIGMA_PX)
+            LOGI("session map: LMFACT sigma override %.2f px", (double)v);
+    }
+    return v;
+}
 #ifndef CONFW_MIN_W
 #define CONFW_MIN_W 0.4f       /* weakest accepted alignment applies 40% */
 #endif
@@ -1035,7 +1049,7 @@ static void lmfact_post(const float (*uv)[2], const float (*ps)[3], int n,
         fxyz[3 * m + 1] = po[1];
         fxyz[3 * m + 2] = po[2];
     }
-    if (xr_slam_landmark_factors(ts, 0, fuv, fxyz, n, LMFACT_SIGMA_PX) > 0)
+    if (xr_slam_landmark_factors(ts, 0, fuv, fxyz, n, lmf_sigma()) > 0)
         LOGI("session map: LMFACT posted %d landmark factors", n);
 }
 

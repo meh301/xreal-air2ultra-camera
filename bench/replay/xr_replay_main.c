@@ -25,8 +25,10 @@
 #include "xr_xfeat.h"
 #include "xreal_core.h"
 
+/* _exit, not exit: an error mid-run must not hang in the same static
+ * destructors the success path skips (see the end of main). */
 #define DIE(...) do { fprintf(stderr, "xr_replay: " __VA_ARGS__); \
-                      fprintf(stderr, "\n"); exit(1); } while (0)
+                      fprintf(stderr, "\n"); fflush(NULL); _exit(1); } while (0)
 
 /* ---------------- pack readers ---------------- */
 
@@ -611,5 +613,12 @@ int main(int argc, char **argv) {
     fclose(f_imu);
     fclose(f_idx);
     fclose(f_raw);
-    return 0;
+    /* Every output is closed by here. Skip the C++ static destructors on
+     * the way out: ORT's CUDA EP teardown and basalt/TBB worker threads
+     * can deadlock in __run_exit_handlers, leaving finished runs hanging
+     * at 0% CPU (the fleet's pkill-discipline pain, and the reason
+     * `timeout` wrappers were load-bearing). Nothing after main() needs
+     * to run — flush and leave. */
+    fflush(NULL);
+    _exit(0);
 }
