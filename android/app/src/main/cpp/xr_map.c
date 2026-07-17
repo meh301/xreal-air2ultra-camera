@@ -960,6 +960,29 @@ static int rotstore_on(void) {
     }
     return v;
 }
+/* XR_LMFACT — stage-3 map->VIO coupling: after a verified closure /
+ * relocalization, feed the RE-OBSERVED MAP LANDMARKS (the PnP inlier 2D-3D
+ * pairs) into the estimator as reprojection factors with FIXED 3D. Unlike
+ * the pose-prior channel, arbitration is PER POINT inside the optimizer, so
+ * it is safe at any revisit age — the mechanism OKVIS2 uses to push error
+ * below VIO drift on room-scale revisits the 30s revisit-age gate excludes.
+ * Needs the extended libbasalt (vit_tracker_xreal_landmark_factors); on a
+ * stock build the post is a no-op and behavior is bit-identical. */
+static int lmfact_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LMFACT");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LANDMARK-FACTOR map->VIO coupling ON");
+    }
+    return v;
+}
+#ifndef LMFACT_MAX
+#define LMFACT_MAX 32               /* factors per frame (basalt-side cap) */
+#endif
+#ifndef LMFACT_SIGMA_PX
+#define LMFACT_SIGMA_PX 2.0f        /* reprojection measurement std [px] */
+#endif
 #ifndef CONFW_MIN_W
 #define CONFW_MIN_W 0.4f       /* weakest accepted alignment applies 40% */
 #endif
@@ -978,6 +1001,38 @@ static void tight_post_prior(const float Dq[4], const float Dp[3],
     float q_xyzw[4] = { Eq[1], Eq[2], Eq[3], Eq[0] };   /* wxyz -> xyzw */
     xr_slam_pose_prior(q_xyzw, Ep, TIGHT_SIGMA_T, TIGHT_SIGMA_R,
                        ts + TIGHT_EXPIRY_NS);
+}
+
+/* XR_LMFACT posting: hand the verification's inlier 2D-3D pairs to the
+ * estimator as fixed-3D reprojection factors on the query frame. The
+ * landmark positions are SESSION-frame (what PnP consumed); the estimator
+ * lives in the ODOM frame (session = CORR ∘ odom), so transform each point
+ * back via CORR⁻¹. With p_o = CORR⁻¹(p_s) the camera-frame geometry at the
+ * pose-prior target T' = CORR⁻¹∘D∘T is IDENTICAL to the session-frame
+ * geometry the verification proved — the factors pull the odom state toward
+ * exactly the same place, but per-point and optimizer-arbitrated.
+ * Called under MAP_LOCK (CORR stable); map thread only. */
+static void lmfact_post(const float (*uv)[2], const float (*ps)[3], int n,
+                        uint64_t ts) {
+    if (n <= 0) return;
+    if (n > LMFACT_MAX) n = LMFACT_MAX;
+    float ci[4];
+    qconj(CORR.q, ci);
+    static float fuv[LMFACT_MAX * 2], fxyz[LMFACT_MAX * 3]; /* map thread */
+    for (int m = 0; m < n; m++) {
+        float d[3], po[3];
+        d[0] = ps[m][0] - CORR.p[0];
+        d[1] = ps[m][1] - CORR.p[1];
+        d[2] = ps[m][2] - CORR.p[2];
+        qrotv(ci, d, po);              /* odom = R(CORR.q⁻¹)(session - CORR.p) */
+        fuv[2 * m] = uv[m][0];
+        fuv[2 * m + 1] = uv[m][1];
+        fxyz[3 * m] = po[0];
+        fxyz[3 * m + 1] = po[1];
+        fxyz[3 * m + 2] = po[2];
+    }
+    if (xr_slam_landmark_factors(ts, 0, fuv, fxyz, n, LMFACT_SIGMA_PX) > 0)
+        LOGI("session map: LMFACT posted %d landmark factors", n);
 }
 
 /* rotation vector (axis*angle) <-> quaternion */
@@ -1848,10 +1903,16 @@ static int rc_nb_cmp(const void *a, const void *b) {
  * consensus (the "confidently wrong" failure). Verification support is
  * counted by GEOMETRIC INLIERS across DISTINCT keyframes, not raw
  * matches. Fills D (odom -> session), the pair/inlier counts, and the
- * inlier-backed covisible-keyframe count; returns 1 on a solved pose. */
+ * inlier-backed covisible-keyframe count; returns 1 on a solved pose.
+ * XR_LMFACT extension: when out_iuv/out_ips/out_nl are non-NULL, also
+ * emits up to LMFACT_MAX geometric-inlier correspondences — query pixel
+ * (out_iuv) + matched landmark SESSION-frame 3D (out_ips) — for the
+ * stage-3 landmark-factor channel. Callers not needing them pass NULL. */
 static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[3],
-                     int *out_n3, int *out_nin, int *out_covis) {
+                     int *out_n3, int *out_nin, int *out_covis,
+                     float (*out_iuv)[2], float (*out_ips)[3], int *out_nl) {
     *out_n3 = *out_nin = *out_covis = 0;
+    if (out_nl) *out_nl = 0;
     if (!GEOM.have) return 0;
     int bad = w->desc_type == DESC_BAD;
 
@@ -1984,6 +2045,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
      * landmark id assigned at most once */
     qsort(cand, (size_t)nc, sizeof cand[0], rc_cmp);
     static float Sw[COVIS_MAX_CAND][3], Pw[COVIS_MAX_CAND][3];
+    static float Quv[COVIS_MAX_CAND][2];      /* query pixel per pair (lmfact) */
     static int32_t Pid[COVIS_MAX_CAND];
     static int32_t used_id[COVIS_MAX_CAND];
     static char qused[XR_MAP_KP_PER_KF];
@@ -2010,6 +2072,8 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
         Sw[n][1] = Rq[3] * rb[0] + Rq[4] * rb[1] + Rq[5] * rb[2];
         Sw[n][2] = Rq[6] * rb[0] + Rq[7] * rb[1] + Rq[8] * rb[2];
         memcpy(Pw[n], cand[k].ps, sizeof Pw[0]);
+        Quv[n][0] = w->kp_uv[i][0];
+        Quv[n][1] = w->kp_uv[i][1];
         Pid[n] = cand[k].id;
         qused[i] = 1;
         used_id[nid++] = cand[k].id;
@@ -2084,6 +2148,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
      * cluster collapses to one or two bits and is rejected upstream. */
     float cy = Rz[0], sy = Rz[3];
     uint32_t covmask = 0;
+    int nl = 0;
     for (int m = 0; m < n; m++) {
         float qx = Pw[m][0] - C[0], qy = Pw[m][1] - C[1], qz = Pw[m][2] - C[2];
         float nq = sqrtf(qx * qx + qy * qy + qz * qz);
@@ -2093,7 +2158,14 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
         float dot = (qx * rx + qy * ry + qz * Sw[m][2]) / nq;
         if (dot <= VER_COS_TOL) continue;
         covmask |= obsmask[m];
+        if (out_iuv && out_ips && nl < LMFACT_MAX) {   /* XR_LMFACT pairs */
+            out_iuv[nl][0] = Quv[m][0];
+            out_iuv[nl][1] = Quv[m][1];
+            memcpy(out_ips[nl], Pw[m], sizeof out_ips[0]);
+            nl++;
+        }
     }
+    if (out_nl) *out_nl = nl;
     *out_covis = __builtin_popcount(covmask);
 
     /* 4. D (odom -> session): rotation = Rz; translation places the query
@@ -2528,6 +2600,10 @@ static void process_keyframe(void) {
     int use_vpr = 0;                   /* retrieval pre-rank active */
     float vpr_top = 0;                 /* best cosine this search (ledger) */
     float bDq[4], bDp[3];
+    /* XR_LMFACT: the WINNING candidate's inlier 2D-3D pairs (query pixel +
+     * session-frame landmark), kept for the apply branch (map thread only) */
+    static float lf_uv[LMFACT_MAX][2], lf_ps[LMFACT_MAX][3];
+    int lf_n = 0;
     if (do_search) {
     did_search = 1;
     uint64_t t_match0 = map_mono_us();
@@ -2715,13 +2791,23 @@ static void process_keyframe(void) {
     for (int c = 0; c < ncand; c++) {
         int cn3 = 0, cnin = 0, ccov = 0;
         float cDq[4], cDp[3];
-        int ok = reloc_pnp(&work, cand_i[c], kfn, cDq, cDp, &cn3, &cnin, &ccov);
+        static float cuv[LMFACT_MAX][2], cps[LMFACT_MAX][3]; /* map thread */
+        int cnl = 0;
+        int want_lf = lmfact_on();
+        int ok = reloc_pnp(&work, cand_i[c], kfn, cDq, cDp, &cn3, &cnin, &ccov,
+                           want_lf ? cuv : NULL, want_lf ? cps : NULL,
+                           want_lf ? &cnl : NULL);
         if (cn3 > any_pairs) any_pairs = cn3;
         if (ok && ccov >= COVIS_MIN_KF && cnin > best_nin) {
             best_i = cand_i[c]; best_m = cand_m[c];
             best_n3 = cn3; best_nin = cnin; best_covis = ccov;
             memcpy(bDq, cDq, sizeof bDq);
             memcpy(bDp, cDp, sizeof bDp);
+            if (want_lf) {                 /* keep the winner's pairs */
+                memcpy(lf_uv, cuv, sizeof lf_uv);
+                memcpy(lf_ps, cps, sizeof lf_ps);
+                lf_n = cnl;
+            }
         }
     }
     /* XR_LMDESC fallback: retrieval surfaced nothing verifiable while
@@ -2736,6 +2822,7 @@ static void process_keyframe(void) {
             best_n3 = n32;
             best_nin = nin2;
             best_covis = cov2;
+            lf_n = 0;    /* pairs (if any) came from a different solve */
             memcpy(bDq, dq2, sizeof bDq);
             memcpy(bDp, dp2, sizeof bDp);
             if (n32 > any_pairs) any_pairs = n32;
@@ -2967,6 +3054,15 @@ static void process_keyframe(void) {
                 if (TIGHT && confirmed &&
                     work.ts - KFA(best_i).ts > TIGHT_REVISIT_NS)
                     tight_post_prior(Dq, Dp, work.ts);
+                /* XR_LMFACT: sub-gate closures also feed the landmark-
+                 * factor channel — NO revisit-age gate: a factor from a
+                 * recent (self-drift-correlated) keyframe is arbitrated
+                 * per point by the optimizer instead of gluing the whole
+                 * pose like the prior did (the v9 failure), and room-scale
+                 * revisits younger than 30s are exactly what the prior
+                 * channel could never absorb. */
+                if (lmfact_on() && lf_n > 0)
+                    lmfact_post(lf_uv, lf_ps, lf_n, work.ts);
                 /* XR_TIGHTSUB: arm the 2-frame confirmation for SUB-GATE
                  * closures too. Without this, PENDING is only ever set
                  * above the 0.5m gate, so `confirmed` can never become
@@ -3112,6 +3208,13 @@ static void process_keyframe(void) {
                      * it absorbs, so the map layer converges without ever
                      * discontinuity-stepping the output (OKVIS2 property). */
                     tight_post_prior(Dq, Dp, work.ts);
+                    /* XR_LMFACT: the confirmed closure's inlier landmarks
+                     * ride along as fixed-3D reprojection factors — the
+                     * per-point channel the optimizer arbitrates (CORR is
+                     * NOT stepped in this branch, so the CORR⁻¹ transform
+                     * inside matches the prior's E = CORR⁻¹∘D exactly). */
+                    if (lmfact_on() && lf_n > 0)
+                        lmfact_post(lf_uv, lf_ps, lf_n, work.ts);
                     tight_applied = 1;
                     LAST_SNAP_NS = work.ts;
                     PENDING_D.have = 0;

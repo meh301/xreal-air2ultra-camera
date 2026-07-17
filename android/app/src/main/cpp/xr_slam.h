@@ -93,6 +93,15 @@ int xr_slam_pose_prior(const float E_q_xyzw[4], const float E_p[3],
                        float sigma_t_m, float sigma_r_rad,
                        uint64_t expiry_t_ns);
 
+/* Stage-3 map->VIO coupling (optional backend extension): re-observed map
+ * landmarks as reprojection factors with FIXED 3D on the frame at ts_ns.
+ * uv = 2n pixels in camera `cam`, xyz_odom = 3n landmark positions in the
+ * ESTIMATOR world (odom) frame, sigma_px = measurement std. Returns 1 if
+ * delivered, 0 when the tracker is down, -1 when the backend lacks the
+ * extension. */
+int xr_slam_landmark_factors(uint64_t ts_ns, int cam, const float *uv,
+                             const float *xyz_odom, int n, float sigma_px);
+
 /* Detector unification (optional backend extension): post external keypoint
  * seeds (u,v interleaved, pixel coords) for frame ts/cam BEFORE pushing that
  * frame; the VIO's optical flow merges them with FAST detection.
