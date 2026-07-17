@@ -1089,3 +1089,10 @@ uniform). Refuted: INVIDX, sh20, tv065, EDGEGRAPH (parked), MSD
 frontend + imu-noise, sigma-strength, LMFACT-transient. Unbuilt tail:
 Cauchy kernel, GravCal weighting, right-eye probing, MASt3R oracle.
 Then: device day.
+
+### x MULTIHYP SAFETY FLEET: rooms/corr2 clean, mag2 +11cm in mapping —
+extra confirms admit closures aliased spaces punish (the arc's recurring
+law). SCOPED to LOST frames only (the measured benefit is recovery
+recall; healthy tracking keeps strict 2-frame). With that scope MULTIHYP
+joins the freeze reloc stack. FINAL freeze reloc stack: TRUSTVPR +
+BURSTPNP + MULTIHYP(lost-only) + cap400 + ~55ms latency.
