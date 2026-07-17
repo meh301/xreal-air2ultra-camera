@@ -75,6 +75,9 @@ def score_one(args):
         return fname, None, None, None
     if est.ndim != 2 or len(est) < RTE_DELTA + 2:
         return fname, None, None, 0.0
+    est = est[np.isfinite(est).all(axis=1)]   # diverged runs emit NaN rows
+    if len(est) < RTE_DELTA + 2:
+        return fname, None, None, 0.0
     gt_t = gta[:, 0]
     gt_span = gt_t[-1] - gt_t[0]
     expected = max(1, int(round(gt_span * fps)) + 1)
@@ -100,7 +103,10 @@ def score_one(args):
     # ATE: Umeyama SE(3), no scale
     ca, cb = E_t.mean(0), G_t.mean(0)
     H = (E_t - ca).T @ (G_t - cb)
-    U, _, Vt = np.linalg.svd(H)
+    try:
+        U, _, Vt = np.linalg.svd(H)
+    except np.linalg.LinAlgError:     # degenerate geometry (diverged run)
+        return fname, None, None, round(float(completion), 1)
     D = np.diag([1.0, 1.0, np.sign(np.linalg.det(Vt.T @ U.T))])
     R = Vt.T @ D @ U.T
     ate_m = float(np.sqrt((np.linalg.norm((R @ (E_t - ca).T).T + cb - G_t, axis=1) ** 2).mean()))
