@@ -910,3 +910,12 @@ corr4 flat. The 200-cap eviction was discarding revisit anchors. RAM
 ~+40-80MB, fine per Gen5 budget. Folded INTO fleet v15's fz15 arm
 (composition purity: fz15 = vkfobs-all-configs + TRUSTVPR + cap400);
 both fleet halves restarted with fz15 rebuilt, fzbase runs preserved.
+
+### x DRIVE1 "PROBE HANG" ROOT-CAUSED (2nd bug, distinct from imu-burst):
+fd audit of the live specimen — all pack files at EOF, main stuck in
+push_imu_sample, pipeline empty-idle. The harness's TAIL imu flush pushed
+post-last-frame residue (~350 samples at 2kHz) into a queue that only
+drains while frames follow. Indoor tails (200Hz) fit by luck; drive1's
+crosses capacity deterministically = every historical drive1 "wedge" at
+the end of stream. Fix bd76979: no tail flush (frameless imu is useless
+to the estimator). drive1 eig+meg relaunched with both fixes.
