@@ -489,10 +489,13 @@ int main(int argc, char **argv) {
         }
         line++;
     }
-    while (have_imu) {          /* tail IMU */
-        xr_slam_push_imu((uint64_t)imu.ts, imu.g, imu.a);
-        have_imu = fread(&imu, 32, 1, f_imu) == 1;
-    }
+    /* NO tail IMU flush. Basalt drains the imu queue only while frames
+     * follow; pushing the post-last-frame residue (drives: ~174 ms at
+     * 2 kHz ≈ 350 samples) into the bounded queue with no frame behind it
+     * BLOCKS FOREVER once it exceeds capacity — drive1's deterministic
+     * "probe hang" (fd audit: all files at EOF, main stuck in
+     * push_imu_sample, whole pipeline empty-idle). The estimator cannot
+     * use frameless imu anyway. */
     long quiet = 0, last = ctx.n_poses;
     while (quiet < 20) {        /* drain until 2 s with no new poses */
         usleep(100000);
