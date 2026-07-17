@@ -1438,6 +1438,186 @@ static void pgo_deform(int anchor, const float wq[4], const float wp[3],
     }
 }
 
+/* XR_EDGEGRAPH — closure-edge MEMORY + whole-chain relaxation. The
+ * per-sequence audit against OKVIS2+LC showed corridors 1-4 lost 2-7x:
+ * they keep every closure as a graph edge and re-optimize the whole
+ * trajectory on each revisit; we applied a closure and FORGOT it. Every
+ * accepted closure now leaves a persistent edge (matched keyframe ->
+ * newest keyframe, measured relative session pose), and relaxation runs
+ * over the ENTIRE chain with ALL remembered edges — not just the anchor
+ * tail with the newest edge. Edge admission stays conservative (only
+ * verified closures get here) and each edge is down-weighted by Dynamic
+ * Covariance Scaling on its current residual, so one bad edge cannot
+ * bend the chain. Microseconds at 200 kf x 12 sweeps. Slots are
+ * validated by timestamp (slot reuse after eviction would silently
+ * re-target an edge). */
+#define EG_MAX 64
+#define EG_DCS_PHI 0.25f               /* DCS kernel, metres^2 */
+static struct {
+    int16_t slot_ref, slot_tip;
+    uint64_t ts_ref, ts_tip;           /* validity: slot-reuse detection */
+    float Zq[4], Zp[3];                /* measured tip pose in ref frame */
+    float w;
+} EG[EG_MAX];
+static int EG_N;                       /* map thread only */
+static int edgegraph_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_EDGEGRAPH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: CLOSURE-EDGE GRAPH ON");
+    }
+    return v;
+}
+
+/* admit an edge from an accepted closure: ref = the matched keyframe
+ * (order index), tip = the newest stored keyframe; Z carries the verified
+ * query pose back to the tip through raw odometry (drift-free over the
+ * seconds separating them). MAP_LOCK held. */
+static void eg_admit(int ref_ord, const float wq[4], const float wp[3],
+                     const float Dq[4], const float Dp[3], int nin) {
+    if (KF_N < 2 || ref_ord < 0 || ref_ord >= KF_N) return;
+    int tip_ord = KF_N - 1;
+    if (tip_ord == ref_ord) return;
+    xr_kf *ref = &KFA(ref_ord), *tip = &KFA(tip_ord);
+    if (ref->seg != tip->seg) return;   /* cross-seg belongs to WELD */
+    float Tq[4], Tp[3];
+    pose_compose(Dq, Dp, wq, wp, Tq, Tp);
+    float qi[4], pi[3], Rq[4], Rp[3];
+    pose_invert(tip->q, tip->p, qi, pi);
+    pose_compose(qi, pi, wq, wp, Rq, Rp);
+    float ri[4], rp2[3], Ttq[4], Ttp[3];
+    pose_invert(Rq, Rp, ri, rp2);
+    pose_compose(Tq, Tp, ri, rp2, Ttq, Ttp);
+    float rqi[4], rpi[3], Zq[4], Zp[3];
+    pose_invert(ref->qc, ref->pc, rqi, rpi);
+    pose_compose(rqi, rpi, Ttq, Ttp, Zq, Zp);
+    int slot = -1;
+    for (int e = 0; e < EG_N; e++)
+        if (EG[e].slot_ref == KFO[ref_ord] && EG[e].slot_tip == KFO[tip_ord])
+            slot = e;
+    if (slot < 0) {
+        if (EG_N < EG_MAX) slot = EG_N++;
+        else {
+            slot = 0;
+            for (int e = 1; e < EG_N; e++)
+                if (EG[e].w < EG[slot].w) slot = e;
+        }
+    }
+    EG[slot].slot_ref = (int16_t)KFO[ref_ord];
+    EG[slot].slot_tip = (int16_t)KFO[tip_ord];
+    EG[slot].ts_ref = ref->ts;
+    EG[slot].ts_tip = tip->ts;
+    memcpy(EG[slot].Zq, Zq, sizeof Zq);
+    memcpy(EG[slot].Zp, Zp, sizeof Zp);
+    EG[slot].w = nin >= 24 ? 1.0f : (float)nin / 24.0f;
+}
+
+/* whole-chain relaxation with all live edges (MAP_LOCK held) */
+static void eg_relax(void) {
+    int n = KF_N;
+    if (n < 3 || EG_N == 0) return;
+    static int ord_of[XR_MAP_MAX_KF];
+    for (int i = 0; i < XR_MAP_MAX_KF; i++) ord_of[i] = -1;
+    for (int k = 0; k < n; k++) ord_of[KFO[k]] = k;
+    static int e_ref[EG_MAX], e_tip[EG_MAX];
+    static float e_w[EG_MAX];
+    int ne = 0;
+    for (int e = 0; e < EG_N; e++) {
+        int ro = EG[e].slot_ref >= 0 ? ord_of[EG[e].slot_ref] : -1;
+        int to = EG[e].slot_tip >= 0 ? ord_of[EG[e].slot_tip] : -1;
+        if (ro < 0 || to < 0) continue;
+        if (KFA(ro).ts != EG[e].ts_ref || KFA(to).ts != EG[e].ts_tip)
+            continue;                   /* slot reused: edge is dead */
+        float pred_q[4], pred_p[3];
+        pose_compose(KFA(ro).qc, KFA(ro).pc, EG[e].Zq, EG[e].Zp,
+                     pred_q, pred_p);
+        float dx = pred_p[0] - KFA(to).pc[0];
+        float dy = pred_p[1] - KFA(to).pc[1];
+        float dz = pred_p[2] - KFA(to).pc[2];
+        float r2 = dx * dx + dy * dy + dz * dz;
+        float s = 2.0f * EG_DCS_PHI / (EG_DCS_PHI + r2);
+        if (s > 1.0f) s = 1.0f;
+        e_ref[ne] = ro; e_tip[ne] = to;
+        e_w[ne] = EG[e].w * s * s;
+        ne++;
+    }
+    if (!ne) return;
+    static float Zq[XR_MAP_MAX_KF][4], Zp[XR_MAP_MAX_KF][3];
+    static uint8_t Zok[XR_MAP_MAX_KF];
+    static float Xq[XR_MAP_MAX_KF][4], Xp[XR_MAP_MAX_KF][3];
+    for (int i = 0; i < n; i++) {
+        memcpy(Xq[i], KFA(i).qc, sizeof Xq[i]);
+        memcpy(Xp[i], KFA(i).pc, sizeof Xp[i]);
+        if (i < n - 1) {
+            uint64_t dt = KFA(i + 1).ts - KFA(i).ts;
+            Zok[i] = dt < PGO_GAP_NS && KFA(i + 1).seg == KFA(i).seg;
+            float qai[4], t[3];
+            qconj(KFA(i).q, qai);
+            qmul(qai, KFA(i + 1).q, Zq[i]);
+            t[0] = KFA(i + 1).p[0] - KFA(i).p[0];
+            t[1] = KFA(i + 1).p[1] - KFA(i).p[1];
+            t[2] = KFA(i + 1).p[2] - KFA(i).p[2];
+            qrotv(qai, t, Zp[i]);
+        } else Zok[i] = 0;
+    }
+    for (int s = 0; s < PGO_SWEEPS; s++) {
+        int fwd = (s & 1) == 0;
+        for (int k = 1; k < n; k++) {
+            int i = fwd ? k : n - k;
+            float aq[4], ap[3];
+            float wsum = 0;
+            int have = 0;
+            if (Zok[i - 1]) {
+                pose_compose(Xq[i - 1], Xp[i - 1], Zq[i - 1], Zp[i - 1],
+                             aq, ap);
+                wsum = 1.0f; have = 1;
+            }
+            if (i < n - 1 && Zok[i]) {
+                float ziq[4], zip[3], bq[4], bp[3];
+                pose_invert(Zq[i], Zp[i], ziq, zip);
+                pose_compose(Xq[i + 1], Xp[i + 1], ziq, zip, bq, bp);
+                if (have) pgo_blend(aq, ap, wsum, bq, bp, 1.0f, aq, ap);
+                else { memcpy(aq, bq, 16); memcpy(ap, bp, 12); }
+                wsum += 1.0f; have = 1;
+            }
+            for (int e = 0; e < ne; e++) {
+                float bq[4], bp[3];
+                float wgt = PGO_W_CLOSE * e_w[e];
+                if (e_tip[e] == i) {
+                    pose_compose(Xq[e_ref[e]], Xp[e_ref[e]],
+                                 EG[e].Zq, EG[e].Zp, bq, bp);
+                } else if (e_ref[e] == i) {
+                    float ziq[4], zip[3];
+                    pose_invert(EG[e].Zq, EG[e].Zp, ziq, zip);
+                    pose_compose(Xq[e_tip[e]], Xp[e_tip[e]], ziq, zip,
+                                 bq, bp);
+                } else continue;
+                if (have) pgo_blend(aq, ap, wsum, bq, bp, wgt, aq, ap);
+                else { memcpy(aq, bq, 16); memcpy(ap, bp, 12); }
+                wsum += wgt; have = 1;
+            }
+            if (have) { memcpy(Xq[i], aq, 16); memcpy(Xp[i], ap, 12); }
+        }
+    }
+    for (int i = 1; i < n; i++) {
+        if (pgo4dof_on()) {
+            float qi2[4], dq[4];
+            qconj(KFA(i).qc, qi2);
+            qmul(Xq[i], qi2, dq);
+            float w = dq[0], z = dq[3];
+            float nrm = sqrtf(w * w + z * z);
+            if (nrm > 1e-6f) {
+                float dqz[4] = { w / nrm, 0, 0, z / nrm };
+                qmul(dqz, KFA(i).qc, Xq[i]);
+            }
+        }
+        memcpy(KFA(i).qc, Xq[i], sizeof Xq[i]);
+        memcpy(KFA(i).pc, Xp[i], sizeof Xp[i]);
+    }
+    CLOUD_DIRTY = 1;
+}
+
 
 /* Submap WELD: rigidly re-register every keyframe of segment `from` into
  * the session frame of segment `to` (E = session_to <- session_from), and
@@ -4116,6 +4296,17 @@ static void process_keyframe(void) {
                     if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                 }
+                /* XR_EDGEGRAPH: sub-gate closures are verified geometry
+                 * too — remember them as edges and relax the chain at a
+                 * bounded cadence (this is the corridors 1-4 lever) */
+                if (edgegraph_on()) {
+                    static uint64_t EG_LAST_NS;   /* map thread only */
+                    eg_admit(best_i, work.q, work.p, Dq, Dp, nin);
+                    if (work.ts - EG_LAST_NS > 1000000000ull) {
+                        EG_LAST_NS = work.ts;
+                        eg_relax();
+                    }
+                }
                 /* XR_LOCALBA: a VERIFIED sub-gate closure is the rooms
                  * regime — refine the window even though no correction
                  * applies (rate-limited; structure is what improves). */
@@ -4278,6 +4469,10 @@ static void process_keyframe(void) {
                         if (lmtrack_on())
                             lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                     }
+                    if (edgegraph_on()) {
+                        eg_admit(best_i, work.q, work.p, Dq, Dp, nin);
+                        eg_relax();
+                    }
                     tight_applied = 1;
                     LAST_SNAP_NS = work.ts;
                     PENDING_D.have = 0;
@@ -4298,6 +4493,10 @@ static void process_keyframe(void) {
                     qsp[0] += CORR.p[0]; qsp[1] += CORR.p[1]; qsp[2] += CORR.p[2];
                     if (pgo_on()) pgo_deform(best_i, work.q, work.p, Dq, Dp);
                     else          graph_deform(best_i, qsp, Dq, Dp);
+                    if (edgegraph_on()) {
+                        eg_admit(best_i, work.q, work.p, Dq, Dp, nin);
+                        eg_relax();
+                    }
                     CLOUD_DIRTY = 1;
                     LOGI("session map: LOOP kf#%d CLOSURE %.2fm %.0fdeg "
                          "(%d/%d inliers, %d covis) — map deformed%s", best_i,
