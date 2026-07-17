@@ -321,6 +321,8 @@ static struct {                        /* worker -> map thread mailbox */
     int full;
     int query_only;                    /* stationary reloc query: no store */
     int probe;                         /* reloc-benchmark probe (no apply) */
+    int bfirst, blast;                 /* XR_BURSTPNP burst framing */
+    float bp[3];                       /* burst-relative VIO position */
     uint64_t ts;
     float q[4], p[3];
     uint8_t img[XR_OW * XR_OH];
@@ -329,6 +331,19 @@ static struct {                        /* worker -> map thread mailbox */
     float lm_xyz[XR_MAP_KP_PER_KF][3];
     float lm_uv[XR_MAP_KP_PER_KF][2];
 } MBOX;
+/* XR_BURSTPNP accumulator (map thread only): matches from every frame of
+ * the wake-up burst, in a SHARED gravity-aligned odom frame, with
+ * per-match camera-origin offsets. */
+#define BURST_MAX 512
+#define BURST_EXPORT_MAX 128           /* per-frame contribution cap */
+static struct {
+    int active, n, nframes;
+    float S[BURST_MAX][3];             /* query bearings (burst odom frame) */
+    float P[BURST_MAX][3];             /* matched landmarks (session frame) */
+    float O[BURST_MAX][3];             /* camera-center offset vs frame 0 */
+    uint8_t fid[BURST_MAX];            /* source frame within the burst */
+} BURST;
+static struct { int ok, nin; float Dq[4], Dp[3]; } BSOLVE; /* map thread */
 /* Reloc-benchmark probe result mailbox (guarded by MAP_LOCK/MAP_COND).
  * A probe runs the full retrieval+PnP pipeline on a bare image with an
  * identity odom pose, so the verified alignment D IS the query's pose in
@@ -1085,6 +1100,15 @@ static struct {
     int8_t desc[LMFACT_MAX][64];
     float ps[LMFACT_MAX][3];           /* session frame */
 } LMT;
+static int burstpnp_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_BURSTPNP");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: BURST-PNP joint wake-up solve ON");
+    }
+    return v;
+}
 static int lmtrack_on(void) {
     static int v = -1;
     if (v < 0) {
@@ -1268,6 +1292,19 @@ static void graph_deform(int anchor, const float qsp[3],
 #endif
 #define PGO_GAP_NS 10000000000ull     /* no odom edge across this gap */
 
+/* XR_PGO4DOF — restrict pose-graph deformation updates to yaw+translation
+ * (roll/pitch are gravity-observable and must not bend under closures;
+ * the VINS-Mono 4-DOF pose-graph discipline). */
+static int pgo4dof_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_PGO4DOF");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: 4-DOF pose-graph projection ON");
+    }
+    return v;
+}
+
 static void pgo_blend(const float qa[4], const float pa[3], float wa,
                       const float qb[4], const float pb[3], float wb,
                       float qo[4], float po[3]) {
@@ -1349,6 +1386,24 @@ static void pgo_deform(int anchor, const float wq[4], const float wp[3],
         }
     }
     for (int i = 1; i < n; i++) {        /* write back (anchor unchanged) */
+        if (pgo4dof_on()) {
+            /* XR_PGO4DOF: gravity makes roll/pitch OBSERVABLE — closure
+             * error lives in yaw+translation only (VINS-Mono's 4-DOF pose
+             * graph). Quaternion blending can leak correction into
+             * roll/pitch; project the update onto the closest pure-yaw
+             * world rotation of the ORIGINAL attitude instead. */
+            float qi[4], dq[4];
+            qconj(KFA(anchor + i).qc, qi);
+            qmul(Xq[i], qi, dq);               /* world-frame left delta */
+            /* closest Rz: yaw = atan2(2(w z), w^2 - z^2 + ...) — from the
+             * delta's horizontal rotation block (Frobenius-optimal) */
+            float w = dq[0], z = dq[3];
+            float nrm = sqrtf(w * w + z * z);
+            if (nrm > 1e-6f) {
+                float dqz[4] = { w / nrm, 0, 0, z / nrm };
+                qmul(dqz, KFA(anchor + i).qc, Xq[i]);
+            }
+        }
         memcpy(KFA(anchor + i).qc, Xq[i], sizeof Xq[i]);
         memcpy(KFA(anchor + i).pc, Xp[i], sizeof Xp[i]);
     }
@@ -2094,7 +2149,8 @@ static int rc_nb_cmp(const void *a, const void *b) {
  * stage-3 landmark-factor channel. Callers not needing them pass NULL. */
 static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[3],
                      int *out_n3, int *out_nin, int *out_covis,
-                     float (*out_iuv)[2], float (*out_ips)[3], int *out_nl) {
+                     float (*out_iuv)[2], float (*out_ips)[3], int *out_nl,
+                     float (*out_bS)[3], float (*out_bP)[3], int *out_bn) {
     *out_n3 = *out_nin = *out_covis = 0;
     if (out_nl) *out_nl = 0;
     if (!GEOM.have) return 0;
@@ -2311,6 +2367,15 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
         n++;
     }
     *out_n3 = n;
+    /* XR_BURSTPNP: export the ASSIGNED match set (pre-gate — the joint
+     * burst solve re-arbitrates across frames, so even a frame too weak
+     * to verify alone contributes) */
+    if (out_bS && out_bP && out_bn) {
+        int bn = n < BURST_EXPORT_MAX ? n : BURST_EXPORT_MAX;
+        memcpy(out_bS, Sw, sizeof(float) * 3 * (size_t)bn);
+        memcpy(out_bP, Pw, sizeof(float) * 3 * (size_t)bn);
+        *out_bn = bn;
+    }
     if (n < VER_MIN_PAIRS) return 0;
 
     /* 2c. XR_FARBEAR: greedy one-to-one over the far pool, AFTER the near
@@ -2806,6 +2871,168 @@ static void local_ba(int center) {
          center, nw, nshared, nwrote);
 }
 
+/* ---- XR_BURSTPNP: offset-aware joint solve --------------------------------------
+ * Twin of pnp2_ransac for burst fusion: match m's ray leaves the camera
+ * at C + Rz*O[m] (per-frame origin offsets in the pre-yaw frame). Kept as
+ * a SEPARATE function so the validated single-frame path stays untouched.
+ * Hypothesis pairs are drawn within one frame (equal offsets — the
+ * closed form needs a common origin), then re-based to the burst origin. */
+static int pnp2_inliers_ofs(const float (*s)[3], const float (*P)[3],
+                            const float (*O)[3], int n, float yaw,
+                            const float C[3]) {
+    float cy = cosf(yaw), sy = sinf(yaw);
+    const float tol2 = VER_COS_TOL * VER_COS_TOL;
+    const float minr2 = VER_MIN_RANGE_M * VER_MIN_RANGE_M;
+    int cnt = 0;
+    for (int m = 0; m < n; m++) {
+        float ox = cy * O[m][0] - sy * O[m][1];
+        float oy = sy * O[m][0] + cy * O[m][1];
+        float qx = P[m][0] - C[0] - ox;
+        float qy = P[m][1] - C[1] - oy;
+        float qz = P[m][2] - C[2] - O[m][2];
+        float nq2 = qx * qx + qy * qy + qz * qz;
+        if (nq2 < minr2) continue;
+        float rx = cy * s[m][0] - sy * s[m][1];
+        float ry = sy * s[m][0] + cy * s[m][1];
+        float raw = qx * rx + qy * ry + qz * s[m][2];
+        if (raw > 0 && raw * raw > tol2 * nq2) cnt++;
+    }
+    return cnt;
+}
+
+static int pnp2_ransac_burst(const float (*s)[3], const float (*P)[3],
+                             const float (*O)[3], const uint8_t *fid, int n,
+                             float Rz_out[9], float C_out[3]) {
+    if (n < 2) return 0;
+    int best_in = 0;
+    float b_yaw = 0, bC[3] = { 0, 0, 0 };
+    uint32_t seed = 0xB0857u ^ (uint32_t)n;
+    for (int it = 0; it < VER_ITERS * 2; it++) {   /* bigger pool: 2x tries */
+        seed = seed * 1664525u + 1013904223u;
+        int i0 = (int)(seed % (uint32_t)n);
+        seed = seed * 1664525u + 1013904223u;
+        int i1 = (int)(seed % (uint32_t)n);
+        if (i0 == i1 || fid[i0] != fid[i1]) continue;  /* common origin only */
+        float dx = P[i0][0] - P[i1][0];
+        float dy = P[i0][1] - P[i1][1];
+        float dz = P[i0][2] - P[i1][2];
+        float Q = dx * dx + dy * dy;
+        float s0z = s[i0][2], s1z = s[i1][2];
+        if (fabsf(s0z) < 1e-3f) continue;
+        float A0 = s[i0][0] * s[i0][0] + s[i0][1] * s[i0][1];
+        float A1 = s[i1][0] * s[i1][0] + s[i1][1] * s[i1][1];
+        float Bd = s[i0][0] * s[i1][0] + s[i0][1] * s[i1][1];
+        float alpha = dz / s0z, beta = s1z / s0z;
+        float qa2 = beta * beta * A0 - 2 * beta * Bd + A1;
+        float qb = 2 * alpha * beta * A0 - 2 * alpha * Bd;
+        float qc = alpha * alpha * A0 - Q;
+        float roots[2];
+        int nroots = 0;
+        if (fabsf(qa2) < 1e-9f) {
+            if (fabsf(qb) > 1e-9f) roots[nroots++] = -qc / qb;
+        } else {
+            float disc = qb * qb - 4 * qa2 * qc;
+            if (disc < 0) continue;
+            float sq = sqrtf(disc);
+            roots[nroots++] = (-qb + sq) / (2 * qa2);
+            roots[nroots++] = (-qb - sq) / (2 * qa2);
+        }
+        for (int r = 0; r < nroots; r++) {
+            float d1 = roots[r];
+            float d0 = alpha + beta * d1;
+            if (d0 < VER_MIN_RANGE_M || d1 < VER_MIN_RANGE_M ||
+                d0 > PNP2_MAX_D || d1 > PNP2_MAX_D)
+                continue;
+            float ux = d0 * s[i0][0] - d1 * s[i1][0];
+            float uy = d0 * s[i0][1] - d1 * s[i1][1];
+            if (ux * ux + uy * uy < 1e-6f) continue;
+            float yaw = atan2f(ux * dy - uy * dx, ux * dx + uy * dy);
+            float cy = cosf(yaw), sy = sinf(yaw);
+            /* pair-frame camera centre, then re-base to the burst origin */
+            float C[3] = {
+                P[i0][0] - d0 * (cy * s[i0][0] - sy * s[i0][1]) -
+                    (cy * O[i0][0] - sy * O[i0][1]),
+                P[i0][1] - d0 * (sy * s[i0][0] + cy * s[i0][1]) -
+                    (sy * O[i0][0] + cy * O[i0][1]),
+                P[i0][2] - d0 * s0z - O[i0][2],
+            };
+            int in = pnp2_inliers_ofs(s, P, O, n, yaw, C);
+            if (in > best_in) {
+                best_in = in;
+                b_yaw = yaw;
+                memcpy(bC, C, sizeof bC);
+            }
+        }
+    }
+    if (best_in < 3) return 0;
+    /* refine: (inliers -> linear centre with offset-adjusted rhs ->
+     * weighted mean yaw residual), two rounds */
+    float yaw = b_yaw, C[3];
+    memcpy(C, bC, sizeof C);
+    for (int round = 0; round < 2; round++) {
+        float cy = cosf(yaw), sy = sinf(yaw);
+        float M[9] = { 0 }, b[3] = { 0 };
+        float dsum = 0, wsum = 0;
+        int cnt = 0;
+        for (int m = 0; m < n; m++) {
+            float ox = cy * O[m][0] - sy * O[m][1];
+            float oy = sy * O[m][0] + cy * O[m][1];
+            float qx = P[m][0] - C[0] - ox, qy = P[m][1] - C[1] - oy,
+                  qz = P[m][2] - C[2] - O[m][2];
+            float nq = sqrtf(qx * qx + qy * qy + qz * qz);
+            if (nq < VER_MIN_RANGE_M) continue;
+            float rx = cy * s[m][0] - sy * s[m][1];
+            float ry = sy * s[m][0] + cy * s[m][1];
+            float rz = s[m][2];
+            float dot = (qx * rx + qy * ry + qz * rz) / nq;
+            if (dot <= VER_COS_TOL) continue;
+            cnt++;
+            float II[9] = { 1 - rx * rx, -rx * ry, -rx * rz,
+                            -rx * ry, 1 - ry * ry, -ry * rz,
+                            -rx * rz, -ry * rz, 1 - rz * rz };
+            /* rays constrain C + Rz*O[m]: move the offset into the rhs */
+            float Px = P[m][0] - ox, Py = P[m][1] - oy, Pz = P[m][2] - O[m][2];
+            for (int k = 0; k < 9; k++) M[k] += II[k];
+            b[0] += II[0] * Px + II[1] * Py + II[2] * Pz;
+            b[1] += II[3] * Px + II[4] * Py + II[5] * Pz;
+            b[2] += II[6] * Px + II[7] * Py + II[8] * Pz;
+            float cross = rx * qy - ry * qx;
+            float dotxy = rx * qx + ry * qy;
+            float w = sqrtf(qx * qx + qy * qy);
+            dsum += w * atan2f(cross, dotxy);
+            wsum += w;
+        }
+        if (cnt < 3) break;
+        float det = M[0] * (M[4] * M[8] - M[5] * M[7]) -
+                    M[1] * (M[3] * M[8] - M[5] * M[6]) +
+                    M[2] * (M[3] * M[7] - M[4] * M[6]);
+        if (fabsf(det) > 1e-6f) {
+            C[0] = ((M[4] * M[8] - M[5] * M[7]) * b[0] +
+                    (M[2] * M[7] - M[1] * M[8]) * b[1] +
+                    (M[1] * M[5] - M[2] * M[4]) * b[2]) / det;
+            C[1] = ((M[5] * M[6] - M[3] * M[8]) * b[0] +
+                    (M[0] * M[8] - M[2] * M[6]) * b[1] +
+                    (M[2] * M[3] - M[0] * M[5]) * b[2]) / det;
+            C[2] = ((M[3] * M[7] - M[4] * M[6]) * b[0] +
+                    (M[1] * M[6] - M[0] * M[7]) * b[1] +
+                    (M[0] * M[4] - M[1] * M[3]) * b[2]) / det;
+        }
+        if (wsum > 1e-3f) yaw += dsum / wsum;
+    }
+    int in = pnp2_inliers_ofs(s, P, O, n, yaw, C);
+    if (in < best_in) {
+        yaw = b_yaw;
+        memcpy(C, bC, sizeof C);
+        in = best_in;
+    }
+    float cy = cosf(yaw), sy = sinf(yaw);
+    Rz_out[0] = cy; Rz_out[1] = -sy; Rz_out[2] = 0;
+    Rz_out[3] = sy; Rz_out[4] = cy;  Rz_out[5] = 0;
+    Rz_out[6] = 0;  Rz_out[7] = 0;   Rz_out[8] = 1;
+    memcpy(C_out, C, 3 * sizeof(float));
+    return in;
+}
+
 /* XR_LMDESC direct relocalization: match the query's descriptors straight
  * against the lifetime landmark bank (no keyframe retrieval at all) and
  * PnP the pairs. Runs ONLY when the normal retrieval channel produced no
@@ -2983,6 +3210,10 @@ static void process_keyframe(void) {
     }
     PROBE_REQ = MBOX.probe;
     MBOX.probe = 0;
+    int burst_first = MBOX.bfirst, burst_last = MBOX.blast;
+    float burst_ofs[3];
+    memcpy(burst_ofs, MBOX.bp, sizeof burst_ofs);
+    MBOX.bfirst = MBOX.blast = 0;
     int q_only = MBOX.query_only || PROBE_REQ;
     work.ts = MBOX.ts;
     memcpy(work.q, MBOX.q, sizeof work.q);
@@ -3218,6 +3449,9 @@ static void process_keyframe(void) {
     int raw_best_m = 0, raw_best_i = -1;
     int best_i = -1, best_m = 0, best_n3 = 0, best_nin = 0, best_covis = 0;
     int any_pairs = 0;
+    static float burst_exp_S[BURST_EXPORT_MAX][3],   /* map thread only */
+                 burst_exp_P[BURST_EXPORT_MAX][3];
+    int burst_exp_n = 0;
     int searched = 0;                  /* keyframes actually match-scored */
     unsigned match_us = 0;             /* telemetry: match+PnP wall time */
     int use_vpr = 0;                   /* retrieval pre-rank active */
@@ -3417,9 +3651,20 @@ static void process_keyframe(void) {
         static float cuv[LMFACT_MAX][2], cps[LMFACT_MAX][3]; /* map thread */
         int cnl = 0;
         int want_lf = lmfact_on();
+        static float ebS[BURST_EXPORT_MAX][3], ebP[BURST_EXPORT_MAX][3];
+        int ebn = 0;
+        int want_burst = PROBE_REQ && burstpnp_on();
         int ok = reloc_pnp(&work, cand_i[c], kfn, cDq, cDp, &cn3, &cnin, &ccov,
                            want_lf ? cuv : NULL, want_lf ? cps : NULL,
-                           want_lf ? &cnl : NULL);
+                           want_lf ? &cnl : NULL,
+                           want_burst ? ebS : NULL, want_burst ? ebP : NULL,
+                           want_burst ? &ebn : NULL);
+        /* keep the RICHEST candidate's matches for the burst accumulator */
+        if (want_burst && ebn > burst_exp_n) {
+            memcpy(burst_exp_S, ebS, sizeof(float) * 3 * (size_t)ebn);
+            memcpy(burst_exp_P, ebP, sizeof(float) * 3 * (size_t)ebn);
+            burst_exp_n = ebn;
+        }
         if (cn3 > any_pairs) any_pairs = cn3;
         if (ok && ccov >= COVIS_MIN_KF && cnin > best_nin) {
             best_i = cand_i[c]; best_m = cand_m[c];
@@ -3460,6 +3705,53 @@ static void process_keyframe(void) {
             best_m = CAND_MIN_MATCHES;
             LOGI("session map: LMIDX direct reloc — %d pairs, %d inliers, "
                  "%d live owners (kf#%d)", n32, nin2, cov2, bi2);
+        }
+    }
+    /* XR_BURSTPNP: accumulate this frame's matches; joint-solve on last */
+    BSOLVE.ok = 0;
+    if (PROBE_REQ && burstpnp_on()) {
+        if (burst_first) { BURST.active = 1; BURST.n = 0; BURST.nframes = 0; }
+        if (BURST.active && burst_exp_n > 0 && BURST.nframes < 255) {
+            for (int m = 0; m < burst_exp_n && BURST.n < BURST_MAX; m++) {
+                memcpy(BURST.S[BURST.n], burst_exp_S[m], sizeof BURST.S[0]);
+                memcpy(BURST.P[BURST.n], burst_exp_P[m], sizeof BURST.P[0]);
+                memcpy(BURST.O[BURST.n], burst_ofs, sizeof BURST.O[0]);
+                BURST.fid[BURST.n] = (uint8_t)BURST.nframes;
+                BURST.n++;
+            }
+            BURST.nframes++;
+        }
+        if (burst_last && BURST.active) {
+            if (BURST.nframes >= 2 && BURST.n >= VER_MIN_PAIRS) {
+                float Rz[9], C0[3];
+                int jin = pnp2_ransac_burst(BURST.S, BURST.P, BURST.O,
+                                            BURST.fid, BURST.n, Rz, C0);
+                /* pooled multi-frame consensus: absolute floor + a softer
+                 * ratio (single-frame noise is diluted across the pool) */
+                if (jin >= VER_MIN_PAIRS && jin * 100 >= 25 * BURST.n) {
+                    float Cl[3] = {   /* last frame's camera centre */
+                        C0[0] + Rz[0] * burst_ofs[0] + Rz[1] * burst_ofs[1],
+                        C0[1] + Rz[3] * burst_ofs[0] + Rz[4] * burst_ofs[1],
+                        C0[2] + burst_ofs[2],
+                    };
+                    R2q(Rz, BSOLVE.Dq);
+                    float qsb[4], t3[3], body_s[3];
+                    qmul(BSOLVE.Dq, work.q, qsb);
+                    qrotv(qsb, GEOM.p_ic, t3);
+                    body_s[0] = Cl[0] - t3[0];
+                    body_s[1] = Cl[1] - t3[1];
+                    body_s[2] = Cl[2] - t3[2];
+                    qrotv(BSOLVE.Dq, work.p, t3);
+                    BSOLVE.Dp[0] = body_s[0] - t3[0];
+                    BSOLVE.Dp[1] = body_s[1] - t3[1];
+                    BSOLVE.Dp[2] = body_s[2] - t3[2];
+                    BSOLVE.nin = jin;
+                    BSOLVE.ok = 1;
+                    LOGI("session map: BURSTPNP joint solve %d/%d inliers "
+                         "over %d frames", jin, BURST.n, BURST.nframes);
+                }
+            }
+            BURST.active = 0;
         }
     }
     match_us = (unsigned)(map_mono_us() - t_match0);
@@ -3655,7 +3947,16 @@ static void process_keyframe(void) {
                  * gravity prior made work.q non-identity; returning raw D
                  * was only correct for identity probes) */
                 qmul(Dq, work.q, PROBE_RES.q);
-                memcpy(PROBE_RES.p, Dp, sizeof PROBE_RES.p);
+                /* session position = D o (odom pose); classic probes have
+                 * p = 0 so this reduces to Dp, but burst frames carry the
+                 * intra-burst VIO position */
+                {
+                    float t3[3];
+                    qrotv(Dq, work.p, t3);
+                    PROBE_RES.p[0] = Dp[0] + t3[0];
+                    PROBE_RES.p[1] = Dp[1] + t3[1];
+                    PROBE_RES.p[2] = Dp[2] + t3[2];
+                }
             } else if (!xseg && (dev > mxt || sang > mxa)) {
                 VER_LAST.outcome = VOUT_CAPPED;
                 PENDING_D.have = 0;
@@ -3924,6 +4225,21 @@ static void process_keyframe(void) {
     }
     }   /* end apply (verified result, under the lock) */
 
+    /* XR_BURSTPNP: the joint verdict rides over the last frame's probe
+     * result — a burst whose frames all failed alone can still verify
+     * as one consensus. */
+    if (PROBE_REQ && BSOLVE.ok &&
+        (!PROBE_RES.ok || BSOLVE.nin > PROBE_RES.inliers)) {
+        PROBE_RES.ok = 1;
+        PROBE_RES.inliers = BSOLVE.nin;
+        qmul(BSOLVE.Dq, work.q, PROBE_RES.q);
+        float bt3[3];
+        qrotv(BSOLVE.Dq, work.p, bt3);
+        PROBE_RES.p[0] = BSOLVE.Dp[0] + bt3[0];
+        PROBE_RES.p[1] = BSOLVE.Dp[1] + bt3[1];
+        PROBE_RES.p[2] = BSOLVE.Dp[2] + bt3[2];
+    }
+
     /* XR_LMTRACK re-post: while the last closure's landmarks stay in view,
      * every search frame re-matches them and posts fresh factors — the
      * estimator keeps being pulled BETWEEN closures, not only at them.
@@ -4112,6 +4428,40 @@ int xr_map_probe(const uint8_t *img, const float grav_q[4], float out_q[4],
     if (grav_q) memcpy(MBOX.q, grav_q, sizeof MBOX.q);
     else { MBOX.q[0] = 1; MBOX.q[1] = MBOX.q[2] = MBOX.q[3] = 0; }
     MBOX.p[0] = MBOX.p[1] = MBOX.p[2] = 0;
+    memcpy(MBOX.img, img, sizeof MBOX.img);
+    MBOX.n_lm = 0;
+    PROBE_RES.done = 0;
+    PROBE_RES.ok = 0;
+    MBOX.full = 1;
+    pthread_cond_broadcast(&MAP_COND);
+    while (!PROBE_RES.done) pthread_cond_wait(&MAP_COND, &MAP_LOCK);
+    int ok = PROBE_RES.ok;
+    if (ok) {
+        if (out_q) memcpy(out_q, PROBE_RES.q, sizeof PROBE_RES.q);
+        if (out_p) memcpy(out_p, PROBE_RES.p, sizeof PROBE_RES.p);
+        if (out_inliers) *out_inliers = PROBE_RES.inliers;
+    }
+    pthread_mutex_unlock(&MAP_LOCK);
+    return ok;
+}
+
+int xr_map_probe_burst(const uint8_t *img, const float grav_q[4],
+                       const float rel_p[3], int first, int last,
+                       float out_q[4], float out_p[3], int *out_inliers) {
+    pthread_once(&THREAD_ONCE, thread_start);
+    pthread_mutex_lock(&MAP_LOCK);
+    while (MBOX.full) pthread_cond_wait(&MAP_COND, &MAP_LOCK);
+    MBOX.query_only = 1;
+    MBOX.probe = 1;
+    MBOX.bfirst = first ? 1 : 0;
+    MBOX.blast = last ? 1 : 0;
+    if (rel_p) memcpy(MBOX.bp, rel_p, sizeof MBOX.bp);
+    else MBOX.bp[0] = MBOX.bp[1] = MBOX.bp[2] = 0;
+    MBOX.ts = LAST_ACCEPT_NS + 1;
+    if (grav_q) memcpy(MBOX.q, grav_q, sizeof MBOX.q);
+    else { MBOX.q[0] = 1; MBOX.q[1] = MBOX.q[2] = MBOX.q[3] = 0; }
+    /* the burst frame's odom pose IS its intra-burst VIO position */
+    memcpy(MBOX.p, MBOX.bp, sizeof MBOX.p);
     memcpy(MBOX.img, img, sizeof MBOX.img);
     MBOX.n_lm = 0;
     PROBE_RES.done = 0;

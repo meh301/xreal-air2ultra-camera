@@ -496,6 +496,7 @@ int main(int argc, char **argv) {
         FILE *fv = fopen(mpath, "r");
         static double vts[120000];
         static float vq[120000][4];        /* Hamilton wxyz */
+        static float vp[120000][3];        /* odom position (burst rel_p) */
         long vn = 0;
         if (fv) {
             double t, x, y, z, qx, qy, qz, qw;
@@ -505,10 +506,17 @@ int main(int argc, char **argv) {
                 vts[vn] = t;
                 vq[vn][0] = (float)qw; vq[vn][1] = (float)qx;
                 vq[vn][2] = (float)qy; vq[vn][3] = (float)qz;
+                vp[vn][0] = (float)x; vp[vn][1] = (float)y;
+                vp[vn][2] = (float)z;
                 vn++;
             }
             fclose(fv);
         }
+        /* XR_BURSTPNP: fuse the clip into one joint solve (needs the vio
+         * track for intra-burst relatives) */
+        int use_burst = 0;
+        { const char *e = getenv("XR_BURSTPNP");
+          use_burst = (e && *e && *e != '0') ? 1 : 0; }
         rewind(f_idx);
         static uint64_t fts[120000];
         long fn = 0;
@@ -546,14 +554,27 @@ int main(int argc, char **argv) {
                 float cq[4], cp[3];
                 int cinl = 0;
                 const float *gq = NULL;
+                long bv = -1;
                 if (vn) {                  /* nearest odom quat = gravity */
                     double t = (double)fts[fc] * 1e-9;
-                    long bv = 0;
+                    bv = 0;
                     for (long j = 1; j < vn; j++)
                         if (fabs(vts[j] - t) < fabs(vts[bv] - t)) bv = j;
                     gq = vq[bv];
                 }
-                int cok = xr_map_probe(pimg, gq, cq, cp, &cinl);
+                int cok;
+                static long bv0;           /* clip start's vio index */
+                if (use_burst && reloc_clip > 1 && bv >= 0) {
+                    if (c == 0) bv0 = bv;
+                    float rp[3] = { vp[bv][0] - vp[bv0][0],
+                                    vp[bv][1] - vp[bv0][1],
+                                    vp[bv][2] - vp[bv0][2] };
+                    cok = xr_map_probe_burst(pimg, gq, rp, c == 0,
+                                             c == reloc_clip - 1,
+                                             cq, cp, &cinl);
+                } else {
+                    cok = xr_map_probe(pimg, gq, cq, cp, &cinl);
+                }
                 if (cok && cinl > inl) {
                     ok = 1;
                     inl = cinl;

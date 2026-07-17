@@ -125,6 +125,20 @@ int xr_map_get_reseed(const float q[4], const float p[3],
 int xr_map_probe(const uint8_t *img, const float grav_q[4], float out_q[4],
                  float out_p[3], int *out_inliers);
 
+/* XR_BURSTPNP wake-up burst probe: like xr_map_probe, but the frames of
+ * one burst are FUSED into a single joint 4-DOF solve. rel_p = this
+ * frame's VIO position relative to the burst's first frame (same odom
+ * world as grav_q — a waking device tracks VIO within the burst even
+ * though it is lost globally). first=1 resets the accumulator; last=1
+ * runs the joint solve. Per-frame matches accumulate ACROSS frames with
+ * per-frame origin offsets, so information no single frame can verify
+ * still fuses into one consensus. Returns the joint verdict on the LAST
+ * frame (intermediate calls return the running single-frame verdict);
+ * out pose is the LAST frame's session pose. Blocking, bench/test use. */
+int xr_map_probe_burst(const uint8_t *img, const float grav_q[4],
+                       const float rel_p[3], int first, int last,
+                       float out_q[4], float out_p[3], int *out_inliers);
+
 /* Most recent loop/reloc candidate (descriptor stage): returns 1 and the
  * two keyframe timestamps + match count, or 0 when none happened yet. */
 int xr_map_last_candidate(uint64_t *ts_a, uint64_t *ts_b, int *matches);
