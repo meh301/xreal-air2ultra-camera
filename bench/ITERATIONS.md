@@ -658,3 +658,16 @@ OUTDOOR PAIR (partial): eig drives 0/30 with ALL mitigations; funnel
 dies at DESCRIPTOR MATCHING (bestm 22-31 vs indoor 60-120) — retrieval
 moot; drive single-frame reloc is a different problem domain; indoor
 deploy flip unaffected. Meg twin pending for the airtight pair.
+
+### x STAGE-3 LANDMARK FACTORS: BUILT, SMOKE-VERIFIED, A/B QUEUED
+Agent-built (worktree merge a912858 + nested basalt 6c34d3e): verified-
+closure inlier landmarks -> fixed-3D reprojection factors in the sqrt
+estimator (Huber 3sigma, <=32/frame, pose-block Jacobians numerically
+validated 5e-10), session->odom via CORR^-1, posted at both tight sites,
+NO revisit-age gate (per-point arbitration makes room-scale reuse safe —
+the thing pose priors could not do). Container basalt patched+rebuilt
+(patch_lmfact.py, symbol exported), room1 smoke: full proof chain — 146
+posts, "32/32 factors applied", 99.9% completion, vpr_ep=cuda.
+LMFACT A/B queued on iteration (rooms+euroc+msd x3, arms lfbase/lfonly/
+lfts) — THE rooms-1.2cm attack. If lfonly closes rooms toward OKVIS2+LC,
+stage-3 enters the freeze config.
