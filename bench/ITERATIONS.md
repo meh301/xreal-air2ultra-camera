@@ -775,3 +775,29 @@ vs clip15 baseline: corr1 53.3->50.0 (r@10 40->43), corr3 56.7->63.3
 solve fired on 14/18/9 of 30 probes. The wake-up story is now: 15-frame
 burst + joint offset-aware 4-DOF consensus. Enters the freeze validation
 round together with PGO4DOF.
+
+### x DRIVE1 DEADLOCK ROOT-CAUSED AND FIXED (3594b26)
+gdb on the wedged specimen: main blocked in xr_slam_push_imu (bounded
+imu queue FULL), estimator blocked pushing out-states only main drains,
+optical flow blocked behind it — a two-bounded-queue cycle with a
+single-threaded harness. Drive imu = 2000 Hz -> ~100 blocking pushes
+per inter-frame burst with zero polling. Fix: drain every 8 imu pushes.
+Killed EVERY drive1_city attempt (3/3, kf~1600-1800). Redo relaunched
+(.181, both retrieval arms, fixed harness).
+
+### x XR_DEPTHFILL built + smoke-verified (5cd6f91 + 189264a)
+Per-keypoint epipolar ZNCC on the rectified pair at kf store: drive3
+smoke +2..+18 synthetic landmarks/kf (67 vs ~45 lm), auto-armed only for
+distortion-free packs. A/B on drive2/3 reloc queued (.181) vs padeig
+0/30, 3/30 baselines.
+
+### x VIO SWEEP (EuRoC, the estimator-bound gap): vkf KEEPER-CANDIDATE
+vbase 6.50 -> vkf 5.82 (denser keyframing: min_frames_after_kf 3,
+kp_thresh 0.8), vobs 5.89 (obs_std 0.35; V1_02 4.48 best cell),
+vhub 6.03, vfix flat, vwin CRASHES basalt (abs_order_map assertion at
+max_states 5 — reject). Combos (vkfobs/vkfhub/vall) running on .15.
+Path to OKVIS2's 5.19/3.82 is open.
+
+### x OKVIS2 drive baselines FINAL: drive2 diverges in BOTH modes
+(lc0 25,408 km / lc1 65,908 km ATE). Complete drive scoreboard: ours
+1.35-4.2%% of path everywhere; OKVIS2 wins only drive3-country.
