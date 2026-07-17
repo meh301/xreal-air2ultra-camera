@@ -1369,3 +1369,17 @@ flag-identical envs), stage-7-era data only (880 rows from 32k), viewer
 rewritten (headline tiles fixed, fz18 colors, reloc18 tab, 160 trajs),
 drives+wake-up headline card added. Historical arms remain in result
 dirs + this ledger only.
+
+### x LOOPBURST v1: HARMFUL — mechanism identified, v2 built
+v1 A/B (.15, n=10): corr2 19.3->38.0, corr3 17.2->32.1, corr5
+18.3->44.6, room1 6.4->11.4, mag2 56->76; agg 18.3->32.1. Telemetry:
+room1 took 17 polish applications PER RUN (5-7cm each) — the
+accumulator cycled continuously on revisit stretches, micro-stepping
+CORR against the estimator (the documented EuRoC snap failure), and
+CORR-stepped inside the TIGHT envelope where the absorbing prior
+double-corrects. The multi-frame SOLVE itself was healthy (85-95%
+joint-inlier consensus); the APPLICATION POLICY was wrong.
+v2 (480c836): one-shot ARMED only by an APPLIED closure, 20s
+refractory, 0.10m polish floor, TIGHT-channel arbitration (inside the
+envelope the fused D posts as a VIO prior; only beyond it steps CORR).
+Dual A/B fired (.15 + .58, 240 runs); third replication on .181.
