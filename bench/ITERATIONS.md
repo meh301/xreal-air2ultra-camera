@@ -1204,3 +1204,31 @@ no gain anywhere. Huber stays (okvis2-parity curiosity closed).
 - DRIVES n=3 (.58 done): medians drive1 1.44% (okvis2 3.32, every run
   wins), drive2 3.35 (okvis2 diverges), drive3 1.88 (okvis2 1.22 keeps
   it). Headline lead now variance-backed.
+
+### x S5D VERDICT + CRITICAL BUG: PERSIST SIGN DESTROYED AT THE SETTER
+- s5d (140 runs, n=5): ad best aggregate 16.04 (g999s6 16.63, off
+  21.85, g8s6 22.84); ad best corr3 11.79 and best magistrale medians
+  w/ most runs kept. BUT rooms ad 8.51/13.59 ~= g8s6, NOT g999s6
+  6.93/10.87 — room-class fast-path underdelivered.
+- ROOT CAUSE (via room-class rejection forensics): the ORIGINAL stage-3
+  setter sanitization `slot->sigma_px = sigma_px > 0 ? sigma_px : 2.0f`
+  rewrote every NEGATIVE (transient) sigma to +2.0. THE PERSIST SIGN
+  NEVER SURVIVED STORAGE — since stage-4 day one, ALL batches (transient
+  closures, LMTRACK re-posts) were fold-eligible; the app-side persist
+  gates (nin, alias-margin, SCENE DEPTH GATE) never affected folding.
+- INVALIDATED (were noise): every gate-vs-gate comparison — s5-round
+  "auto uniform-safe", "6m keeps 5/5 mag2", all nin/alias gate verdicts
+  of fleet16 era. The magistrale "dose-reduction" story: unfounded.
+- STILL VALID (rode the working FOLD_PX axis): rooms dose-response 3x,
+  corr3-needs-8px 2x, no-arb corridor poison 2x, Cauchy reject, and all
+  s5off-vs-L-arm contrasts (LMFACT genuinely on/off). ad's +1000
+  room-class channel also worked (positive, survives the rewrite).
+- ACCIDENTAL DISCOVERY: buggy-g999s6's rooms edge (6.93/10.87) = the
+  LMTRACK re-posts folding too. Track-factor folding HELPS rooms.
+- FIXES (1569d1d): patch_stage7.py preserves the sign (magnitude-only
+  sanitize); XR_LMTRACK_PERSIST promotes track-fold to a designed
+  feature (scene-gated at call site, class-arbitrated in lmfact_post).
+  Stage-7 basalt rebuilt on ALL THREE containers.
+- S5E FIRED (.15, 140 runs): s5off / adf / adfl / g99fl — the FIRST
+  round where persist gating actually functions. Scene gate's real
+  magistrale effect measured for the first time.
