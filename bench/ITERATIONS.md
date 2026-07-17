@@ -1272,3 +1272,12 @@ factor stack is corridor-NEUTRAL: no harm, no help. Composition is
 therefore decided by rooms (replicated low-noise win: g99fl/adfl
 6.5-11) + halls (mag10 pending) + held-out (pending). Corridors clear
 g99fl of the corr5-blemish suspicion (22.8 off vs 23.1 g99fl, noise).
+
+### > FLEET18 EUROC+MSD LEG STARTED (.58) — base wave first
+fzbase control (75 runs: 11 euroc736 + 14 MOO, n=3) fired with FROZEN
+binaries (xr_f18_euroc736/xr_f18_msdmoo built once, REUSED by the fz18
+final wave). CAVEAT: the two arms run in separate waves on the same
+box+binary — acceptable for euroc/MSD (stable seqs; the within-round
+law was written for bimodal corridors), ledgered for honesty. fz18
+composition = s5e candidate (g99fl); veto path = edit F18 line before
+firing final.
