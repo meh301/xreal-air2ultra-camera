@@ -919,3 +919,18 @@ drains while frames follow. Indoor tails (200Hz) fit by luck; drive1's
 crosses capacity deterministically = every historical drive1 "wedge" at
 the end of stream. Fix bd76979: no tail flush (frameless imu is useless
 to the estimator). drive1 eig+meg relaunched with both fixes.
+
+### x DRIVE1 COMPLETE (first full runs ever, both fixes): eig map ATE
+118m / 1.11%% of 10.6km — 3x BETTER than okvis2 lc0/lc1 (353/344m,
+3.3%%); meg 211m/1.99%% (map) 139m/1.31%% (vio). Probes 0-1/30 — the
+outdoor single-frame reloc conclusion is now complete across all drives.
+
+### x FLEET15 tumvi half (n=5): fz15 (vkfobs+TRUSTVPR) CONFIRMS on
+held-out — rooms 5.47->4.85 (EVERY room better, room6 1.51 vs okvis2+lc
+1.20), long flat (24.0 vs 25.0, in-noise). COMPOSITION HONESTY: the
+cap400 amendment never took effect (pkill self-match killed the amend
+step on both containers) — fleet fz15 = vkfobs+TRUSTVPR at cap200.
+Cap-invariant for rooms/euroc/msd (cap never binds); the untested
+vkfobs x cap400 corridor interaction cell now runs on .15 (n=5).
+euroc/msd half: launcher died twice (CRLF re-poisoning after re-scp; the
+sed was killed by its own pkill) — fixed, resumed, 10 workers.
