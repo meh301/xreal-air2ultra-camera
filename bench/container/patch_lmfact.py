@@ -195,7 +195,7 @@ if "xr_lm_batches" not in t:
    * pose priors. Thread-safe setter; applied in optimize() while the frame
    * is in the window, expired by frame time. */
   static constexpr int XR_LM_MAX_FACTORS = 96;          /* per frame */
-  static constexpr int XR_LM_MAX_BATCHES = 8;           /* buffered frames */
+  static constexpr int XR_LM_MAX_BATCHES = 24;          /* kf batches persist */
   static constexpr int64_t XR_LM_EXPIRY_NS = 500000000; /* ~0.5 s */
   struct XrLmBatch {
     int64_t t_ns;
@@ -257,7 +257,13 @@ if "xr_lm_batches" not in t:
               const int64_t xr_newest_ts = frame_states.rbegin()->first;
               for (size_t xbi = 0; xbi < xr_lm_batches.size();) {
                 const XrLmBatch& bch = xr_lm_batches[xbi];
-                if (bch.t_ns + XR_LM_EXPIRY_NS < xr_newest_ts) {   /* expired */
+                const bool xr_alive = frame_states.count(bch.t_ns) > 0 ||
+                                      frame_poses.count(bch.t_ns) > 0;
+                if (!xr_alive && bch.t_ns + XR_LM_EXPIRY_NS < xr_newest_ts) {
+                  /* frame gone AND stale: the post lost the state-window
+                   * race — drop. Batches on LIVE keyframes persist for
+                   * seconds and FOLD at kf-marginalization (XR_LMMARG,
+                   * the OKVIS2 anchoring). */
                   xr_lm_batches.erase(xr_lm_batches.begin() + xbi);
                   continue;
                 }
