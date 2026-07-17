@@ -99,7 +99,7 @@ function aggBaselines() {
 
 /* ---------- bar chart (click-to-filter legend) ---------- */
 function barChart({ title, cats, series, refs = [], note = "", onBar,
-                    unit = "cm", higherBetter = false }) {
+                    unit = "cm", higherBetter = false, agg = "median" }) {
   series.forEach(s => { if (s.on === undefined) s.on = !s.defaultOff; });
   const refGroups = [...new Set(refs.map(r => r.cls || "pub"))];
   const refOn = Object.fromEntries(refGroups.map(g => [g, true]));
@@ -114,15 +114,22 @@ function barChart({ title, cats, series, refs = [], note = "", onBar,
     const act = series.filter(s => s.on);
     const rank = act.map(s => {
       const v = s.values.filter(x => x != null);
-      return v.length ? { label: s.label, color: s.color, med: median(v),
-                          mean: v.reduce((a, b) => a + b, 0) / v.length, n: v.length } : null;
-    }).filter(Boolean).sort((a, b) => higherBetter ? b.med - a.med : a.med - b.med);
+      if (!v.length) return null;
+      const med = median(v), mean = v.reduce((a, b) => a + b, 0) / v.length;
+      // recall-style metrics are bimodal (rooms ~100, corridors ~50):
+      // a median headline jumps the hard half entirely — mean is honest
+      const main = agg === "mean" ? mean : med;
+      const alt = agg === "mean" ? med : mean;
+      return { label: s.label, color: s.color, main, alt, n: v.length };
+    }).filter(Boolean).sort((a, b) => higherBetter ? b.main - a.main : a.main - b.main);
+    const aggName = agg === "mean" ? "mean" : "median";
+    const altName = agg === "mean" ? "median" : "mean";
     vsHost.innerHTML = !rank.length ? "" :
-      `<span class="hint">median over sequences (mean on hover) · ${higherBetter ? "higher" : "lower"} is better:</span>` +
+      `<span class="hint">${aggName} over sequences (${altName} on hover) · ${higherBetter ? "higher" : "lower"} is better:</span>` +
       rank.map((r, i) =>
-        `<span class="vs-item${i === 0 ? " best" : ""}" title="mean ${fmt(r.mean)} ${unit} over ${r.n} sequences">` +
+        `<span class="vs-item${i === 0 ? " best" : ""}" title="${altName} ${fmt(r.alt)} ${unit} over ${r.n} sequences">` +
         `<span class="dot" style="background:${r.color}"></span>` +
-        `${r.label} <b>${fmt(r.med)}</b><small>·${r.n} seq</small></span>`
+        `${r.label} <b>${fmt(r.main)}</b><small>·${r.n} seq</small></span>`
       ).join(`<span class="vs-gt">${higherBetter ? "&gt;" : "&lt;"}</span>`);
   }
 
@@ -559,6 +566,7 @@ async function relocView() {
    * arms as toggleable series, sequences as categories */
   const mk = (title, get, unit, higherBetter, note) => barChart({
     title, cats: seqs.map(shortName), unit, higherBetter, note,
+    agg: "mean",   // recall distributions are bimodal — median overstates
     series: arms.map(a => ({ label: ARM_LABEL[a] || a, color: armColor(a),
       values: seqs.map(s => { const e = M[`${s}|${a}`]; return e ? get(e) : null; }) })),
   });
