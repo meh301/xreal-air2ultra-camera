@@ -880,3 +880,17 @@ closure even matters. Same disease as euroc -> vkfobs port to the msd
 config chained on .58 (losers + MOO07/09 no-harm guard). The coupling
 ladder is exonerated on this group: it cannot fix drift the estimator
 creates 5x faster than the baseline's.
+
+### x EDGEGRAPH PARKED after v3 (transactional accept still diverges):
+the consistency metric measures INTERNAL agreement — an aliased edge
+folding the chain into a self-consistent wrong shape passes it. v1-v3
+arc: power is real (corr1 29->8 under v2 on a clean loop) but pose-only
+edges cannot be made safe at our verify quality. Safe version = image-
+level constraints inside the relaxation (revived landmark observations,
+i.e. the marg-persistent-factor frontier). Flag stays, default off.
+
+### x STATISTICAL WARNING (from eg3's off arm): corridor n=3 medians swing
+2-5x between identical rounds (corr1 6.3 vs 29.1; corr3 14.7 vs 35.9).
+Every corridor A/B verdict this session carries that caveat. RULE: the
+held-out confirmation fleet runs corridors at n>=5; single-round corridor
+deltas below ~2x are treated as noise.
