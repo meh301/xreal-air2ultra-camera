@@ -407,7 +407,8 @@ if "XR_LMMARG" not in t:
           for (size_t xbi = 0; xbi < xr_lm_batches.size();) {
             const XrLmBatch& bch = xr_lm_batches[xbi];
             const bool being_removed =
-                kfs_to_marg.count(bch.t_ns) > 0 || bch.t_ns == last_state_to_marg;
+                (kfs_to_marg.count(bch.t_ns) > 0 || bch.t_ns == last_state_to_marg)
+                && bch.sigma_px > 0;   /* negative sigma = transient, never folds */
             if (!being_removed || aom.abs_order_map.count(bch.t_ns) == 0 ||
                 bch.cam_id < 0 || bch.cam_id >= (int)calib.T_i_c.size()) {
               ++xbi;

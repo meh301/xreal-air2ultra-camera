@@ -1022,6 +1022,9 @@ static int farbear_on(void) {
 #ifndef LMFACT_MAX
 #define LMFACT_MAX 32               /* factors per frame (basalt-side cap) */
 #endif
+#ifndef LMMARG_MIN_NIN
+#define LMMARG_MIN_NIN 14          /* inliers to earn a PERMANENT marg fold */
+#endif
 #ifndef LMFACT_SIGMA_PX
 #define LMFACT_SIGMA_PX 2.0f        /* reprojection measurement std [px] */
 #endif
@@ -1068,8 +1071,13 @@ static void tight_post_prior(const float Dq[4], const float Dp[3],
  * geometry the verification proved — the factors pull the odom state toward
  * exactly the same place, but per-point and optimizer-arbitrated.
  * Called under MAP_LOCK (CORR stable); map thread only. */
+/* persist=1: this closure's factors are eligible to FOLD into the marg
+ * prior (XR_LMMARG) — only high-inlier VERIFIED closures earn it, because
+ * a fold is permanent and a wrong-place fold poisons aliased big spaces
+ * (fleet16 mag1/corr3 variance). persist=0 posts a transient-only factor
+ * (negative sigma signals the fold to skip it). */
 static void lmfact_post(const float (*uv)[2], const float (*ps)[3], int n,
-                        uint64_t ts) {
+                        uint64_t ts, int persist) {
     if (n <= 0) return;
     if (n > LMFACT_MAX) n = LMFACT_MAX;
     float ci[4];
@@ -1087,8 +1095,10 @@ static void lmfact_post(const float (*uv)[2], const float (*ps)[3], int n,
         fxyz[3 * m + 1] = po[1];
         fxyz[3 * m + 2] = po[2];
     }
-    if (xr_slam_landmark_factors(ts, 0, fuv, fxyz, n, lmf_sigma()) > 0)
-        LOGI("session map: LMFACT posted %d landmark factors", n);
+    float sg = persist ? lmf_sigma() : -lmf_sigma();
+    if (xr_slam_landmark_factors(ts, 0, fuv, fxyz, n, sg) > 0)
+        LOGI("session map: LMFACT posted %d landmark factors%s", n,
+             persist ? " (fold-eligible)" : "");
 }
 
 /* XR_LMTRACK — CONTINUOUS landmark-factor coverage. LMFACT alone posts
@@ -4486,7 +4496,7 @@ static void process_keyframe(void) {
                  * revisits younger than 30s are exactly what the prior
                  * channel could never absorb. */
                 if (lmfact_on() && lf_n > 0) {
-                    lmfact_post(lf_uv, lf_ps, lf_n, work.ts);
+                    lmfact_post(lf_uv, lf_ps, lf_n, work.ts, nin >= LMMARG_MIN_NIN);
                     if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                 }
@@ -4653,7 +4663,7 @@ static void process_keyframe(void) {
                      * NOT stepped in this branch, so the CORR⁻¹ transform
                      * inside matches the prior's E = CORR⁻¹∘D exactly). */
                     if (lmfact_on() && lf_n > 0) {
-                        lmfact_post(lf_uv, lf_ps, lf_n, work.ts);
+                        lmfact_post(lf_uv, lf_ps, lf_n, work.ts, nin >= LMMARG_MIN_NIN);
                         if (lmtrack_on())
                             lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                     }
@@ -4781,7 +4791,7 @@ static void process_keyframe(void) {
             tn++;
         }
         if (tn >= LMT_MIN_MATCH) {
-            lmfact_post(tuv, tps, tn, work.ts);
+            lmfact_post(tuv, tps, tn, work.ts, 0);  /* re-match: transient only */
             LMT.until_ns = work.ts + LMT_WINDOW_NS;   /* still seen: slide */
         } else if (tn * 2 < LMT_MIN_MATCH) {
             LMT.n = 0;                                 /* scene moved on */
