@@ -981,6 +981,23 @@ static int lmfact_on(void) {
     }
     return v;
 }
+/* XR_FARBEAR — bearing-only FAR landmarks in relocalization PnP. Matched
+ * keypoints whose landmark never triangulated (or sits past the range
+ * gate) are exactly the distant structure that dominates outdoor scenes;
+ * the drive funnel showed healthy descriptor matching collapsing at the
+ * 3D gate (bestm 42 -> n3 7-21). Their owner-keyframe ray is a world
+ * DIRECTION: parallax-free at far range, it cannot range the camera but
+ * it votes on YAW — the exact unknown the 4-DOF solver estimates. Far
+ * pairs add yaw hypotheses + inlier votes; translation stays near-only. */
+static int farbear_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_FARBEAR");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: FAR-BEARING reloc PnP ON");
+    }
+    return v;
+}
 #ifndef LMFACT_MAX
 #define LMFACT_MAX 32               /* factors per frame (basalt-side cap) */
 #endif
@@ -1748,12 +1765,39 @@ static int pnp2_inliers(const float (*s)[3], const float (*P)[3], int n,
     return cnt;
 }
 
+/* XR_FARBEAR: far-pair yaw agreement. A far pair is (query bearing s,
+ * owner-ray world direction w), both unit, both gravity-aligned. Yaw only
+ * spins the horizontal components, so an inlier must agree in z outright
+ * AND horizontally once rotated. Tighter than VER_COS_TOL — a direction
+ * carries no range to absorb error. */
+#define FARB_COS_TOL 0.9986f            /* ~3 deg */
+#define FARB_Z_TOL 0.05f
+static int pnp2_far_inliers(const float (*sf)[3], const float (*wf)[3],
+                            int nf, float yaw) {
+    float cy = cosf(yaw), sy = sinf(yaw);
+    int cnt = 0;
+    for (int m = 0; m < nf; m++) {
+        if (fabsf(sf[m][2] - wf[m][2]) > FARB_Z_TOL) continue;
+        float rx = cy * sf[m][0] - sy * sf[m][1];
+        float ry = sy * sf[m][0] + cy * sf[m][1];
+        if (rx * wf[m][0] + ry * wf[m][1] + sf[m][2] * wf[m][2] >
+            FARB_COS_TOL)
+            cnt++;
+    }
+    return cnt;
+}
+
+/* hypothesis ranges must admit the compiled reloc range (drives run 60 m) */
+#define PNP2_MAX_D (VER_MAX_RANGE_M > 40.0f ? VER_MAX_RANGE_M : 40.0f)
+
 /* Gravity-aligned 2-point PnP RANSAC. s[i] = unit bearing of query kp i
  * rotated into the CURRENT-odom world (pre-yaw-correction), P[i] = the
  * matched map point (kf-odom world). Solves Rz(dyaw) and the camera
- * center C so that P[i] - C is parallel to Rz*s[i]. Returns the inlier
- * count (0 = no acceptable model). */
+ * center C so that P[i] - C is parallel to Rz*s[i]. sf/wf/nf = OPTIONAL
+ * far bearing pairs (XR_FARBEAR): extra yaw hypotheses + inlier votes;
+ * they never touch translation. Returns near+far inliers (0 = no model). */
 static int pnp2_ransac(const float (*s)[3], const float (*P)[3], int n,
+                       const float (*sf)[3], const float (*wf)[3], int nf,
                        float Rz_out[9], float C_out[3]) {
     if (n < 2) return 0;
     int best_in = 0;
@@ -1796,7 +1840,7 @@ static int pnp2_ransac(const float (*s)[3], const float (*P)[3], int n,
             float d1 = roots[r];
             float d0 = alpha + beta * d1;
             if (d0 < VER_MIN_RANGE_M || d1 < VER_MIN_RANGE_M ||
-                d0 > 40.0f || d1 > 40.0f)
+                d0 > PNP2_MAX_D || d1 > PNP2_MAX_D)
                 continue;
             /* yaw aligns the horizontal pair vector */
             float ux = d0 * s[i0][0] - d1 * s[i1][0];
@@ -1809,12 +1853,60 @@ static int pnp2_ransac(const float (*s)[3], const float (*P)[3], int n,
                 P[i0][1] - d0 * (sy * s[i0][0] + cy * s[i0][1]),
                 P[i0][2] - d0 * s0z,
             };
-            int in = pnp2_inliers(s, P, n, yaw, C);
+            int in = pnp2_inliers(s, P, n, yaw, C) +
+                     pnp2_far_inliers(sf, wf, nf, yaw);
             if (in > best_in) {
                 best_in = in;
                 b_yaw = yaw;
                 memcpy(bC, C, sizeof bC);
             }
+        }
+    }
+    /* XR_FARBEAR hypotheses: one far pair fixes yaw outright; C then
+     * follows LINEARLY from every near ray at that yaw (sum of (I-rr^T)
+     * perpendicular constraints — no C needed up front). Rescues the
+     * many-far/few-near regime where 2-near sampling rarely draws a
+     * clean pair. */
+    for (int m = 0; m < nf; m++) {
+        if (fabsf(sf[m][2] - wf[m][2]) > FARB_Z_TOL) continue;
+        float hs = sf[m][0] * sf[m][0] + sf[m][1] * sf[m][1];
+        if (hs < 1e-4f) continue;              /* vertical ray: no yaw info */
+        float yaw = atan2f(wf[m][1], wf[m][0]) - atan2f(sf[m][1], sf[m][0]);
+        float cy = cosf(yaw), sy = sinf(yaw);
+        float M[9] = { 0 }, b[3] = { 0 };
+        for (int k = 0; k < n; k++) {
+            float rx = cy * s[k][0] - sy * s[k][1];
+            float ry = sy * s[k][0] + cy * s[k][1];
+            float rz = s[k][2];
+            float II[9] = { 1 - rx * rx, -rx * ry, -rx * rz,
+                            -rx * ry, 1 - ry * ry, -ry * rz,
+                            -rx * rz, -ry * rz, 1 - rz * rz };
+            for (int t = 0; t < 9; t++) M[t] += II[t];
+            b[0] += II[0] * P[k][0] + II[1] * P[k][1] + II[2] * P[k][2];
+            b[1] += II[3] * P[k][0] + II[4] * P[k][1] + II[5] * P[k][2];
+            b[2] += II[6] * P[k][0] + II[7] * P[k][1] + II[8] * P[k][2];
+        }
+        float det = M[0] * (M[4] * M[8] - M[5] * M[7]) -
+                    M[1] * (M[3] * M[8] - M[5] * M[6]) +
+                    M[2] * (M[3] * M[7] - M[4] * M[6]);
+        if (fabsf(det) < 1e-6f) continue;
+        float C[3] = {
+            ((M[4] * M[8] - M[5] * M[7]) * b[0] +
+             (M[2] * M[7] - M[1] * M[8]) * b[1] +
+             (M[1] * M[5] - M[2] * M[4]) * b[2]) / det,
+            ((M[5] * M[6] - M[3] * M[8]) * b[0] +
+             (M[0] * M[8] - M[2] * M[6]) * b[1] +
+             (M[2] * M[3] - M[0] * M[5]) * b[2]) / det,
+            ((M[3] * M[7] - M[4] * M[6]) * b[0] +
+             (M[1] * M[6] - M[0] * M[7]) * b[1] +
+             (M[0] * M[4] - M[1] * M[3]) * b[2]) / det,
+        };
+        int in = pnp2_inliers(s, P, n, yaw, C) +
+                 pnp2_far_inliers(sf, wf, nf, yaw);
+        if (in > best_in) {
+            best_in = in;
+            b_yaw = yaw;
+            memcpy(bC, C, sizeof bC);
         }
     }
     if (best_in < 3) return 0;
@@ -1854,6 +1946,21 @@ static int pnp2_ransac(const float (*s)[3], const float (*P)[3], int n,
             dsum += w * atan2f(cross, dotxy);
             wsum += w;
         }
+        /* far pairs vote on yaw with unit weight (a direction has no
+         * range to weight by; z-consistency is their admission test) */
+        {
+            float cyf = cosf(yaw), syf = sinf(yaw);
+            for (int m = 0; m < nf; m++) {
+                if (fabsf(sf[m][2] - wf[m][2]) > FARB_Z_TOL) continue;
+                float rx = cyf * sf[m][0] - syf * sf[m][1];
+                float ry = syf * sf[m][0] + cyf * sf[m][1];
+                float cross = rx * wf[m][1] - ry * wf[m][0];
+                float dotxy = rx * wf[m][0] + ry * wf[m][1];
+                if (dotxy < 0) continue;       /* opposite hemisphere */
+                dsum += atan2f(cross, dotxy);
+                wsum += 1.0f;
+            }
+        }
         if (cnt < 3) break;
         float det = M[0] * (M[4] * M[8] - M[5] * M[7]) -
                     M[1] * (M[3] * M[8] - M[5] * M[6]) +
@@ -1871,7 +1978,8 @@ static int pnp2_ransac(const float (*s)[3], const float (*P)[3], int n,
         }
         if (wsum > 1e-3f) yaw += dsum / wsum;
     }
-    int in = pnp2_inliers(s, P, n, yaw, C);
+    int in = pnp2_inliers(s, P, n, yaw, C) +
+             pnp2_far_inliers(sf, wf, nf, yaw);
     if (in < best_in) {                        /* refinement went sour */
         yaw = b_yaw;
         memcpy(C, bC, sizeof C);
@@ -1904,6 +2012,20 @@ struct rc_cand {
 
 static int rc_cmp(const void *a, const void *b) {
     return ((const struct rc_cand *)a)->cost - ((const struct rc_cand *)b)->cost;
+}
+
+/* XR_FARBEAR: a descriptor match dropped at the 3D gates, kept as a
+ * bearing pair candidate (owner keypoint ray = world direction) */
+#define FARB_MAX 96
+struct rc_far {
+    int qkp;                       /* query keypoint index */
+    int16_t kf;                    /* owner keyframe slot */
+    int16_t kp;                    /* owner keypoint index */
+    int16_t c;                     /* covis-pool index (covqd/covpd) */
+    int cost;                      /* descriptor distance, LOWER = better */
+};
+static int rc_far_cmp(const void *a, const void *b) {
+    return ((const struct rc_far *)a)->cost - ((const struct rc_far *)b)->cost;
 }
 
 /* covisible-neighbour sort key: pooled keyframes are added nearest-first,
@@ -1975,6 +2097,11 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
      * scan. Falls back to NN on any inference failure. */
     static struct rc_cand cand[COVIS_MAX_CAND];
     int nc = 0;
+    /* XR_FARBEAR side pool: matches the 3D gates reject (never-triangulated
+     * or out-of-range landmarks — distant structure). Bearing-only. */
+    static struct rc_far fcand[FARB_MAX];
+    int nfc = 0;
+    int want_far = farbear_on();
     int use_lg = !bad && xr_lglue_wanted();
     for (int c = 0; c < ncov && nc < COVIS_MAX_CAND; c++) {
         int s = cov[c];
@@ -1995,20 +2122,41 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
                 for (int m = 0; m < nm && nc < COVIS_MAX_CAND; m++) {
                     int i = li0[m];
                     int lk = KFA(s).lm_of_kp[li1[m]];
-                    if (lk < 0) continue;          /* kp without a landmark */
+                    int lgcost = (int)((1.0f - lsc[m]) * 1000.0f);
+                    if (lk < 0) {                  /* kp without a landmark */
+                        if (want_far && nfc < FARB_MAX) {
+                            fcand[nfc].qkp = i;
+                            fcand[nfc].kf = (int16_t)s;
+                            fcand[nfc].kp = (int16_t)li1[m];
+                            fcand[nfc].c = (int16_t)c;
+                            fcand[nfc].cost = lgcost;
+                            nfc++;
+                        }
+                        continue;
+                    }
                     float dk2 = 0;
                     for (int cc = 0; cc < 3; cc++) {
                         float dd = KFA(s).lm_xyz[lk][cc] - KFA(s).p[cc];
                         dk2 += dd * dd;
                     }
-                    if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) continue;
+                    if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) {
+                        if (want_far && nfc < FARB_MAX) {
+                            fcand[nfc].qkp = i;
+                            fcand[nfc].kf = (int16_t)s;
+                            fcand[nfc].kp = (int16_t)li1[m];
+                            fcand[nfc].c = (int16_t)c;
+                            fcand[nfc].cost = lgcost;
+                            nfc++;
+                        }
+                        continue;
+                    }
                     float ps[3];
                     qrotv(covqd[c], KFA(s).lm_xyz[lk], ps);
                     cand[nc].qkp = i;
                     cand[nc].id = KFA(s).lm_id[lk];
                     cand[nc].kf = s;
                     /* lower = better, like the NN costs */
-                    cand[nc].cost = (int)((1.0f - lsc[m]) * 1000.0f);
+                    cand[nc].cost = lgcost;
                     cand[nc].ps[0] = ps[0] + covpd[c][0];
                     cand[nc].ps[1] = ps[1] + covpd[c][1];
                     cand[nc].ps[2] = ps[2] + covpd[c][2];
@@ -2037,20 +2185,41 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
                 ? (best <= BAD_MAX_DIST && best + BAD_MARGIN <= second)
                 : (best >= XF_MIN_DOT && best - XF_MARGIN >= second);
             if (!accept) continue;
+            int nncost = bad ? best : ((1 << 30) - best);
             int lk = KFA(s).lm_of_kp[bj];
-            if (lk < 0) continue;
+            if (lk < 0) {
+                if (want_far && nfc < FARB_MAX) {
+                    fcand[nfc].qkp = i;
+                    fcand[nfc].kf = (int16_t)s;
+                    fcand[nfc].kp = (int16_t)bj;
+                    fcand[nfc].c = (int16_t)c;
+                    fcand[nfc].cost = nncost;
+                    nfc++;
+                }
+                continue;
+            }
             float dk2 = 0;
             for (int cc = 0; cc < 3; cc++) {
                 float d = KFA(s).lm_xyz[lk][cc] - KFA(s).p[cc];
                 dk2 += d * d;
             }
-            if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) continue;
+            if (dk2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M) {
+                if (want_far && nfc < FARB_MAX) {
+                    fcand[nfc].qkp = i;
+                    fcand[nfc].kf = (int16_t)s;
+                    fcand[nfc].kp = (int16_t)bj;
+                    fcand[nfc].c = (int16_t)c;
+                    fcand[nfc].cost = nncost;
+                    nfc++;
+                }
+                continue;
+            }
             float ps[3];
             qrotv(covqd[c], KFA(s).lm_xyz[lk], ps);
             cand[nc].qkp = i;
             cand[nc].id = KFA(s).lm_id[lk];
             cand[nc].kf = s;
-            cand[nc].cost = bad ? best : ((1 << 30) - best);
+            cand[nc].cost = nncost;
             cand[nc].ps[0] = ps[0] + covpd[c][0];
             cand[nc].ps[1] = ps[1] + covpd[c][1];
             cand[nc].ps[2] = ps[2] + covpd[c][2];
@@ -2099,6 +2268,52 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     }
     *out_n3 = n;
     if (n < VER_MIN_PAIRS) return 0;
+
+    /* 2c. XR_FARBEAR: greedy one-to-one over the far pool, AFTER the near
+     * assignment so a 3D-backed match always wins its query keypoint.
+     * Each far pair becomes (query bearing, owner-ray session direction) —
+     * the owner keypoint unprojects in the owner camera, rotates through
+     * the owner's stored RAW orientation, then through the same
+     * raw->session alignment its landmarks would use (rotation only:
+     * directions have no translation). */
+    static float Sf[FARB_MAX][3], Wf[FARB_MAX][3];
+    int nfar = 0;
+    if (want_far && nfc > 0) {
+        qsort(fcand, (size_t)nfc, sizeof fcand[0], rc_far_cmp);
+        for (int k = 0; k < nfc && nfar < FARB_MAX; k++) {
+            int i = fcand[k].qkp;
+            if (qused[i]) continue;
+            int s2 = fcand[k].kf;
+            float rc[3], rb[3];
+            if (GEOM.unproject(w->kp_uv[i][0], w->kp_uv[i][1], rc)) continue;
+            rb[0] = GEOM.R_ic[0] * rc[0] + GEOM.R_ic[1] * rc[1] +
+                    GEOM.R_ic[2] * rc[2];
+            rb[1] = GEOM.R_ic[3] * rc[0] + GEOM.R_ic[4] * rc[1] +
+                    GEOM.R_ic[5] * rc[2];
+            rb[2] = GEOM.R_ic[6] * rc[0] + GEOM.R_ic[7] * rc[1] +
+                    GEOM.R_ic[8] * rc[2];
+            Sf[nfar][0] = Rq[0] * rb[0] + Rq[1] * rb[1] + Rq[2] * rb[2];
+            Sf[nfar][1] = Rq[3] * rb[0] + Rq[4] * rb[1] + Rq[5] * rb[2];
+            Sf[nfar][2] = Rq[6] * rb[0] + Rq[7] * rb[1] + Rq[8] * rb[2];
+            if (GEOM.unproject(KFA(s2).kp_uv[fcand[k].kp][0],
+                               KFA(s2).kp_uv[fcand[k].kp][1], rc))
+                continue;
+            rb[0] = GEOM.R_ic[0] * rc[0] + GEOM.R_ic[1] * rc[1] +
+                    GEOM.R_ic[2] * rc[2];
+            rb[1] = GEOM.R_ic[3] * rc[0] + GEOM.R_ic[4] * rc[1] +
+                    GEOM.R_ic[5] * rc[2];
+            rb[2] = GEOM.R_ic[6] * rc[0] + GEOM.R_ic[7] * rc[1] +
+                    GEOM.R_ic[8] * rc[2];
+            float Rk[9], ro[3];
+            q2R(KFA(s2).q, Rk);
+            ro[0] = Rk[0] * rb[0] + Rk[1] * rb[1] + Rk[2] * rb[2];
+            ro[1] = Rk[3] * rb[0] + Rk[4] * rb[1] + Rk[5] * rb[2];
+            ro[2] = Rk[6] * rb[0] + Rk[7] * rb[1] + Rk[8] * rb[2];
+            qrotv(covqd[fcand[k].c], ro, Wf[nfar]);
+            qused[i] = 1;
+            nfar++;
+        }
+    }
 
     /* 2b. robust landmark geometry + observation sets. The greedy step
      * kept whichever single observation had the best DESCRIPTOR cost, but
@@ -2156,9 +2371,14 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     }
 
     float Rz[9], C[3];
-    int nin = pnp2_ransac(Sw, Pw, n, Rz, C);
+    /* far votes join nin (evidence is evidence) but the 33% consensus
+     * ratio stays NEAR-only: bearing pairs never ranged anything, so they
+     * must not dilute the fraction of 3D matches the pose explains. */
+    int nin = pnp2_ransac(Sw, Pw, n, Sf, Wf, nfar, Rz, C);
     *out_nin = nin;
-    if (nin < VER_MIN_PAIRS || nin * 100 < 33 * n) return 0;
+    int near_in = nin - (nfar > 0 ? pnp2_far_inliers(Sf, Wf, nfar,
+                             atan2f(Rz[3], Rz[0])) : 0);
+    if (nin < VER_MIN_PAIRS || near_in * 100 < 33 * n) return 0;
 
     /* 3. inlier-backed covisibility: the union of observation sets over the
      * geometric INLIERS — how many DISTINCT pooled keyframes actually back
@@ -2318,7 +2538,8 @@ static int lmb_reloc(const xr_kf *w, int nkf, float Dq[4], float Dp[3],
     *out_n3 = n;
     if (n < VER_MIN_PAIRS) return 0;
     float Rz[9], C[3];
-    int nin = pnp2_ransac(Sw, Pw, n, Rz, C);
+    /* bank entries always carry 3D — no far set on this path */
+    int nin = pnp2_ransac(Sw, Pw, n, NULL, NULL, 0, Rz, C);
     *out_nin = nin;
     if (nin < VER_MIN_PAIRS || nin * 100 < 33 * n) return 0;
     /* covis proxy + dominant owner over the geometric inliers */
