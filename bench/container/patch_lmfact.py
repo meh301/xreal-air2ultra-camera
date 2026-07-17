@@ -366,4 +366,124 @@ extern "C" vit_result_t vit_tracker_xreal_landmark_factors(vit_tracker_t *tracke
 else:
     done.append("vit_tracker.cpp: lmfact already present")
 
+
+
+# ==================== stage 4: marg-persistent factors =====================
+# Without this, factor information EVAPORATES when its frame marginalizes
+# (applied in optimize() only). OKVIS2 persists reobservation info through
+# marginalization — the rooms-regime mechanism. Env-gated: XR_LMMARG.
+
+t = read("src/vi_estimator/sqrt_keypoint_vio.cpp")
+if "XR_LMMARG" not in t:
+    anchor = """      if (is_lin_sqrt && marg_data.is_sqrt) {
+        lqr->get_dense_Q2Jp_Q2r(Q2Jp_or_H, Q2r_or_b);
+      } else {
+        lqr->get_dense_H_b(Q2Jp_or_H, Q2r_or_b);
+      }"""
+    assert t.count(anchor) >= 1, "marg get_dense anchor missing"
+    inject = anchor + """
+
+      /* XREAL stage-4 (XR_LMMARG): persist landmark-factor information
+       * through marginalization. Batches attached to frames being REMOVED
+       * fold into the marg linearization here — as extra residual rows in
+       * sqrt mode, as an H/b block otherwise — so the map's pull survives
+       * the frame instead of evaporating with it. */
+      {
+        static int xr_lmmarg_on = -1;
+        if (xr_lmmarg_on < 0) {
+          const char* e = getenv("XR_LMMARG");
+          xr_lmmarg_on = (e && *e && *e != '0') ? 1 : 0;
+          if (xr_lmmarg_on)
+            std::cerr << "[xr] LMMARG marg-persistent landmark factors ON" << std::endl;
+        }
+        if (xr_lmmarg_on) {
+          std::lock_guard<std::mutex> lg_lm(xr_lm_mutex);
+          for (size_t xbi = 0; xbi < xr_lm_batches.size();) {
+            const XrLmBatch& bch = xr_lm_batches[xbi];
+            const bool being_removed =
+                kfs_to_marg.count(bch.t_ns) > 0 || bch.t_ns == last_state_to_marg;
+            if (!being_removed || aom.abs_order_map.count(bch.t_ns) == 0 ||
+                bch.cam_id < 0 || bch.cam_id >= (int)calib.T_i_c.size()) {
+              ++xbi;
+              continue;
+            }
+            const auto& [xr_idx, xr_bsize] = aom.abs_order_map.at(bch.t_ns);
+            UNUSED(xr_bsize);
+            SE3 T_w_i_lm;
+            if (frame_states.count(bch.t_ns) > 0) {
+              T_w_i_lm = frame_states.at(bch.t_ns).getState().T_w_i;
+            } else if (frame_poses.count(bch.t_ns) > 0) {
+              T_w_i_lm = frame_poses.at(bch.t_ns).getPose();
+            } else {
+              ++xbi;
+              continue;
+            }
+            const SE3& T_i_c = calib.T_i_c[bch.cam_id];
+            const Eigen::Matrix<Scalar, 3, 3> R_cw =
+                (T_w_i_lm.so3() * T_i_c.so3()).inverse().matrix();
+            const SE3 T_c_w = (T_w_i_lm * T_i_c).inverse();
+            const Scalar w_meas = Scalar(1.0) / Scalar(bch.sigma_px * bch.sigma_px);
+            const Scalar huber_px = Scalar(3.0) * Scalar(bch.sigma_px);
+            const Scalar cutoff_px = Scalar(20.0) * Scalar(bch.sigma_px);
+            Eigen::Matrix<Scalar, Eigen::Dynamic, 6> Jrows(2 * bch.n, 6);
+            Eigen::Matrix<Scalar, Eigen::Dynamic, 1> rrows(2 * bch.n);
+            int nr = 0;
+            for (int k = 0; k < bch.n; k++) {
+              const Vec3 p_w(Scalar(bch.xyz[3 * k]), Scalar(bch.xyz[3 * k + 1]),
+                             Scalar(bch.xyz[3 * k + 2]));
+              const Vec3 p_c = T_c_w * p_w;
+              Vec4 p_c4;
+              p_c4 << p_c(0), p_c(1), p_c(2), Scalar(1);
+              Vec2 proj;
+              Eigen::Matrix<Scalar, 2, 4> d_proj_d_p3d;
+              if (!calib.intrinsics[bch.cam_id].project(p_c4, proj, &d_proj_d_p3d)) continue;
+              const Vec2 r(proj(0) - Scalar(bch.uv[2 * k]),
+                           proj(1) - Scalar(bch.uv[2 * k + 1]));
+              const Scalar rn = r.norm();
+              if (!(rn < cutoff_px)) continue;
+              const Vec3 v_wi = p_w - T_w_i_lm.translation();
+              Eigen::Matrix<Scalar, 3, 6> d_pc_d_xi;
+              d_pc_d_xi.template leftCols<3>() = -R_cw;
+              d_pc_d_xi.template rightCols<3>() = R_cw * Sophus::SO3<Scalar>::hat(v_wi);
+              const Eigen::Matrix<Scalar, 2, 6> J_lm =
+                  d_proj_d_p3d.template leftCols<3>() * d_pc_d_xi;
+              const Scalar w_huber = rn <= huber_px ? Scalar(1) : huber_px / rn;
+              const Scalar sw = std::sqrt(w_meas * w_huber);
+              Jrows.template block<2, 6>(2 * nr, 0) = sw * J_lm;
+              rrows.template segment<2>(2 * nr) = sw * r;
+              nr++;
+            }
+            if (nr > 0) {
+              if (is_lin_sqrt && marg_data.is_sqrt) {
+                const Eigen::Index r0 = Q2Jp_or_H.rows();
+                Q2Jp_or_H.conservativeResize(r0 + 2 * nr, Eigen::NoChange);
+                Q2r_or_b.conservativeResize(r0 + 2 * nr);
+                Q2Jp_or_H.bottomRows(2 * nr).setZero();
+                Q2Jp_or_H.block(r0, xr_idx, 2 * nr, 6) = Jrows.topRows(2 * nr);
+                Q2r_or_b.tail(2 * nr) = rrows.head(2 * nr);
+              } else {
+                Q2Jp_or_H.block(xr_idx, xr_idx, 6, 6) +=
+                    Jrows.topRows(2 * nr).transpose() * Jrows.topRows(2 * nr);
+                Q2r_or_b.segment(xr_idx, 6) +=
+                    Jrows.topRows(2 * nr).transpose() * rrows.head(2 * nr);
+              }
+              static bool xr_lmmarg_announced = false;
+              if (!xr_lmmarg_announced) {
+                xr_lmmarg_announced = true;
+                std::cerr << "[xr] LMMARG folded " << nr
+                          << " landmark factors into the marg prior" << std::endl;
+              }
+              xr_lm_batches.erase(xr_lm_batches.begin() + xbi);
+              continue;   /* consumed */
+            }
+            ++xbi;
+          }
+        }
+      }"""
+    t = t.replace(anchor, inject, 1)
+    write("src/vi_estimator/sqrt_keypoint_vio.cpp", t)
+    done.append("sqrt_keypoint_vio.cpp: lmmarg (stage 4) patched")
+else:
+    done.append("sqrt_keypoint_vio.cpp: lmmarg already present")
+
 print("\n".join(done))
