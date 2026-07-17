@@ -559,3 +559,14 @@ euroc 6.6 vs 3.82, rooms 5.2 vs 1.20, msd 6.2 vs 2.05 — all the same
 mechanism (continuous map reuse below VIO drift level) = stage-3
 landmark reprojection + reactivation, now unblocked by the lifetime
 descriptor bank.
+
+### x SUBGATE VERDICT: TIGHTSUB keeper (corridor bimodality), rooms need true stage-3
+fullb vs fullsub vs fullsee (rooms+euroc+msd focus, 3 runs): TIGHTSUB
+halves corridor2 same-batch (50.4 -> 26.3; sub-gate priors catch drift
+early = less closure bimodality), EuRoC mixed-mild, corridor5/MOO15
+neutral. ROOMS UNTOUCHED - root cause: TIGHT_REVISIT_NS=30s excludes
+nearly all room-scale closures (everything is re-seen within seconds).
+Sub-VIO rooms = landmark-level factors (stage-3) where young
+re-observations are arbitrated per-point, not pose priors.
+MAPSEED rejected AGAIN post-race-fix (V1_02 5.7->21.0, MOO15 div).
+DECISION: XR_TIGHTSUB joins the 'full' arm for the next fleet.
