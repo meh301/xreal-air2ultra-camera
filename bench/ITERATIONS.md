@@ -1058,3 +1058,17 @@ as a uniform default. This is the SECOND regime-split feature (after
 vkfobs) — the adaptive/profile switch question is now worth two prizes,
 OR the product ships LMMARG=on for the room-scale AR profile (the actual
 Gen5 use case) — surfaced to the user as a product decision.
+
+### x MULTIHYP A/B: KEEPER (reloc scenario) — uniformly positive on all 4
+seqs: mag1 28.9->33.3 (+4.4), mag2 41.1->43.3, corr3 85.6->87.8, corr1
+92.2->93.3 with r@10 80->88 and med_err down. Gains concentrate in the
+aliased regime it targets; zero cost. Mapping-mode ATE safety needs its
+own fleet check before default-on (more confirms = more applied closures).
+
+### x MSD FRONTEND: REFUTED — all four optical-flow variants (levels 4,
+iters 10, denser grid, combined) are noise around baseline; MOO01 stays
+20-26 vs okvis2-raw 8.9. KLT tracking is NOT the MSD drift cause.
+Remaining candidates: IMU noise model (sweep running via new
+XR_IMU_NOISE_SCALE env — noises ride the calib feed, not config) and
+calibration quality. ofgrid mildly helps easy seqs, hurts MOO13 — not a
+keeper.
