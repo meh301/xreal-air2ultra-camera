@@ -1147,3 +1147,13 @@ no gain anywhere. Huber stays (okvis2-parity curiosity closed).
   fz17d drive3 13.3% is the best outdoor reloc number recorded.
 - score_drives.py extended: optional scan dir for <seq>_<arm>_rN_<tr>.tum.
 - RELOC17 leg (rl17/rb17, corr1/3/4+mag2, n=3, 24 runs) fired on .58.
+
+### x RELOC17 LEG (.58, n=3) — wake-up reloc at finale composition
+- Single-frame: corr1 88.9 / corr3 95.5 / corr4 95.6 / mag2 42.2 mean
+  recall (in line with v15 freeze).
+- BURST+clip15: corr1/3/4 ALL 100% (r@10cm 87-97%, med err 3-5cm),
+  mag2 80.0% mean (was ~52-56% in prior burst rounds) — map-side
+  landmark factors (fz17 stack) improve burst verify on the aliased
+  hall. Best wake-up numbers recorded; blackout-OKVIS comparison
+  pending on .181.
+- DRIVES r2/r3 fired on .58 (headline 1.19%-vs-3.3% needs n=3).
