@@ -99,6 +99,20 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
                   const int32_t *lm_id, const float (*lm_xyz)[3],
                   const float (*lm_uv)[2], int n_lm);
 
+/* XR_DEPTHFILL variant: also carries the RIGHT eye of a RECTIFIED stereo
+ * pair. At keyframe-store time, keypoints without a VIO landmark get 3D
+ * from per-keypoint epipolar ZNCC (fx/baseline registered via
+ * xr_map_set_stereo) — the wide-baseline ranging the VIO cannot do.
+ * img_right NULL == xr_map_offer. */
+void xr_map_offer2(const float q[4], const float p[3], uint64_t ts_ns,
+                   const uint8_t *img, const uint8_t *img_right,
+                   const int32_t *lm_id, const float (*lm_xyz)[3],
+                   const float (*lm_uv)[2], int n_lm);
+
+/* Register the rectified stereo geometry for XR_DEPTHFILL (rectified
+ * focal in px + metric baseline). Call once before offers. */
+void xr_map_set_stereo(float fx, float baseline_m);
+
 int xr_map_num_keyframes(void);      /* thread-safe (atomic) */
 
 /* Register the LighterGlue matcher ONNX (XFeat verification only): loop/

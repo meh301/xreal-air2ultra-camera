@@ -131,12 +131,15 @@ static void m3v(const float R[9], const float v[3], float o[3]) {
 static struct {
     uint64_t ts[RING_N];
     uint8_t *img[RING_N];   /* left frames, XR_OW*XR_OH each */
+    uint8_t *img2[RING_N];  /* right frames (XR_DEPTHFILL) */
     int head;
 } RING;
 
 static void ring_put(uint64_t ts, const uint8_t *left) {
     int i = RING.head;
     memcpy(RING.img[i], left, (size_t)XR_OW * XR_OH);
+    memcpy(RING.img2[i], left + (size_t)XR_OW * XR_OH,
+           (size_t)XR_OW * XR_OH);   /* frames.raw stores L then R */
     RING.ts[i] = ts;
     RING.head = (i + 1) % RING_N;
 }
@@ -144,6 +147,11 @@ static void ring_put(uint64_t ts, const uint8_t *left) {
 static const uint8_t *ring_get(uint64_t ts) {
     for (int i = 0; i < RING_N; i++)
         if (RING.ts[i] == ts) return RING.img[i];
+    return NULL;
+}
+static const uint8_t *ring_get2(uint64_t ts) {
+    for (int i = 0; i < RING_N; i++)
+        if (RING.ts[i] == ts) return RING.img2[i];
     return NULL;
 }
 
@@ -254,7 +262,8 @@ static void on_pose(const xr_slam_state *st_in, void *user) {
          * otherwise races the latch away before any offer processes) */
         if ((double)st->ts * 1e-9 >= KD_NOCLEAR_UNTIL)
             xr_map_freeze_storage(0);
-        xr_map_offer(st->q, st->p, st->ts, img, off_id, off_xyz, off_uv, off_n);
+        xr_map_offer2(st->q, st->p, st->ts, img, ring_get2(st->ts),
+                      off_id, off_xyz, off_uv, off_n);
         ctx->n_offers++;
     }
 
@@ -324,7 +333,45 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < RING_N; i++) {
         RING.img[i] = malloc((size_t)XR_OW * XR_OH);
-        if (!RING.img[i]) DIE("oom");
+        RING.img2[i] = malloc((size_t)XR_OW * XR_OH);
+        if (!RING.img[i] || !RING.img2[i]) DIE("oom");
+    }
+    /* XR_DEPTHFILL: register rectified stereo geometry when the pack is
+     * distortion-free (drives). fx + |left_p - right_p| from calib.txt. */
+    {
+        char cpath[1024];
+        snprintf(cpath, sizeof cpath, "%s/calib.txt", pack);
+        FILE *cf = fopen(cpath, "r");
+        if (cf) {
+            char line[256];
+            double fx = 0, lp[3] = {0}, rp[3] = {0}, dmax = 0;
+            int have_l = 0, have_r = 0;
+            while (fgets(line, sizeof line, cf)) {
+                double a, b, c, d;
+                if (sscanf(line, "left_pinhole %lf %lf %lf %lf",
+                           &a, &b, &c, &d) == 4) fx = a;
+                else if (sscanf(line, "left_dist %lf %lf %lf %lf",
+                                &a, &b, &c, &d) == 4) {
+                    if (fabs(a) > dmax) dmax = fabs(a);
+                    if (fabs(b) > dmax) dmax = fabs(b);
+                    if (fabs(c) > dmax) dmax = fabs(c);
+                    if (fabs(d) > dmax) dmax = fabs(d);
+                } else if (sscanf(line, "left_p %lf %lf %lf",
+                                  &a, &b, &c) == 3) {
+                    lp[0] = a; lp[1] = b; lp[2] = c; have_l = 1;
+                } else if (sscanf(line, "right_p %lf %lf %lf",
+                                  &a, &b, &c) == 3) {
+                    rp[0] = a; rp[1] = b; rp[2] = c; have_r = 1;
+                }
+            }
+            fclose(cf);
+            if (fx > 1 && have_l && have_r && dmax < 1e-9) {
+                double bl = sqrt((lp[0]-rp[0])*(lp[0]-rp[0]) +
+                                 (lp[1]-rp[1])*(lp[1]-rp[1]) +
+                                 (lp[2]-rp[2])*(lp[2]-rp[2]));
+                xr_map_set_stereo((float)fx, (float)bl);
+            }
+        }
     }
     uint8_t *fr = malloc((size_t)2 * XR_OW * XR_OH);
     if (!fr) DIE("oom");

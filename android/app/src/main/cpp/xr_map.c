@@ -326,6 +326,8 @@ static struct {                        /* worker -> map thread mailbox */
     uint64_t ts;
     float q[4], p[3];
     uint8_t img[XR_OW * XR_OH];
+    uint8_t img2[XR_OW * XR_OH];       /* XR_DEPTHFILL: right eye (opt) */
+    int have2;
     int n_lm;
     int32_t lm_id[XR_MAP_KP_PER_KF];
     float lm_xyz[XR_MAP_KP_PER_KF][3];
@@ -1108,6 +1110,117 @@ static int burstpnp_on(void) {
         if (v) LOGI("session map: BURST-PNP joint wake-up solve ON");
     }
     return v;
+}
+/* XR_DEPTHFILL — stereo-depth landmark backfill at keyframe store. The
+ * outdoor funnel dies at n3: matched keypoints whose landmark never
+ * triangulated (VIO's instantaneous baseline is centimetres; the stereo
+ * baseline is ~30 cm and ranges to tens of metres). At ~1 Hz store
+ * cadence, per-KEYPOINT epipolar ZNCC on the rectified pair (no dense
+ * map) backfills 3D for keypoints the VIO left dark — they become
+ * first-class landmarks for reloc, the bank, and the factor channel.
+ * Only active when the harness registered a rectified stereo geometry. */
+static struct { float fx, base; int set; } STEREOG;
+void xr_map_set_stereo(float fx, float baseline_m) {
+    if (fx > 1.0f && baseline_m > 1e-3f) {
+        STEREOG.fx = fx;
+        STEREOG.base = baseline_m;
+        STEREOG.set = 1;
+        LOGI("session map: stereo geom fx=%.1f base=%.3fm", (double)fx,
+             (double)baseline_m);
+    }
+}
+static int depthfill_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_DEPTHFILL");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: STEREO DEPTH-FILL ON");
+    }
+    return v;
+}
+#define DF_PATCH 4                 /* 9x9 ZNCC window */
+#define DF_MAX_DISP 128
+#define DF_MIN_Z 1.0f
+#define DF_MIN_ZNCC 0.78f
+#define DF_MARGIN 0.06f
+static uint32_t DF_SYNTH_CTR;      /* map thread only */
+static int df_backfill(xr_kf *w, const uint8_t *L, const uint8_t *Rt) {
+    if (!STEREOG.set || !GEOM.have) return 0;
+    float maxz = VER_MAX_RANGE_M;
+    float mind = STEREOG.fx * STEREOG.base / maxz;
+    float maxd = STEREOG.fx * STEREOG.base / DF_MIN_Z;
+    if (maxd > DF_MAX_DISP) maxd = DF_MAX_DISP;
+    if (mind < 1.0f) mind = 1.0f;
+    int added = 0;
+    float Rq[9];
+    q2R(w->q, Rq);
+    for (int j = 0; j < w->n_kp && w->n_lm < XR_MAP_KP_PER_KF; j++) {
+        if (w->lm_of_kp[j] >= 0) continue;
+        int u = (int)(w->kp_uv[j][0] + 0.5f);
+        int v = (int)(w->kp_uv[j][1] + 0.5f);
+        if (u < DF_PATCH + (int)maxd || u >= XR_OW - DF_PATCH ||
+            v < DF_PATCH || v >= XR_OH - DF_PATCH)
+            continue;
+        /* left patch stats (9x9) */
+        float lsum = 0, lsum2 = 0;
+        for (int dy = -DF_PATCH; dy <= DF_PATCH; dy++)
+            for (int dx = -DF_PATCH; dx <= DF_PATCH; dx++) {
+                float px = (float)L[(v + dy) * XR_OW + u + dx];
+                lsum += px;
+                lsum2 += px * px;
+            }
+        const float NPX = (float)((2 * DF_PATCH + 1) * (2 * DF_PATCH + 1));
+        float lmean = lsum / NPX;
+        float lvar = lsum2 / NPX - lmean * lmean;
+        if (lvar < 25.0f) continue;            /* flat patch: unmatchable */
+        float lstd = sqrtf(lvar);
+        float best = -2, second = -2;
+        int bd = -1;
+        for (int d = (int)mind; d <= (int)maxd; d++) {
+            int ru = u - d;
+            float rsum = 0, rsum2 = 0, dot = 0;
+            for (int dy = -DF_PATCH; dy <= DF_PATCH; dy++)
+                for (int dx = -DF_PATCH; dx <= DF_PATCH; dx++) {
+                    float a = (float)L[(v + dy) * XR_OW + u + dx];
+                    float b = (float)Rt[(v + dy) * XR_OW + ru + dx];
+                    rsum += b;
+                    rsum2 += b * b;
+                    dot += a * b;
+                }
+            float rmean = rsum / NPX;
+            float rvar = rsum2 / NPX - rmean * rmean;
+            if (rvar < 16.0f) continue;
+            float z = (dot / NPX - lmean * rmean) / (lstd * sqrtf(rvar));
+            if (z > best) { second = best; best = z; bd = d; }
+            else if (z > second) second = z;
+        }
+        if (bd < 0 || best < DF_MIN_ZNCC || best - second < DF_MARGIN)
+            continue;
+        float dsub = (float)bd;                 /* TODO subpixel: adequate
+                                                 * for landmark seeding */
+        float z = STEREOG.fx * STEREOG.base / dsub;
+        float rc[3];
+        if (GEOM.unproject(w->kp_uv[j][0], w->kp_uv[j][1], rc)) continue;
+        if (rc[2] < 0.1f) continue;
+        float s = z / rc[2];
+        float pc[3] = { rc[0] * s, rc[1] * s, rc[2] * s };
+        float pb[3] = {
+            GEOM.R_ic[0] * pc[0] + GEOM.R_ic[1] * pc[1] +
+                GEOM.R_ic[2] * pc[2] + GEOM.p_ic[0],
+            GEOM.R_ic[3] * pc[0] + GEOM.R_ic[4] * pc[1] +
+                GEOM.R_ic[5] * pc[2] + GEOM.p_ic[1],
+            GEOM.R_ic[6] * pc[0] + GEOM.R_ic[7] * pc[1] +
+                GEOM.R_ic[8] * pc[2] + GEOM.p_ic[2],
+        };
+        int li = w->n_lm++;
+        w->lm_id[li] = (int32_t)(0x40000000u | (DF_SYNTH_CTR++ & 0x3FFFFFFFu));
+        w->lm_xyz[li][0] = Rq[0] * pb[0] + Rq[1] * pb[1] + Rq[2] * pb[2] + w->p[0];
+        w->lm_xyz[li][1] = Rq[3] * pb[0] + Rq[4] * pb[1] + Rq[5] * pb[2] + w->p[1];
+        w->lm_xyz[li][2] = Rq[6] * pb[0] + Rq[7] * pb[1] + Rq[8] * pb[2] + w->p[2];
+        w->lm_of_kp[j] = li;
+        added++;
+    }
+    return added;
 }
 static int lmtrack_on(void) {
     static int v = -1;
@@ -3219,6 +3332,10 @@ static void process_keyframe(void) {
     memcpy(work.q, MBOX.q, sizeof work.q);
     memcpy(work.p, MBOX.p, sizeof work.p);
     memcpy(img, MBOX.img, sizeof img);
+    static uint8_t img2[XR_OW * XR_OH];
+    int have_img2 = MBOX.have2;
+    if (have_img2) memcpy(img2, MBOX.img2, sizeof img2);
+    MBOX.have2 = 0;
     work.n_lm = MBOX.n_lm;
     memcpy(work.lm_id, MBOX.lm_id, sizeof(int32_t) * (size_t)work.n_lm);
     memcpy(work.lm_xyz, MBOX.lm_xyz, sizeof(float) * 3 * (size_t)work.n_lm);
@@ -4341,6 +4458,14 @@ static void process_keyframe(void) {
             if (REACT_A.kf == vpos) { REACT_A.kf = -1; REACT_A.fails = 0; }
             else if (REACT_A.kf > vpos) REACT_A.kf--;
         }
+        /* XR_DEPTHFILL: give landmark-less keypoints stereo 3D before
+         * the frame is immortalised (bank + reloc + factors all inherit) */
+        if (depthfill_on() && have_img2) {
+            int nadd = df_backfill(&work, img, img2);
+            if (nadd)
+                LOGI("session map: DEPTHFILL +%d stereo landmarks (%d total)",
+                     nadd, work.n_lm);
+        }
         work.last_used = work.ts;
         /* corrected session pose = current global correction ∘ odom. A
          * confirmed closure this same pass already deformed the tail and
@@ -4485,10 +4610,10 @@ static void thread_start(void) {
     pthread_detach(t);
 }
 
-void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
-                  const uint8_t *img,
-                  const int32_t *lm_id, const float (*lm_xyz)[3],
-                  const float (*lm_uv)[2], int n_lm) {
+void xr_map_offer2(const float q[4], const float p[3], uint64_t ts_ns,
+                   const uint8_t *img, const uint8_t *img_right,
+                   const int32_t *lm_id, const float (*lm_xyz)[3],
+                   const float (*lm_uv)[2], int n_lm) {
     pthread_once(&THREAD_ONCE, thread_start);
     pthread_mutex_lock(&MAP_LOCK);
     if (MBOX.full) {                       /* map thread busy: drop */
@@ -4517,6 +4642,12 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
     memcpy(MBOX.q, q, sizeof MBOX.q);
     memcpy(MBOX.p, p, sizeof MBOX.p);
     memcpy(MBOX.img, img, sizeof MBOX.img);
+    if (img_right) {
+        memcpy(MBOX.img2, img_right, sizeof MBOX.img2);
+        MBOX.have2 = 1;
+    } else {
+        MBOX.have2 = 0;
+    }
     if (n_lm > XR_MAP_KP_PER_KF) n_lm = XR_MAP_KP_PER_KF;
     MBOX.n_lm = n_lm;
     memcpy(MBOX.lm_id, lm_id, sizeof(int32_t) * (size_t)n_lm);
@@ -4530,4 +4661,13 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
     LAST_POSE.have = 1;
     pthread_cond_signal(&MAP_COND);
     pthread_mutex_unlock(&MAP_LOCK);
+}
+
+/* legacy single-image offer (the app path) — no stereo backfill */
+void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
+                  const uint8_t *img,
+                  const int32_t *lm_id, const float (*lm_xyz)[3],
+                  const float (*lm_uv)[2], int n_lm) {
+    xr_map_offer2(q, p, ts_ns, img, NULL, lm_id, lm_xyz, lm_uv, n_lm);
+
 }
