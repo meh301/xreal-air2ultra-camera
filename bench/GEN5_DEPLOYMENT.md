@@ -165,3 +165,34 @@ diverges drive2); EuRoC/rooms/MSD remain OKVIS2+LC's (3.82/1.20/2.29 vs
 our 6.5/4.9-5.5/6.1) — the two documented frontiers (marg-persistent
 factors, MSD frontend) are the path there. Wake-up reloc: burst-15 +
 TrustVPR, corridors 50-73%% recall, rooms 100%%.
+
+### 2026-07-18 FREEZE v16-final "fz18" (supersedes v15-final)
+
+APK default set = v15-final reloc stack (cap400, SNAP_MIN 0.50,
+TRUSTVPR, BURSTPNP, MULTIHYP lost-only, EigenPlaces, five pipeline
+fixes) PLUS the map->VIO factor stack, now UNIFORM-ON: XR_LMFACT,
+XR_LMTRACK, XR_LMMARG, XR_LMMARG_AUTO (scene gate, XR_LMMARG_SCENE_M=6),
+XR_LMMARG_FOLD_PX=999 (no fold arbitration), XR_LMTRACK_PERSIST=1
+(track factors fold too). No ADAPT, no room/corridor switching — the
+depth gate is the single safety and it is REGIME-detection, not
+closure-quality gating (four closure-quality gate families failed;
+see ITERATIONS stage-5..7 arc). Requires the stage-7 basalt fix
+(persist sign preserved at setXrLandmarkFactors — patch_stage7.py);
+without it the flags silently degrade to fold-everything.
+
+Held-out gate (EVALUATION 12): PASSED on 8 unseen seqs, zero
+regressions, zero divergences (rooms all better, corr2 better, corr4
+neutral, slides both better).
+
+Scoreboard at freeze (within-round map medians, stage-7 stack):
+- TUM-VI long: OURS 24.4 vs okvis2+lc 31.8 (orb3 82, openvins 55).
+  We lead corr5/mag1/mag2/slides1/slides2 (their blowups: 101/180/160);
+  okvis2+lc leads corridors 1-4 (2.8-11.4 vs our 17-28; corridor floor
+  is arm-neutral tracking noise, the documented remaining frontier).
+- TUM-VI rooms: OURS 3.9 vs okvis2+lc 1.20 (was 5.3 pre-LMMARG; gap
+  halved by the factor stack; remainder is calibration-class).
+- 4Seasons drives n=3: drive1 1.44%% vs 3.32%% (every run beats them),
+  drive2 3.35%% vs DIVERGED, drive3 1.88%% vs 1.22%%.
+- Wake-up: burst-15 corridors 100%% recall (med err 3-5 cm, ~55 ms);
+  mag2 80%%. OKVIS2: DNF (reference harness deadlocks at the camera
+  gap, all 6 arms). rl18/rb18 re-measure at fz18 in flight.

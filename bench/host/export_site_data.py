@@ -354,7 +354,9 @@ def main():
     ours_re = re.compile(
         r"(?P<seq>.+?)_{1,2}"
         r"(?P<arm>bad|vpr|megaloc|xfeat|xvpr|xmegaloc|xdlg6|fulleig|freezem"
-        r"|freeze|fullm|full|lfbase|lfonly|lfts|sn30|sn50)"
+        r"|freeze|fullm|full|lfbase|lfonly|lfts|sn30|sn50"
+        r"|fz18|fzbase|fz17d|s5auto|s5arb|s5off"
+        r"|g999s6|g999|g8s6|g8|adfl|adf|ad|ckhub|ckcau)"
         r"_r(?P<run>\d+)_(?P<track>vio|map)\.tum$")
     base_re = re.compile(
         r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins)_lc(?P<lc>[01])\.tum$")
