@@ -2,33 +2,21 @@
  * Data: data/{results,baselines,published,ledger,meta}.json + data/traj/<seq>_<arm>.json */
 "use strict";
 
-const ARMS = ["bad", "vpr", "megaloc", "xfeat", "xvpr", "xmegaloc", "xdlg6", "full",
-  "freeze", "freezem", "fulleig", "lfbase", "lfonly", "lfts", "sn30", "sn50"];
-/* iteration A/B arms: exported and selectable, but off by default so the
- * overview stays readable */
-const AB_ARMS = new Set(["fulleig", "lfbase", "lfonly", "lfts", "sn30", "sn50"]);
+/* SITE CURATION 2026-07-18: two ours arms only. fzbase = the deploy
+ * base (reloc stack, no map->VIO factors); fz18 = FREEZE v16-final
+ * (fzbase + LMFACT/LMTRACK/LMMARG factor stack, scene-gated folds,
+ * LMTRACK_PERSIST). Historical iteration arms live in bench/ITERATIONS.md
+ * and the raw result dirs, not on the site. */
+const ARMS = ["fzbase", "fz18"];
+const AB_ARMS = new Set([]);
 const ARM_LABEL = {
-  bad: "BAD/TEBLID", vpr: "BAD + EigenPlaces", megaloc: "BAD + MegaLoc",
-  xfeat: "XFeat", xvpr: "XFeat + EigenPlaces", xmegaloc: "XFeat + MegaLoc",
-  "bad-vio": "VIO only", "xfeat-vio": "VIO only (XFeat)",
-  "xdlg6-vio": "VIO only (dense arms)",
-  "freeze-vio": "VIO only (freeze cfg)",
+  fzbase: "OURS base (reloc stack, no factors)",
+  fz18: "OURS fz18 (FROZEN: + landmark-factor stack)",
+  "fzbase-vio": "VIO only", "fz18-vio": "VIO (factor-coupled)",
   okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
   orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
-  xdense: "XFeat-dense + MegaLoc", xdenselg6: "XFeat-dense + MegaLoc + LGlue",
-  lmdesc: "dense+LGlue + landmark bank",
+  rl18: "wake-up, single frame", rb18: "wake-up, burst-15",
   clip1: "wake-up probe, 1 frame", clip15: "wake-up probe, 15 frames",
-  xdlg6: "dense + MegaLoc + LGlue", full: "FULL (dense+LGlue+union+tight)",
-  utf: "FULL (dense+LGlue+union+tight)",
-  freeze: "FREEZE (dense+LGlue+EigenPlaces+SeqVote+TightSub)",
-  freezem: "FREEZE variant (MegaLoc retrieval)",
-  fulleig: "FULL + EigenPlaces (retrieval flip A/B)",
-  lfbase: "deploy base (A/B ref, no TightSub)",
-  lfonly: "deploy + landmark factors (LMFACT)",
-  lfts: "deploy + TightSub + LMFACT",
-  sn30: "deploy, SNAP_MIN 0.30", sn50: "deploy, SNAP_MIN 0.50",
-  padeig: "drive reloc, EigenPlaces (padded XFeat)",
-  padmeg: "drive reloc, MegaLoc (padded XFeat)",
 };
 /* deterministic color for arms without a CSS variable (new A/B arms) */
 function armColor(a) {
@@ -39,10 +27,10 @@ function armColor(a) {
   return `hsl(${h % 360},62%,50%)`;
 }
 /* every plot key the trajectory panel may offer, in display order */
-const TRAJ_KEYS = ["bad-vio", "xfeat-vio", "xdlg6-vio", "freeze-vio", ...ARMS,
+const TRAJ_KEYS = ["fzbase-vio", "fz18-vio", ...ARMS,
   "okvis2lc0", "okvis2lc1", "orb3lc0", "orb3lc1", "openvinslc0"];
 const TRAJ_COLOR = {
-  "bad-vio": "vio", "xfeat-vio": "vio", "freeze-vio": "vio",
+  "fzbase-vio": "vio", "fz18-vio": "vio",
   okvis2lc0: "base", okvis2lc1: "base", orb3lc0: "xvpr", orb3lc1: "xvpr",
   openvinslc0: "pub",
 };
@@ -484,7 +472,7 @@ function datasetBar(group, view) {
   const med = medians(S.runs.filter(r => r.group === group), S.useRte ? "rte" : "ate");
   const armsOn = ARMS.filter(a => S.armOn[a]);
   const series = [
-    { label: "VIO only", color: col("vio"), values: seqs.map(s => med[s]?.bad?.vio) },
+    { label: "VIO only", color: col("vio"), values: seqs.map(s => med[s]?.fzbase?.vio) },
     ...armsOn.map(a => ({ label: `+map ${ARM_LABEL[a]}`, color: col(a),
       values: seqs.map(s => med[s]?.[a]?.map) })),
   ];
@@ -513,7 +501,7 @@ function datasetBar(group, view) {
 function overviewView() {
   const view = $("#view");
   const med = medians(S.runs, "ate");
-  const gmed = g => { const v = seqsIn(g).map(s => med[s]?.vpr?.map ?? med[s]?.bad?.map).filter(x => x != null); return v.length ? median(v) : null; };
+  const gmed = g => { const v = seqsIn(g).map(s => med[s]?.fz18?.map ?? med[s]?.fzbase?.map).filter(x => x != null); return v.length ? median(v) : null; };
   const tiles = el("div", { class: "tiles" });
   const defs = [
     [new Set(S.runs.map(r => r.seq)).size, "sequences"],
@@ -540,8 +528,8 @@ function systemsView() {
   const sysArms = [...new Set(base.map(b => `${b.sys}_lc${b.lc}`))].sort();
   const bestArm = s => { const v = ARMS.map(a => med[s]?.[a]?.map).filter(x => x != null); return v.length ? Math.min(...v) : null; };
   const series = [
-    { label: "ours: VIO", color: col("vio"), values: seqs.map(s => med[s]?.bad?.vio) },
-    { label: "ours: +map (best arm)", color: col("vpr"), values: seqs.map(bestArm) },
+    { label: "ours: VIO", color: col("vio"), values: seqs.map(s => med[s]?.fzbase?.vio) },
+    { label: "ours: fz18 (frozen)", color: col("fz18"), values: seqs.map(s => med[s]?.fz18?.map ?? bestArm(s)) },
     ...sysArms.map(sa => ({ label: BASE_LABEL[sa] || sa.replace("_", " "), color: BASE_COLORS[sa] || "#888",
       defaultOff: sa.startsWith("orb3"),
       values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === sa); return b ? (S.useRte ? b.rte : b.ate) : null; }) })),
@@ -721,9 +709,9 @@ function tableView() {
     t.innerHTML += `<tr class="ghead"><td colspan="${3 + armsOn.length}">${GROUP_TITLE[g]}</td></tr>`;
     for (const s of seqsIn(g)) {
       const vals = armsOn.map(a => med[s]?.[a]?.map);
-      const best = Math.min(...vals.filter(v => v != null).concat(med[s]?.bad?.vio ?? Infinity));
+      const best = Math.min(...vals.filter(v => v != null).concat(med[s]?.fzbase?.vio ?? Infinity));
       t.innerHTML += `<tr><td>${shortName(s)}</td>` +
-        `<td class="${med[s]?.bad?.vio === best ? "best" : ""}">${fmt(med[s]?.bad?.vio)}</td><td>${fmt(medR[s]?.bad?.vio)}</td>` +
+        `<td class="${med[s]?.fzbase?.vio === best ? "best" : ""}">${fmt(med[s]?.fzbase?.vio)}</td><td>${fmt(medR[s]?.fzbase?.vio)}</td>` +
         armsOn.map((a, k) => `<td class="${vals[k] === best ? "best" : ""}">${fmt(vals[k])}</td>`).join("") + `</tr>`;
     }
   }

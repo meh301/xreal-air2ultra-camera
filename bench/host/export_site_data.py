@@ -40,6 +40,9 @@ a fresh python+evo subprocess PER trajectory (~12 s of import overhead for
 ~10 ms of math) — scoring took longer than the benchmarks themselves."""
 DATASET_FPS = {"euroc": 20.0, "tumvi": 20.0, "msd": 30.0}
 ATE_DIVERGE_M = {"euroc": 10.0, "tumvi": 10.0, "msd": 1.0}
+# s5off / g99fl envs are flag-identical to fzbase / fz18 — relabel so the
+# site carries one pair of ours arms across every dataset group.
+ARM_ALIAS = {"s5off": "fzbase", "g99fl": "fz18"}
 RTE_DIVERGE_CM = 10.0
 RTE_DELTA = 6
 T_MAX_DIFF = 0.01
@@ -158,7 +161,9 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
                 continue
             key = f"{f.name}|{f.stat().st_size}"
             if cache is not None and key in cache:
-                rows.append(cache[key])
+                row = dict(cache[key])
+                row["arm"] = ARM_ALIAS.get(row["arm"], row["arm"])
+                rows.append(row)
                 continue
             gd = m.groupdict()
             gd["seq"] = seq
@@ -168,9 +173,10 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
     with ProcessPoolExecutor(max_workers=12) as ex:
         for fname, ate, rte, comp in ex.map(score_one, jobs):
             g, key = meta[fname]
+            arm_raw = g.get("arm") or g.get("sys")
             row = {
                 "seq": g["seq"], "group": group_of(g["seq"]),
-                "arm": g.get("arm") or g.get("sys"),
+                "arm": ARM_ALIAS.get(arm_raw, arm_raw),
                 "run": int(g["run"]) if g.get("run") else 1,
                 "track": g.get("track") or ("lc" + g.get("lc", "0")),
                 "ate_cm": round(ate, 3) if ate is not None else None,
@@ -271,18 +277,19 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
     jobs = []
     for d in results_dirs:
         for f in sorted(Path(d).glob("*_r1_map.tum")):
-            m = re.match(r"(.+?)_{1,2}(bad|vpr|megaloc|xfeat|xvpr|xmegaloc"
-                         r"|xdlg6|fulleig|freezem|freeze|full)_r1_map",
+            m = re.match(r"(.+?)_{1,2}(fz18|fzbase|s5off|g99fl)_r1_map",
                          f.stem)
             if m:
-                jobs.append((f, m.group(1).rstrip("_"), m.group(2)))
-        # VIO track: one per descriptor family — vpr/megaloc VIO is identical
-        # to bad's (map layer has no feedback into VIO). xdlg6 covers the
-        # dense arms; freeze's VIO differs again (tight priors + seqvote).
+                jobs.append((f, m.group(1).rstrip("_"),
+                             ARM_ALIAS.get(m.group(2), m.group(2))))
+        # VIO track: fzbase's vio IS the raw-VIO reference; fz18's vio shows
+        # the factor stack's effect inside the estimator.
         for f in sorted(Path(d).glob("*_r1_vio.tum")):
-            m = re.match(r"(.+?)_{1,2}(bad|xfeat|xdlg6|freeze)_r1_vio", f.stem)
+            m = re.match(r"(.+?)_{1,2}(fz18|fzbase|s5off|g99fl)_r1_vio",
+                         f.stem)
             if m:
-                jobs.append((f, m.group(1).rstrip("_"), m.group(2) + "-vio"))
+                jobs.append((f, m.group(1).rstrip("_"),
+                             ARM_ALIAS.get(m.group(2), m.group(2)) + "-vio"))
     for d in baseline_dirs:
         for f in sorted(Path(d).glob("*.tum")):
             m = re.match(r"(.+)_(okvis2|orb3|openvins)_lc([01])$", f.stem)
@@ -357,12 +364,14 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    # SITE CURATION (2026-07-18): the site shows exactly two ours arms.
+    # s5off/g99fl are flag-identical to fzbase/fz18 (same env compositions,
+    # different round labels) and are relabeled at export; every other
+    # historical arm lives in the ledger + result dirs, not the site.
+    # Only stage-7-era result dirs may be passed to --results.
     ours_re = re.compile(
         r"(?P<seq>.+?)_{1,2}"
-        r"(?P<arm>bad|vpr|megaloc|xfeat|xvpr|xmegaloc|xdlg6|fulleig|freezem"
-        r"|freeze|fullm|full|lfbase|lfonly|lfts|sn30|sn50"
-        r"|fz18|fzbase|fz17d|s5auto|s5arb|s5off"
-        r"|g999s6|g999|g8s6|g8|adfl|adf|ad|ckhub|ckcau)"
+        r"(?P<arm>fz18|fzbase|s5off|g99fl)"
         r"_r(?P<run>\d+)_(?P<track>vio|map)\.tum$")
     base_re = re.compile(
         r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins)_lc(?P<lc>[01])\.tum$")
