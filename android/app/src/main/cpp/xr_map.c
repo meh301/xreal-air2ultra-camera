@@ -3064,7 +3064,7 @@ static int pnp2_ransac_burst(const float (*s)[3], const float (*P)[3],
 
 #define DF_PATCH 4                 /* 9x9 ZNCC window */
 #define DF_MAX_DISP 128
-#define DF_MIN_Z 1.0f
+#define DF_MIN_Z 2.0f              /* VIO owns the near field */
 #define DF_MIN_ZNCC 0.78f
 #define DF_MARGIN 0.06f
 static uint32_t DF_SYNTH_CTR;      /* map thread only */
@@ -3082,9 +3082,13 @@ static int df_backfill(xr_kf *w, const uint8_t *L, const uint8_t *Rt) {
         if (w->lm_of_kp[j] >= 0) continue;
         int u = (int)(w->kp_uv[j][0] + 0.5f);
         int v = (int)(w->kp_uv[j][1] + 0.5f);
-        if (u < DF_PATCH + (int)maxd || u >= XR_OW - DF_PATCH ||
+        if (u < DF_PATCH + (int)mind + 1 || u >= XR_OW - DF_PATCH ||
             v < DF_PATCH || v >= XR_OH - DF_PATCH)
             continue;
+        /* clamp the search to what THIS column can see instead of
+         * rejecting every keypoint left of the global max disparity */
+        float kmaxd = maxd;
+        if ((float)(u - DF_PATCH) < kmaxd) kmaxd = (float)(u - DF_PATCH);
         /* left patch stats (9x9) */
         float lsum = 0, lsum2 = 0;
         for (int dy = -DF_PATCH; dy <= DF_PATCH; dy++)
@@ -3100,7 +3104,7 @@ static int df_backfill(xr_kf *w, const uint8_t *L, const uint8_t *Rt) {
         float lstd = sqrtf(lvar);
         float best = -2, second = -2;
         int bd = -1;
-        for (int d = (int)mind; d <= (int)maxd; d++) {
+        for (int d = (int)mind; d <= (int)kmaxd; d++) {
             int ru = u - d;
             float rsum = 0, rsum2 = 0, dot = 0;
             for (int dy = -DF_PATCH; dy <= DF_PATCH; dy++)
