@@ -871,3 +871,12 @@ corr4 80->83, corr5 69->70, mag2 10->13. Mean over seqs 50.6 -> 55.7.
 No harm, precision intact — the funnel fix pays exactly where repetitive
 structure starves the NN prematch. Enters the freeze-confirmation set
 with BURSTPNP (they compose: burst pools what trustvpr admits).
+
+### x MSD-LOSERS DIAGNOSTIC: estimator-bound at the ROOT, not closure-bound
+mbase/mlf/meg/mall all cluster 23-25 (vs okvis2+lc 2.3-4.9). Closures DO
+engage (3-7 applied; MOO13 map 33 vs vio 48) but our VIO drifts 27-48cm
+where OKVIS2 RAW VIO holds 5.7-15.1 — a 3-5x estimator gap BEFORE loop
+closure even matters. Same disease as euroc -> vkfobs port to the msd
+config chained on .58 (losers + MOO07/09 no-harm guard). The coupling
+ladder is exonerated on this group: it cannot fix drift the estimator
+creates 5x faster than the baseline's.
