@@ -150,3 +150,18 @@ TIGHTSUB STAYS: v14 freeze long 23.21 beats the v12 no-TIGHTSUB 27.04
 REJECTED for freeze (rooms unmoved, corridor harm — see ITERATIONS.md).
 Remaining before push: (b) blackout baselines (running on bench-2) and
 (d) the exit-hang fix.
+
+### 2026-07-18 FREEZE v15-final (supersedes the 07-17 block)
+
+APK default set: the v14 flag set (XR_COVKEEP XR_PGO XR_LMDESC XR_TIGHT
+XR_TIGHTSUB XR_SEQVOTE, EigenPlaces retrieval) + XR_MAP_MAX_KF 400
+(now the compiled default) + SNAP_MIN 0.50 + XR_TRUSTVPR and the
+BURSTPNP wake-up path for relocalization + the five pipeline fixes.
+vkfobs VIO tuning was VETOED by the held-out fleet (subset mirage:
+corridor1 +18, magistrale2 +21). LMFACT / LMTRACK / LOCALBA / FARBEAR /
+EDGEGRAPH ship as flags, OFF. Scoreboard at freeze: TUM-VI long and all
+three 4Seasons drives lead OKVIS2+LC (drive1 1.11%% vs 3.3%%, okvis2
+diverges drive2); EuRoC/rooms/MSD remain OKVIS2+LC's (3.82/1.20/2.29 vs
+our 6.5/4.9-5.5/6.1) — the two documented frontiers (marg-persistent
+factors, MSD frontend) are the path there. Wake-up reloc: burst-15 +
+TrustVPR, corridors 50-73%% recall, rooms 100%%.
