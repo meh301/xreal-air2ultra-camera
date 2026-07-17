@@ -14,6 +14,11 @@ VIT   := $(CPP)/third_party/basalt/thirdparty/vit
 CC    ?= cc
 CFLAGS := -O3 -std=c11 -Wall -D_GNU_SOURCE -DXR_OW=$(XR_OW) -DXR_OH=$(XR_OH) \
           -Ishim -I$(CPP) -I$(VIT) -pthread
+# EXTRA was accepted-but-IGNORED for the program's whole history (every
+# -D passed through it was inert; in-file #ifndef defaults ran instead —
+# discovered 2026-07-17 via the XR_MAP_MAX_KF=2000 build still capping at
+# 200). Wired for real now; scripts must only pass defines they MEAN.
+CFLAGS += $(EXTRA)
 LDLIBS := -lm -ldl -pthread
 
 SRC := xr_replay_main.c $(CPP)/xr_slam.c $(CPP)/xr_map.c $(CPP)/xr_xfeat.c \
