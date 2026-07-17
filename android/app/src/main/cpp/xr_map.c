@@ -1102,6 +1102,21 @@ static struct {
     int8_t desc[LMFACT_MAX][64];
     float ps[LMFACT_MAX][3];           /* session frame */
 } LMT;
+/* XR_TRUSTVPR — while relocalizing, HIGH-confidence retrieval earns a
+ * verification slot regardless of the greedy-NN prematch count. The
+ * funnel audit: 49-56% of corridor probe frames died at bestm<24 while
+ * verification passed 90%+ once a candidate existed — the weak matcher
+ * was gatekeeping the strong one (LighterGlue never saw those frames). */
+#define TRUSTVPR_MIN 0.75f
+static int trustvpr_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_TRUSTVPR");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: TRUST-VPR candidate rider ON");
+    }
+    return v;
+}
 static int burstpnp_on(void) {
     static int v = -1;
     if (v < 0) {
@@ -3758,6 +3773,7 @@ static void process_keyframe(void) {
     unsigned match_us = 0;             /* telemetry: match+PnP wall time */
     int use_vpr = 0;                   /* retrieval pre-rank active */
     float vpr_top = 0;                 /* best cosine this search (ledger) */
+    int vpr_top_i = -1;                /* its keyframe (XR_TRUSTVPR rider) */
     float bDq[4], bDp[3];
     /* XR_LMFACT: the WINNING candidate's inlier 2D-3D pairs (query pixel +
      * session-frame landmark), kept for the apply branch (map thread only) */
@@ -3843,7 +3859,7 @@ static void process_keyframe(void) {
             const float *a = work.emb, *b = KFA(i).emb;
             float s = 0;
             for (int d = 0; d < work.emb_dim; d++) s += a[d] * b[d];
-            if (s > vpr_top) vpr_top = s;
+            if (s > vpr_top) { vpr_top = s; vpr_top_i = i; }
             /* XR_SEQVOTE: rank by score + decayed history (use the OLD
              * vote, then fold this search's score in) */
             if (seqvote_on() && relocalizing) {
@@ -3929,6 +3945,21 @@ static void process_keyframe(void) {
         }
         cand_m[pos] = m;
         cand_i[pos] = i;
+    }
+
+    /* XR_TRUSTVPR rider: retrieval is our strongest signal — when it is
+     * confident, the top keyframe goes to LighterGlue+PnP even though the
+     * NN prematch could not scrape CAND_MIN_MATCHES from this viewpoint */
+    if (trustvpr_on() && relocalizing && use_vpr && vpr_top >= TRUSTVPR_MIN &&
+        vpr_top_i >= 0) {
+        int have = 0;
+        for (int t2 = 0; t2 < ncand; t2++)
+            if (cand_i[t2] == vpr_top_i) { have = 1; break; }
+        if (!have && ncand < RELOC_TOPK) {
+            cand_i[ncand] = vpr_top_i;
+            cand_m[ncand] = CAND_MIN_MATCHES;  /* nominal score */
+            ncand++;
+        }
     }
 
     /* XR_REACT2: the fresh anchor rides along as an EXTRA candidate —
