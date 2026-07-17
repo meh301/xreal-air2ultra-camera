@@ -194,7 +194,7 @@ if "xr_lm_batches" not in t:
    * landmark reprojection factors, buffered per frame timestamp like the
    * pose priors. Thread-safe setter; applied in optimize() while the frame
    * is in the window, expired by frame time. */
-  static constexpr int XR_LM_MAX_FACTORS = 32;          /* per frame */
+  static constexpr int XR_LM_MAX_FACTORS = 96;          /* per frame */
   static constexpr int XR_LM_MAX_BATCHES = 8;           /* buffered frames */
   static constexpr int64_t XR_LM_EXPIRY_NS = 500000000; /* ~0.5 s */
   struct XrLmBatch {

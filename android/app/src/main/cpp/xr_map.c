@@ -1070,6 +1070,49 @@ static void lmfact_post(const float (*uv)[2], const float (*ps)[3], int n,
         LOGI("session map: LMFACT posted %d landmark factors", n);
 }
 
+/* XR_LMTRACK — CONTINUOUS landmark-factor coverage. LMFACT alone posts
+ * only at closure instants; between them the estimator is back on raw
+ * VIO. Hold the last applied closure's inlier landmarks (descriptor +
+ * session 3D) for a short window and re-match them against every later
+ * search frame's keypoints — each hit re-posts factors for THAT frame,
+ * so the map keeps pulling while the scene stays in view (the sliding
+ * window renews on every successful re-match). Map thread only. */
+#define LMT_WINDOW_NS 2000000000ull    /* 2 s since last successful match */
+#define LMT_MIN_MATCH 10
+static struct {
+    int n;
+    uint64_t until_ns;
+    int8_t desc[LMFACT_MAX][64];
+    float ps[LMFACT_MAX][3];           /* session frame */
+} LMT;
+static int lmtrack_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LMTRACK");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LMTRACK continuous factor coverage ON");
+    }
+    return v;
+}
+/* capture the applied closure's inlier set (uv values are exact copies of
+ * w->kp_uv entries, so equality recovers the keypoint index -> desc) */
+static void lmt_capture(const xr_kf *w, const float (*uv)[2],
+                        const float (*ps)[3], int n, uint64_t ts) {
+    if (w->desc_type == DESC_BAD) return;
+    LMT.n = 0;
+    for (int m = 0; m < n && LMT.n < LMFACT_MAX; m++) {
+        for (int i = 0; i < w->n_kp; i++) {
+            if (w->kp_uv[i][0] == uv[m][0] && w->kp_uv[i][1] == uv[m][1]) {
+                memcpy(LMT.desc[LMT.n], w->desc.xfeat[i], 64);
+                memcpy(LMT.ps[LMT.n], ps[m], sizeof LMT.ps[0]);
+                LMT.n++;
+                break;
+            }
+        }
+    }
+    LMT.until_ns = ts + LMT_WINDOW_NS;
+}
+
 /* rotation vector (axis*angle) <-> quaternion */
 static void rv_from_q(const float q[4], float rv[3]) {
     float w = q[0] >= 0 ? q[0] : -q[0];
@@ -1310,6 +1353,7 @@ static void pgo_deform(int anchor, const float wq[4], const float wp[3],
         memcpy(KFA(anchor + i).pc, Xp[i], sizeof Xp[i]);
     }
 }
+
 
 /* Submap WELD: rigidly re-register every keyframe of segment `from` into
  * the session frame of segment `to` (E = session_to <- session_from), and
@@ -2422,6 +2466,346 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
     return 1;
 }
 
+/* XR_LOCALBA — windowed structure refinement after a verified closure.
+ * The pose graph (above) moves keyframes rigidly; landmark 3D stays
+ * whatever the VIO first triangulated, and each keyframe keeps its OWN
+ * copy — the multi-view spread the reloc averaging step merely tolerates.
+ * This is the BA-quality axis where OKVIS2+LC's ~1.2 cm rooms live.
+ *
+ * Bounded resection-intersection over the closure's covis window:
+ *   intersect: per landmark (seen by >=2 window kfs), Gauss-Newton on the
+ *     session-frame point under BEARING residuals r = (I - bb^T) v / |v|
+ *     (no forward camera model needed — b is the stored kp's unprojected
+ *     ray in the keyframe's session orientation);
+ *   resect: per non-anchor keyframe, 4-DOF (yaw + t) Gauss-Newton against
+ *     the refined points (gravity axes stay untouched).
+ * Alternating LBA_ROUNDS; Huber on the residual angle. Writes back the
+ * refined session poses AND per-keyframe landmark copies (re-expressed
+ * through each kf's raw->session alignment, so every view finally agrees
+ * on where the point is). Anchor = the closure-verified keyframe.
+ * MAP_LOCK held; window <= 16 kf x 160 lm x 6 obs — microseconds-scale. */
+#define LBA_MAX_LM 160
+#define LBA_MAX_OBS 6
+#define LBA_ROUNDS 3
+#define LBA_HUBER 0.008f              /* rad, ~0.46 deg */
+#define LBA_OUTLIER 0.05f             /* rad: obs beyond this never votes */
+static uint64_t LBA_LAST_NS;          /* rate limit (map thread only) */
+static int localba_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LOCALBA");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LOCAL-BA structure refinement ON");
+    }
+    return v;
+}
+
+static void local_ba(int center) {
+    if (center < 0 || center >= KF_N || !GEOM.have) return;
+    /* window: center + nearest same-segment neighbours (session space) */
+    int win[COVIS_MAX_KF]; int nw = 0;
+    win[nw++] = center;
+    static struct rc_nb lnb[XR_MAP_MAX_KF];
+    int nn = 0;
+    for (int s = 0; s < KF_N; s++) {
+        if (s == center || KFA(s).seg != KFA(center).seg) continue;
+        float dx = KFA(s).pc[0] - KFA(center).pc[0];
+        float dy = KFA(s).pc[1] - KFA(center).pc[1];
+        float dz = KFA(s).pc[2] - KFA(center).pc[2];
+        float d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > COVIS_R_M * COVIS_R_M) continue;
+        lnb[nn].s = s; lnb[nn].d2 = d2; nn++;
+    }
+    qsort(lnb, (size_t)nn, sizeof lnb[0], rc_nb_cmp);
+    for (int k = 0; k < nn && nw < COVIS_MAX_KF; k++) win[nw++] = lnb[k].s;
+    if (nw < 2) return;
+
+    /* per-window-kf pose state + raw->session alignment cache */
+    float R[COVIS_MAX_KF][9], O[COVIS_MAX_KF][3];
+    float alq[COVIS_MAX_KF][4], alp[COVIS_MAX_KF][3];
+    for (int k = 0; k < nw; k++) {
+        xr_kf *f = &KFA(win[k]);
+        q2R(f->qc, R[k]);
+        float t[3];
+        qrotv(f->qc, GEOM.p_ic, t);
+        O[k][0] = f->pc[0] + t[0];
+        O[k][1] = f->pc[1] + t[1];
+        O[k][2] = f->pc[2] + t[2];
+        float qoi[4], poi[3];
+        pose_invert(f->q, f->p, qoi, poi);
+        pose_compose(f->qc, f->pc, qoi, poi, alq[k], alp[k]);
+    }
+
+    /* gather shared landmarks: id -> obs list (window kf, BODY-frame ray) */
+    static int32_t Lid[LBA_MAX_LM];
+    static float LX[LBA_MAX_LM][3];               /* session estimate */
+    static uint8_t Lobs_k[LBA_MAX_LM][LBA_MAX_OBS];
+    static float Lobs_rb[LBA_MAX_LM][LBA_MAX_OBS][3];
+    static uint8_t Lnobs[LBA_MAX_LM];
+    int nl = 0;
+    for (int k = 0; k < nw; k++) {
+        xr_kf *f = &KFA(win[k]);
+        for (int j = 0; j < f->n_kp; j++) {
+            int l = f->lm_of_kp[j];
+            if (l < 0) continue;
+            float rng2 = 0;
+            for (int c = 0; c < 3; c++) {
+                float d = f->lm_xyz[l][c] - f->p[c];
+                rng2 += d * d;
+            }
+            if (rng2 < VER_MIN_RANGE_M * VER_MIN_RANGE_M ||
+                rng2 > VER_MAX_RANGE_M * VER_MAX_RANGE_M)
+                continue;
+            int li = -1;
+            for (int t = 0; t < nl; t++)
+                if (Lid[t] == f->lm_id[l]) { li = t; break; }
+            if (li < 0) {
+                if (nl >= LBA_MAX_LM) continue;
+                li = nl++;
+                Lid[li] = f->lm_id[l];
+                Lnobs[li] = 0;
+                float ps[3];
+                qrotv(alq[k], f->lm_xyz[l], ps);
+                LX[li][0] = ps[0] + alp[k][0];
+                LX[li][1] = ps[1] + alp[k][1];
+                LX[li][2] = ps[2] + alp[k][2];
+            }
+            if (Lnobs[li] >= LBA_MAX_OBS) continue;
+            float rc[3], rb[3];
+            if (GEOM.unproject(f->kp_uv[j][0], f->kp_uv[j][1], rc)) continue;
+            rb[0] = GEOM.R_ic[0] * rc[0] + GEOM.R_ic[1] * rc[1] +
+                    GEOM.R_ic[2] * rc[2];
+            rb[1] = GEOM.R_ic[3] * rc[0] + GEOM.R_ic[4] * rc[1] +
+                    GEOM.R_ic[5] * rc[2];
+            rb[2] = GEOM.R_ic[6] * rc[0] + GEOM.R_ic[7] * rc[1] +
+                    GEOM.R_ic[8] * rc[2];
+            Lobs_k[li][Lnobs[li]] = (uint8_t)k;
+            memcpy(Lobs_rb[li][Lnobs[li]], rb, sizeof rb);
+            Lnobs[li]++;
+        }
+    }
+    int nshared = 0;
+    for (int t = 0; t < nl; t++) if (Lnobs[t] >= 2) nshared++;
+    if (nshared < 8) return;                       /* nothing to refine */
+
+    for (int round = 0; round < LBA_ROUNDS; round++) {
+        /* -- intersect: refine each shared landmark, poses fixed -- */
+        for (int t = 0; t < nl; t++) {
+            if (Lnobs[t] < 2) continue;
+            for (int it = 0; it < 2; it++) {
+                float H[9] = { 0 }, g[3] = { 0 };
+                int used = 0;
+                for (int o = 0; o < Lnobs[t]; o++) {
+                    int k = Lobs_k[t][o];
+                    float b[3];
+                    b[0] = R[k][0] * Lobs_rb[t][o][0] + R[k][1] * Lobs_rb[t][o][1] + R[k][2] * Lobs_rb[t][o][2];
+                    b[1] = R[k][3] * Lobs_rb[t][o][0] + R[k][4] * Lobs_rb[t][o][1] + R[k][5] * Lobs_rb[t][o][2];
+                    b[2] = R[k][6] * Lobs_rb[t][o][0] + R[k][7] * Lobs_rb[t][o][1] + R[k][8] * Lobs_rb[t][o][2];
+                    float v[3] = { LX[t][0] - O[k][0], LX[t][1] - O[k][1],
+                                   LX[t][2] - O[k][2] };
+                    float d = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                    if (d < VER_MIN_RANGE_M) continue;
+                    float bv = (b[0] * v[0] + b[1] * v[1] + b[2] * v[2]) / d;
+                    if (bv < 0) continue;          /* behind the camera */
+                    float r3[3], rn = 0;
+                    for (int c = 0; c < 3; c++) {
+                        r3[c] = v[c] / d - bv * b[c];
+                        rn += r3[c] * r3[c];
+                    }
+                    rn = sqrtf(rn);
+                    if (rn > LBA_OUTLIER) continue;
+                    float w = rn <= LBA_HUBER ? 1.0f : LBA_HUBER / rn;
+                    /* J = (I - bb^T)/d; the projector is idempotent, so
+                     * J^T J = (I - bb^T)/d^2 and J^T r = r/d (r _|_ b) */
+                    for (int a = 0; a < 3; a++)
+                        for (int c2 = 0; c2 < 3; c2++) {
+                            float JtJ = ((a == c2 ? 1.0f : 0.0f) -
+                                         b[a] * b[c2]) / (d * d);
+                            H[a * 3 + c2] += w * JtJ;
+                        }
+                    for (int a = 0; a < 3; a++)
+                        g[a] += w * r3[a] / d;
+                    used++;
+                }
+                if (used < 2) break;
+                /* damp + solve 3x3 (H is PSD projector sum; add LM mu) */
+                float mu = 1e-4f;
+                H[0] += mu; H[4] += mu; H[8] += mu;
+                float det = H[0] * (H[4] * H[8] - H[5] * H[7]) -
+                            H[1] * (H[3] * H[8] - H[5] * H[6]) +
+                            H[2] * (H[3] * H[7] - H[4] * H[6]);
+                if (fabsf(det) < 1e-12f) break;
+                float dx[3] = {
+                    ((H[4] * H[8] - H[5] * H[7]) * g[0] +
+                     (H[2] * H[7] - H[1] * H[8]) * g[1] +
+                     (H[1] * H[5] - H[2] * H[4]) * g[2]) / det,
+                    ((H[5] * H[6] - H[3] * H[8]) * g[0] +
+                     (H[0] * H[8] - H[2] * H[6]) * g[1] +
+                     (H[2] * H[3] - H[0] * H[5]) * g[2]) / det,
+                    ((H[3] * H[7] - H[4] * H[6]) * g[0] +
+                     (H[1] * H[6] - H[0] * H[7]) * g[1] +
+                     (H[0] * H[4] - H[1] * H[3]) * g[2]) / det,
+                };
+                float step2 = dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2];
+                if (step2 > 0.25f) break;          /* >0.5 m: distrust */
+                LX[t][0] -= dx[0];
+                LX[t][1] -= dx[1];
+                LX[t][2] -= dx[2];
+            }
+        }
+        /* -- resect: refine each NON-ANCHOR pose (yaw + t), points fixed -- */
+        for (int k = 1; k < nw; k++) {
+            for (int it = 0; it < 2; it++) {
+                float H[16] = { 0 }, g[4] = { 0 };
+                int used = 0;
+                for (int t = 0; t < nl; t++) {
+                    if (Lnobs[t] < 2) continue;
+                    for (int o = 0; o < Lnobs[t]; o++) {
+                        if (Lobs_k[t][o] != k) continue;
+                        float b[3];
+                        b[0] = R[k][0] * Lobs_rb[t][o][0] + R[k][1] * Lobs_rb[t][o][1] + R[k][2] * Lobs_rb[t][o][2];
+                        b[1] = R[k][3] * Lobs_rb[t][o][0] + R[k][4] * Lobs_rb[t][o][1] + R[k][5] * Lobs_rb[t][o][2];
+                        b[2] = R[k][6] * Lobs_rb[t][o][0] + R[k][7] * Lobs_rb[t][o][1] + R[k][8] * Lobs_rb[t][o][2];
+                        float v[3] = { LX[t][0] - O[k][0], LX[t][1] - O[k][1],
+                                       LX[t][2] - O[k][2] };
+                        float d = sqrtf(v[0] * v[0] + v[1] * v[1] +
+                                        v[2] * v[2]);
+                        if (d < VER_MIN_RANGE_M) continue;
+                        float bv = (b[0] * v[0] + b[1] * v[1] + b[2] * v[2]) / d;
+                        if (bv < 0) continue;
+                        float r3[3], rn = 0;
+                        for (int c = 0; c < 3; c++) {
+                            r3[c] = v[c] / d - bv * b[c];
+                            rn += r3[c] * r3[c];
+                        }
+                        rn = sqrtf(rn);
+                        if (rn > LBA_OUTLIER) continue;
+                        float w = rn <= LBA_HUBER ? 1.0f : LBA_HUBER / rn;
+                        /* J columns: dyaw (b spins: db = z x b, O spins:
+                         * dO = z x (O - pc) — dominate via the b term; the
+                         * O lever is p_ic-short, keep it anyway), t (dO=dt).
+                         * dr/db = -(bv*I + b v^T/d), dr/dO = -(I-bb^T)/d */
+                        float zb[3] = { -b[1], b[0], 0.0f };
+                        xr_kf *f = &KFA(win[k]);
+                        float lever[3] = { O[k][0] - f->pc[0],
+                                           O[k][1] - f->pc[1],
+                                           O[k][2] - f->pc[2] };
+                        float zO[3] = { -lever[1], lever[0], 0.0f };
+                        float J[3][4];
+                        for (int a = 0; a < 3; a++) {
+                            /* dr/dyaw = dr/db * zb + dr/dO * zO */
+                            float drb = -(bv * zb[a] +
+                                          b[a] * (zb[0] * v[0] + zb[1] * v[1] +
+                                                  zb[2] * v[2]) / d);
+                            float drO = 0;
+                            for (int c2 = 0; c2 < 3; c2++)
+                                drO += -((a == c2 ? 1.0f : 0.0f) -
+                                         b[a] * b[c2]) / d * zO[c2];
+                            J[a][0] = drb + drO;
+                            for (int c2 = 0; c2 < 3; c2++)
+                                J[a][1 + c2] = -((a == c2 ? 1.0f : 0.0f) -
+                                                 b[a] * b[c2]) / d;
+                        }
+                        for (int a2 = 0; a2 < 4; a2++) {
+                            for (int b2 = 0; b2 < 4; b2++) {
+                                float acc = 0;
+                                for (int c2 = 0; c2 < 3; c2++)
+                                    acc += J[c2][a2] * J[c2][b2];
+                                H[a2 * 4 + b2] += w * acc;
+                            }
+                            float acc = 0;
+                            for (int c2 = 0; c2 < 3; c2++)
+                                acc += J[c2][a2] * r3[c2];
+                            g[a2] += w * acc;
+                        }
+                        used++;
+                    }
+                }
+                if (used < 6) break;
+                float mu = 1e-4f;
+                for (int a = 0; a < 4; a++) H[a * 4 + a] += mu;
+                /* 4x4 gaussian elimination */
+                float A[4][5];
+                for (int a = 0; a < 4; a++) {
+                    for (int b2 = 0; b2 < 4; b2++) A[a][b2] = H[a * 4 + b2];
+                    A[a][4] = -g[a];
+                }
+                int sing = 0;
+                for (int col = 0; col < 4 && !sing; col++) {
+                    int piv = col;
+                    for (int rr = col + 1; rr < 4; rr++)
+                        if (fabsf(A[rr][col]) > fabsf(A[piv][col])) piv = rr;
+                    if (fabsf(A[piv][col]) < 1e-10f) { sing = 1; break; }
+                    if (piv != col)
+                        for (int cc = 0; cc < 5; cc++) {
+                            float tmp = A[col][cc];
+                            A[col][cc] = A[piv][cc];
+                            A[piv][cc] = tmp;
+                        }
+                    for (int rr = col + 1; rr < 4; rr++) {
+                        float fkt = A[rr][col] / A[col][col];
+                        for (int cc = col; cc < 5; cc++)
+                            A[rr][cc] -= fkt * A[col][cc];
+                    }
+                }
+                if (sing) break;
+                float u[4];
+                for (int a = 3; a >= 0; a--) {
+                    u[a] = A[a][4];
+                    for (int cc = a + 1; cc < 4; cc++)
+                        u[a] -= A[a][cc] * u[cc];
+                    u[a] /= A[a][a];
+                }
+                if (fabsf(u[0]) > 0.05f ||
+                    u[1] * u[1] + u[2] * u[2] + u[3] * u[3] > 0.04f)
+                    break;                          /* implausible step */
+                /* apply: yaw about world z (left), then translation */
+                xr_kf *f = &KFA(win[k]);
+                float dq[4] = { cosf(u[0] * 0.5f), 0, 0, sinf(u[0] * 0.5f) };
+                float qn[4];
+                qmul(dq, f->qc, qn);
+                memcpy(f->qc, qn, sizeof qn);
+                f->pc[0] += u[1];
+                f->pc[1] += u[2];
+                f->pc[2] += u[3];
+                /* refresh caches for this kf */
+                q2R(f->qc, R[k]);
+                float t2[3];
+                qrotv(f->qc, GEOM.p_ic, t2);
+                O[k][0] = f->pc[0] + t2[0];
+                O[k][1] = f->pc[1] + t2[1];
+                O[k][2] = f->pc[2] + t2[2];
+                float qoi[4], poi[3];
+                pose_invert(f->q, f->p, qoi, poi);
+                pose_compose(f->qc, f->pc, qoi, poi, alq[k], alp[k]);
+            }
+        }
+    }
+
+    /* write back: every window copy of a refined landmark re-expressed
+     * through its keyframe's (updated) raw->session alignment — the views
+     * now agree on the point */
+    int nwrote = 0;
+    for (int k = 0; k < nw; k++) {
+        xr_kf *f = &KFA(win[k]);
+        float qi[4], t[3];
+        qconj(alq[k], qi);
+        for (int l = 0; l < f->n_lm; l++) {
+            for (int tt = 0; tt < nl; tt++) {
+                if (Lnobs[tt] < 2 || Lid[tt] != f->lm_id[l]) continue;
+                t[0] = LX[tt][0] - alp[k][0];
+                t[1] = LX[tt][1] - alp[k][1];
+                t[2] = LX[tt][2] - alp[k][2];
+                qrotv(qi, t, f->lm_xyz[l]);
+                nwrote++;
+                break;
+            }
+        }
+    }
+    LOGI("session map: LOCALBA kf#%d window=%d shared_lm=%d copies=%d",
+         center, nw, nshared, nwrote);
+}
+
 /* XR_LMDESC direct relocalization: match the query's descriptors straight
  * against the lifetime landmark bank (no keyframe retrieval at all) and
  * PnP the pairs. Runs ONLY when the normal retrieval channel produced no
@@ -3304,8 +3688,18 @@ static void process_keyframe(void) {
                  * pose like the prior did (the v9 failure), and room-scale
                  * revisits younger than 30s are exactly what the prior
                  * channel could never absorb. */
-                if (lmfact_on() && lf_n > 0)
+                if (lmfact_on() && lf_n > 0) {
                     lmfact_post(lf_uv, lf_ps, lf_n, work.ts);
+                    if (lmtrack_on())
+                        lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
+                }
+                /* XR_LOCALBA: a VERIFIED sub-gate closure is the rooms
+                 * regime — refine the window even though no correction
+                 * applies (rate-limited; structure is what improves). */
+                if (localba_on() && work.ts - LBA_LAST_NS > 1000000000ull) {
+                    LBA_LAST_NS = work.ts;
+                    local_ba(best_i);
+                }
                 /* XR_TIGHTSUB: arm the 2-frame confirmation for SUB-GATE
                  * closures too. Without this, PENDING is only ever set
                  * above the 0.5m gate, so `confirmed` can never become
@@ -3456,8 +3850,11 @@ static void process_keyframe(void) {
                      * per-point channel the optimizer arbitrates (CORR is
                      * NOT stepped in this branch, so the CORR⁻¹ transform
                      * inside matches the prior's E = CORR⁻¹∘D exactly). */
-                    if (lmfact_on() && lf_n > 0)
+                    if (lmfact_on() && lf_n > 0) {
                         lmfact_post(lf_uv, lf_ps, lf_n, work.ts);
+                        if (lmtrack_on())
+                            lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
+                    }
                     tight_applied = 1;
                     LAST_SNAP_NS = work.ts;
                     PENDING_D.have = 0;
@@ -3483,6 +3880,13 @@ static void process_keyframe(void) {
                          "(%d/%d inliers, %d covis) — map deformed%s", best_i,
                          (double)dev, (double)(sang * 57.3f), nin, n3, covis,
                          snap ? " + pose snapped" : "");
+                }
+                /* XR_LOCALBA: an APPLIED closure just re-anchored this
+                 * neighbourhood — refine its structure while the consensus
+                 * is fresh (both the tight and the deform branch land here) */
+                if (localba_on()) {
+                    LBA_LAST_NS = work.ts;
+                    local_ba(best_i);
                 }
                 if (!tight_applied) {
                     memcpy(CORR.q, Dq, sizeof CORR.q);
@@ -3519,6 +3923,36 @@ static void process_keyframe(void) {
         }
     }
     }   /* end apply (verified result, under the lock) */
+
+    /* XR_LMTRACK re-post: while the last closure's landmarks stay in view,
+     * every search frame re-matches them and posts fresh factors — the
+     * estimator keeps being pulled BETWEEN closures, not only at them.
+     * Probes excluded (synthetic queries must not extend the window). */
+    if (lmtrack_on() && lmfact_on() && LMT.n > 0 && !PROBE_REQ &&
+        work.desc_type != DESC_BAD && work.ts < LMT.until_ns) {
+        static float tuv[LMFACT_MAX][2], tps[LMFACT_MAX][3]; /* map thread */
+        int tn = 0;
+        for (int m = 0; m < LMT.n && tn < LMFACT_MAX; m++) {
+            int best = -(1 << 30), second = best, bi = -1;
+            for (int i = 0; i < work.n_kp; i++) {
+                int d = dot64_i8(LMT.desc[m], work.desc.xfeat[i]);
+                if (d > best) { second = best; best = d; bi = i; }
+                else if (d > second) second = d;
+            }
+            if (bi < 0 || best < XF_MIN_DOT || best - XF_MARGIN < second)
+                continue;
+            tuv[tn][0] = work.kp_uv[bi][0];
+            tuv[tn][1] = work.kp_uv[bi][1];
+            memcpy(tps[tn], LMT.ps[m], sizeof tps[0]);
+            tn++;
+        }
+        if (tn >= LMT_MIN_MATCH) {
+            lmfact_post(tuv, tps, tn, work.ts);
+            LMT.until_ns = work.ts + LMT_WINDOW_NS;   /* still seen: slide */
+        } else if (tn * 2 < LMT_MIN_MATCH) {
+            LMT.n = 0;                                 /* scene moved on */
+        }
+    }
 
     /* reactivation-lite bookkeeping: a pinned pass that did NOT refresh the
      * anchor is a failure — after a few, drop back to normal retrieval */
