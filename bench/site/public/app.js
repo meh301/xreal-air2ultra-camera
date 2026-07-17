@@ -7,6 +7,7 @@ const ARM_LABEL = {
   bad: "BAD/TEBLID", vpr: "BAD + EigenPlaces", megaloc: "BAD + MegaLoc",
   xfeat: "XFeat", xvpr: "XFeat + EigenPlaces", xmegaloc: "XFeat + MegaLoc",
   "bad-vio": "VIO only", "xfeat-vio": "VIO only (XFeat)",
+  "xdlg6-vio": "VIO only (dense arms)",
   okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
   orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
   xdense: "XFeat-dense + MegaLoc", xdenselg6: "XFeat-dense + MegaLoc + LGlue",
@@ -23,7 +24,7 @@ function armColor(a) {
   return `hsl(${h % 360},62%,50%)`;
 }
 /* every plot key the trajectory panel may offer, in display order */
-const TRAJ_KEYS = ["bad-vio", "xfeat-vio", ...ARMS,
+const TRAJ_KEYS = ["bad-vio", "xfeat-vio", "xdlg6-vio", ...ARMS,
   "okvis2lc0", "okvis2lc1", "orb3lc0", "orb3lc1", "openvinslc0"];
 const TRAJ_COLOR = {
   "bad-vio": "vio", "xfeat-vio": "vio",

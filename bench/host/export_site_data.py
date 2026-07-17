@@ -262,13 +262,15 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
     jobs = []
     for d in results_dirs:
         for f in sorted(Path(d).glob("*_r1_map.tum")):
-            m = re.match(r"(.+)_(bad|vpr|megaloc|xfeat|xvpr|xmegaloc)_r1_map", f.stem)
+            m = re.match(r"(.+)_(bad|vpr|megaloc|xfeat|xvpr|xmegaloc|xdlg6|full)_r1_map",
+                         f.stem)
             if m:
                 jobs.append((f, m.group(1), m.group(2)))
-        # VIO track: one per descriptor family (bad, xfeat) — vpr/megaloc VIO
-        # is identical to bad's (map layer has no feedback into VIO)
+        # VIO track: one per descriptor family — vpr/megaloc VIO is identical
+        # to bad's (map layer has no feedback into VIO). xdlg6 covers the
+        # dense arms (full's VIO differs only via tight priors).
         for f in sorted(Path(d).glob("*_r1_vio.tum")):
-            m = re.match(r"(.+)_(bad|xfeat)_r1_vio", f.stem)
+            m = re.match(r"(.+)_(bad|xfeat|xdlg6)_r1_vio", f.stem)
             if m:
                 jobs.append((f, m.group(1), m.group(2) + "-vio"))
     for d in baseline_dirs:
