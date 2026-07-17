@@ -73,7 +73,11 @@
 /* Tunables below are #ifndef-guarded so the bench can sweep them via
  * compiler -D without touching source (make EXTRA="-DSNAP_MIN_M=0.15f"). */
 #ifndef SNAP_MIN_M
-#define SNAP_MIN_M 0.30f
+/* 0.50 beat 0.30 in the first REAL sweep (the historic "0.50" sweep was
+ * identical binaries — EXTRA was unwired): hunt-subset map median 18.2 vs
+ * 26.8 cm, corridor1 30->10, corridor5 32->20, magistrale2 55->45; only
+ * corridor2 regressed (+7). Small spaces flat. */
+#define SNAP_MIN_M 0.50f
 #endif
 #ifndef SNAP_MIN_ANG_RAD
 #define SNAP_MIN_ANG_RAD 0.14f     /* ~8 deg */

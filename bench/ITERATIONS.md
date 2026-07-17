@@ -671,3 +671,46 @@ posts, "32/32 factors applied", 99.9% completion, vpr_ep=cuda.
 LMFACT A/B queued on iteration (rooms+euroc+msd x3, arms lfbase/lfonly/
 lfts) — THE rooms-1.2cm attack. If lfonly closes rooms toward OKVIS2+LC,
 stage-3 enters the freeze config.
+
+### x WRONG-RESOLUTION POSTMORTEM: all outdoor "XFeat" results were BAD-descriptor runs
+Every 4Seasons drive log (eig side AND the meg r3/r4 rounds) carried
+~2000-2700 "XFeat dense: feats 64x48x100 != 64x50x100" errors: the dense
+backbone floors H,W to /32, 800x400 -> 48 rows vs the compiled 50, shape
+guard dropped EVERY extraction, keyframes+probes silently fell back to
+BAD. The "outdoor single-frame reloc is matching-bound, retrieval moot"
+verdict is hereby DOWNGRADED to BAD-descriptor evidence only. Fix
+(fc73042): zero-pad inference input to next /32, all dense-grid math on
+padded dims; clean resolutions bit-identical; drive3 smoke 0 errors.
+Affected dirs carry INVALID_WRONGRES markers (drive_reloc, drive_reloc_big,
+drive_reloc_r4 on bench-2; drive_reloc_r4eig on iteration). Redo running:
+drive_reloc_pad_eig (.15) / drive_reloc_pad_meg (.58), r4 config, 3h caps.
+Also: probe/sweep searches now emit the closure LEDGER (was vpr-gated —
+the drive probes were invisible) with cov= appended.
+
+### x STAGE-3 LMFACT A/B: REJECT for freeze (rooms unmoved, corridor harm)
+lfbase/lfonly/lfts x (rooms 1-6, corr2/5, MH01/03/05, V102, MOO07/09/15) x3.
+Aggregate map median 5.60 / 5.84 / 5.59 — flat. Rooms: no effect at all
+(room1 13.13->13.08, room2-6 within noise) — the rooms gap vs OKVIS2+LC
+is BA-quality-bound, not drift-bound; fixed-3D factors derived from our
+own map reinforce the status quo when drift is cm-scale. Corridor harm:
+corr2 20.4->24.5 (lfonly) / 28.4 (lfts), corr5 15.1->22.2 (lfonly).
+Small MH gains (MH01 6.6->5.9) don't pay for it. XR_LMFACT stays available
+as a flag; future angles: stronger weight / >32 factors / drift-scaled
+activation. NOT in the freeze config.
+
+### x SNAP_MIN REAL A/B: 0.50 KEEPER (now compiled default)
+First honest sweep post-EXTRA-fix (binaries verified different): hunt
+subset map median sn50 18.24 vs sn30 26.76. corridor1 30.4->10.1,
+corridor5 31.9->20.1, magistrale2 55.1->45.4, slides2 -1; rooms flat;
+only corridor2 +7.5. SNAP_MIN_M default raised 0.30 -> 0.50.
+
+### x CLIP GRID: clip-15 wake-up burst >= clip-1 everywhere
+corr1 50->53, corr2 53->57, corr3 30->57, corr4 87->100 (r@10 90),
+corr5 60->63, mag2 10->23, room1 100->100 (r@10 70->87). Mean recall
+55.7 -> 64.8. A ~0.5 s frame burst is what reloc needs; clip-15 becomes
+the standard wake-up scenario alongside single-frame probes.
+
+### x infra: bench-2 container moved 10.27.48.180 -> 10.27.48.181 (same fs,
+chain PIDs survived); stage-3 of bench2_chain (big-map r3 + r4-meg, old
+unpadded binary) killed by PID — superseded by the pad redo. Blackout
+OKVIS outputs live in baseline_reloc/ (MH01_bo, corr1_bo, room1_bo).
