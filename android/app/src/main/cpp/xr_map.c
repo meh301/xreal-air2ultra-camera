@@ -376,6 +376,15 @@ static struct {                        /* correction awaiting confirmation */
     uint64_t ts;
     float q[4], p[3];                  /* candidate D = odom -> session */
 } PENDING_D;
+/* XR_MULTIHYP: a ring of recent verified alignments. The single PENDING_D
+ * slot loses the true place when an aliased frame overwrites it before its
+ * confirming partner arrives (magistrale-class repetitive halls). The ring
+ * lets a hypothesis confirm against ANY recent same-place alignment, not
+ * only the immediately-previous frame — the true revisit accumulates a
+ * partner even when aliased frames interleave. Map thread only. */
+#define MHYP_N 4
+static struct { int have; uint64_t ts; float q[4], p[3]; } MHYP[MHYP_N];
+static int MHYP_HEAD;
 static char MODEL_PATH[512];
 static pthread_once_t THREAD_ONCE = PTHREAD_ONCE_INIT;
 static atomic_int MAPPING = 1;
@@ -1228,6 +1237,26 @@ static int trustvpr_on(void) {
         if (v) LOGI("session map: TRUST-VPR candidate rider ON");
     }
     return v;
+}
+static int multihyp_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_MULTIHYP");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: MULTI-HYPOTHESIS confirmation ON");
+    }
+    return v;
+}
+/* push a verified-but-unconfirmed alignment into the hypothesis ring
+ * (map thread only; no-op unless XR_MULTIHYP) */
+static void mhyp_push(const float q[4], const float p[3], uint64_t ts) {
+    if (!multihyp_on()) return;
+    int h = MHYP_HEAD;
+    MHYP[h].have = 1;
+    MHYP[h].ts = ts;
+    memcpy(MHYP[h].q, q, sizeof MHYP[h].q);
+    memcpy(MHYP[h].p, p, sizeof MHYP[h].p);
+    MHYP_HEAD = (h + 1) % MHYP_N;
 }
 static int burstpnp_on(void) {
     static int v = -1;
@@ -4449,6 +4478,32 @@ static void process_keyframe(void) {
                 confirmed = dp2 < CONFIRM_DP_M * CONFIRM_DP_M &&
                             da < CONFIRM_DA_RAD;
             }
+            /* XR_MULTIHYP: also confirm against ANY recent same-place
+             * alignment in the ring (not just the one PENDING_D slot) —
+             * recovers the true revisit when aliased frames interleave and
+             * would otherwise overwrite the single pending hypothesis. */
+            if (!confirmed && multihyp_on()) {
+                for (int h = 0; h < MHYP_N && !confirmed; h++) {
+                    if (!MHYP[h].have || MHYP[h].ts >= work.ts ||
+                        work.ts - MHYP[h].ts >= CONFIRM_WINDOW_NS)
+                        continue;
+                    float hns[3], hdp2 = 0;
+                    qrotv(MHYP[h].q, work.p, hns);
+                    for (int c = 0; c < 3; c++) {
+                        float d = (ns[c] + Dp[c]) - (hns[c] + MHYP[h].p[c]);
+                        hdp2 += d * d;
+                    }
+                    float hqi[4], hqe[4], hrv[3];
+                    qconj(MHYP[h].q, hqi);
+                    qmul(Dq, hqi, hqe);
+                    rv_from_q(hqe, hrv);
+                    float hda = sqrtf(hrv[0] * hrv[0] + hrv[1] * hrv[1] +
+                                      hrv[2] * hrv[2]);
+                    if (hdp2 < CONFIRM_DP_M * CONFIRM_DP_M &&
+                        hda < CONFIRM_DA_RAD)
+                        confirmed = 1;
+                }
+            }
             /* Strong single-frame confirm — LOST RECOVERY ONLY. Recovery
              * benefits from fast re-anchoring and any alignment beats being
              * lost; healthy tracking must keep the 2-frame agreement, or
@@ -4554,6 +4609,7 @@ static void process_keyframe(void) {
                     PENDING_D.ts = work.ts;
                     memcpy(PENDING_D.q, Dq, sizeof PENDING_D.q);
                     memcpy(PENDING_D.p, Dp, sizeof PENDING_D.p);
+                    mhyp_push(Dq, Dp, work.ts);
                 }
                 VER_LAST.outcome = VOUT_GATED;
             } else if (!confirmed) {
@@ -4563,6 +4619,7 @@ static void process_keyframe(void) {
                 PENDING_D.ts = work.ts;
                 memcpy(PENDING_D.q, Dq, sizeof PENDING_D.q);
                 memcpy(PENDING_D.p, Dp, sizeof PENDING_D.p);
+                mhyp_push(Dq, Dp, work.ts);
                 LOGI("session map: kf#%d %s %.2fm %.0fdeg (%d/%d inliers, "
                      "%d covis) — awaiting a confirming frame",
                      best_i, lost ? "reloc" : "loop", (double)dev,
