@@ -898,6 +898,15 @@ static int storeguard_on(void) {
     }
     return v;
 }
+static int tightsub_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_TIGHTSUB");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: TIGHT SUB-GATE confirmations ON");
+    }
+    return v;
+}
 #ifndef CONFW_MIN_W
 #define CONFW_MIN_W 0.4f       /* weakest accepted alignment applies 40% */
 #endif
@@ -2876,6 +2885,21 @@ static void process_keyframe(void) {
                 if (TIGHT && confirmed &&
                     work.ts - KFA(best_i).ts > TIGHT_REVISIT_NS)
                     tight_post_prior(Dq, Dp, work.ts);
+                /* XR_TIGHTSUB: arm the 2-frame confirmation for SUB-GATE
+                 * closures too. Without this, PENDING is only ever set
+                 * above the 0.5m gate, so `confirmed` can never become
+                 * true down here and the revisit-aged tight posting above
+                 * is dead code on low-drift sequences — the whole reason
+                 * rooms/EuRoC/MSD sit at exact VIO parity while OKVIS2+LC
+                 * absorbs sub-gate corrections continuously. The optimizer
+                 * arbitrates the prior; the revisit-age gate keeps the v9
+                 * self-drift-teaching failure out. */
+                if (tightsub_on() && TIGHT && !confirmed) {
+                    PENDING_D.have = 1;
+                    PENDING_D.ts = work.ts;
+                    memcpy(PENDING_D.q, Dq, sizeof PENDING_D.q);
+                    memcpy(PENDING_D.p, Dp, sizeof PENDING_D.p);
+                }
                 VER_LAST.outcome = VOUT_GATED;
             } else if (!confirmed) {
                 /* one good frame is not enough — wait for a 2nd that agrees */
