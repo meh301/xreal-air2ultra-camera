@@ -1045,3 +1045,16 @@ aliased+winner seqs, .58 euroc+msd). This decides the freeze.
   raw-VIO drift vs OKVIS2 is KLT tracking on fast headset motion.
 Still unbuilt: Cauchy kernel, GravCal probe weighting, right-eye stereo
 probing, MASt3R oracle (Gen-6).
+
+### x GATE v2 (aliasing-margin) VERDICT: rooms/corr1/5 wins KEPT (room5
+10.9, room1 8.0, corr1 16.6 — all n=5), but aliased spaces STILL regress
+(corr3 36 bimodal [5.9,34,36,44,48], mag2 88, mag1 108). THREE gate
+designs (ungated / nin / vpr-margin) all fail the same way: closure-class
+evidence cannot safely earn PERMANENT estimator info in aliased spaces
+with our verification stack. STRUCTURAL conclusion, not parametric.
+LMMARG STATUS: validated ROOM-SCALE feature (the biggest quality win of
+the program: rooms 5.3->3.9-4.0 held-out, corr1/5 -8 to -16cm), unsafe
+as a uniform default. This is the SECOND regime-split feature (after
+vkfobs) — the adaptive/profile switch question is now worth two prizes,
+OR the product ships LMMARG=on for the room-scale AR profile (the actual
+Gen5 use case) — surfaced to the user as a product decision.
