@@ -1232,3 +1232,15 @@ no gain anywhere. Huber stays (okvis2-parity curiosity closed).
 - S5E FIRED (.15, 140 runs): s5off / adf / adfl / g99fl — the FIRST
   round where persist gating actually functions. Scene gate's real
   magistrale effect measured for the first time.
+
+### x BLACKOUT-OKVIS VERDICT: DNF — deadlocks at the sensor gap
+All 6 runs (MH01/corr1/room1 x lc0/lc1) hang at the exact blackout
+point (Progress: 47%/35%, 0% CPU, logs frozen 13h, no trajectory ever
+written). The blackout protocol removes camera frames while IMU
+continues (the physical model of a sleep/pocket event; blackout.py).
+OKVIS2's reference synchronous harness never traverses the gap, so it
+never reaches the re-anchor test — scored DNF at wake-up. OURS on the
+same protocol: reloc17 = corridors 100% burst recall (3-5cm med err,
+~55ms), mag2 80%. Claim wording must say "reference harness deadlocks
+at the camera gap", not "cannot relocalize". Processes killed, .181
+freed.
