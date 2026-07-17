@@ -1072,3 +1072,20 @@ Remaining candidates: IMU noise model (sweep running via new
 XR_IMU_NOISE_SCALE env — noises ride the calib feed, not config) and
 calibration quality. ofgrid mildly helps easy seqs, hurts MOO13 — not a
 keeper.
+
+### x MSD IMU-NOISE: REFUTED (0.5x/2x/4x all noise around base on
+MOO01/02/13). With the frontend also refuted, the MSD raw-VIO gap vs
+OKVIS2 is NOT config-reachable — remaining suspects are CALIBRATION
+quality / photometric conditioning in the MSD pack pipeline (pack-
+generation level, not architecture). Diagnostic closed honestly.
+
+## OPTION LIST STATE (end of the exhaustive arc)
+Every flag-testable augmentation is built + measured. Keepers in the
+deploy stack: v15-final freeze (v14 flags + cap400 + SNAP 0.50 + fixes)
++ reloc stack (TRUSTVPR, BURSTPNP, MULTIHYP pending mapping-safety
+fleet) + latency metric. Validated-but-regime-split: LMMARG (rooms
+breakthrough; product-profile decision pending), vkfobs (vetoed
+uniform). Refuted: INVIDX, sh20, tv065, EDGEGRAPH (parked), MSD
+frontend + imu-noise, sigma-strength, LMFACT-transient. Unbuilt tail:
+Cauchy kernel, GravCal weighting, right-eye probing, MASt3R oracle.
+Then: device day.
