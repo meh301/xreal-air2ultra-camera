@@ -721,8 +721,10 @@ function methodView() {
     <p>${S.meta.protocol || "causal, SE(3)-Umeyama ATE, RTE Δ=6 frames"}. One replay emits both tracks: raw VIO pose and map-corrected session pose (the map layer has no feedback into VIO). Arms differ only in descriptor (BAD/TEBLID vs XFeat) and retrieval model (none / EigenPlaces-512 / MegaLoc-8448).</p>
     <h3>Comparing to other systems, honestly</h3>
     <p>OKVIS2, ORB-SLAM3 and OpenVINS were built and run by us on the same container under the same causal protocol (see "vs. Systems"). Whole-run causal ATE penalizes any loop-closure system at the instant a correction re-anchors the live pose (past poses stay in the old frame) — ORB-SLAM3 shows metre-scale steps at closures while its tail-window ATE is centimetres. Divergence therefore gates on ATE only (10 m; 1 m for MSD): an RTE gate would structurally disqualify correction-based systems, since one re-anchor step is a giant frame-pair error. RTE is still computed and reported for every run — correction snaps are plainly visible there.</p>
+    <h3>Aggregation rules</h3>
+    <p>Error metrics: per-seq RMSE → median over runs → <b>median over sequences</b> (mean on hover). Recall metrics: <b>mean over sequences</b> (median on hover) — recall is bimodal and a median lands on the easy mode. Bimodal results are reported per mode. The full rulebook lives in <code>bench/EVALUATION.md</code>.</p>
     <h3>Reproduce</h3>
-    <p><code>node bench/site/server.js</code> serves this page · <code>bench/host/export_site_data.py</code> regenerates <code>data/*.json</code> · <code>bench/replay</code> is the harness · <code>bench/PROGRAM.md</code> is the plan.</p>`));
+    <p><code>node bench/site/server.js</code> serves this page · <code>bench/host/export_site_data.py</code> regenerates <code>data/*.json</code> · <code>bench/replay</code> is the harness · <code>bench/PROGRAM.md</code> is the plan · <code>bench/EVALUATION.md</code> is the scoring rulebook.</p>`));
 }
 
 /* ---------- shell ---------- */

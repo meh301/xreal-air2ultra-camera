@@ -1,5 +1,7 @@
 # Iteration ledger â€” toward best-in-class tracking on an embedded budget
 
+> Scoring rulebook: **bench/EVALUATION.md** (metrics, aggregation, trust checklist). Quote numbers per its rules.
+
 Living document. Every candidate improvement gets an entry: hypothesis, cost
 against the mobile budget, test protocol, and â€” once run â€” the commit hash and
 the measured verdict. Nothing ships on intuition; the benchmark decides.
@@ -221,10 +223,10 @@ corridors at large drift.
 | v5 | + VPR full-recall sweep | matrix_v5 | âœ… keep (megaloc long âˆ’10.6) |
 | v6 | + SNAP_MIN 0.50 | matrix_v6 | âœ… new baseline (site) |
 
-### ? Fleet v8 — hybrid verdict: EuRoC/rooms HELD (bad 6.47=VIO, xfeat rooms cured 5.57), long STILL LOST (megaloc 31->44).
+### ? Fleet v8 ï¿½ hybrid verdict: EuRoC/rooms HELD (bad 6.47=VIO, xfeat rooms cured 5.57), long STILL LOST (megaloc 31->44).
 Root cause: TIGHT_MAX_DEV (0.60) > SNAP_MIN (0.50) routed ALL confirmed closures (which arrive at 0.5-0.6m by construction) into the weak-prior path. The EuRoC/rooms wins come from SUB-GATE priors alone. Fix: confirmed closures always snap (TIGHT_MAX_DEV=0) - fastbench v9tight0 running (first 22-wide 15-min loop).
 
-### ? 4Seasons driving group (NEW dataset — 'see the limit')
+### ? 4Seasons driving group (NEW dataset ï¿½ 'see the limit')
 - Stereo GS 30fps 800x400 gray, 30cm baseline, IMU 2000Hz, RTK-fused GT
   (GNSSPoses.txt 7DOF keyframes; times.txt maps frame_id->unix ts).
   Downloading 3 training recordings (2 City-Loop-class 8.3/7.6GB + 1 mid
@@ -244,7 +246,7 @@ cross-sequence probes, per-arm comparison (MegaLoc should shine here),
 site tab. Two concurrency bugs found by the bench itself: lost-wakeup +
 MAP_LOCK self-deadlock (gdb) - both fixed, both product-relevant.
 
-### ? Reloc site tab (user request) — pipeline extended
+### ? Reloc site tab (user request) ï¿½ pipeline extended
 RELOC lines now emit exp=x,y,z (map-track pose at probe frame) and
 got=x,y,z (landed pose) so the site can plot expected->landed vectors.
 NEXT: exporter parses reloc logs -> data/reloc.json (per seq x arm:
@@ -253,10 +255,10 @@ plot on the orbit canvas (trajectory + expected->landed lines colored by
 error, failures as X at expected). Cross-system blackout-reloc protocol
 queued (OKVIS2 public code lacks loadMap - clip probes impossible there).
 
-### ? Fleet v9 — confirmed-always-snap: rooms CURED (xfeat 13->5.55), EuRoC ok, long STILL lost (megaloc 31->43).
+### ? Fleet v9 ï¿½ confirmed-always-snap: rooms CURED (xfeat 13->5.55), EuRoC ok, long STILL lost (megaloc 31->43).
 Eliminates the confirmed-closure routing as the cause. Root cause = SUB-GATE priors: on corridors they glue VIO to recently-mapped (equally drifted) kfs, preventing drift from ever crossing the gate where the big closure fires. v6 (no tight) = only config holding long 31. NEXT (v10): sub-gate prior ONLY when matched kf is a genuine revisit (age > ~30s) - old-kf agreement = loop info; recent-kf agreement = teaching VIO its own drift. Site stays on v6 until v10.
 
-### ? v10/v11 — revisit-age gate (TIGHT_REVISIT_NS 30s) — SUBSET WINNER
+### ? v10/v11 ï¿½ revisit-age gate (TIGHT_REVISIT_NS 30s) ï¿½ SUBSET WINNER
 fastbench v10revisit: EuRoC parity held (5.3-6.0), corridor1 30.1 = v6,
 corridor5 23.8 & slides2-megaloc 29.9 = NEW BESTS, mag2 <=97.5. The gate
 (priors only vs kfs >30s old) keeps tight-coupling wins AND long gains -
@@ -269,14 +271,14 @@ continues - the cross-system reloc protocol every baseline can run
 probes). Next: generate blackout variants of room1/corridor3/MH_01,
 run ours + okvis2 + orb3, add recovery metrics to reloc tab.
 
-### ? 4Seasons converter (/root/conv4s.py) — CONVERTING
+### ? 4Seasons converter (/root/conv4s.py) ï¿½ CONVERTING
 Standalone container converter replicating pack formats exactly (pinhole
 =kb4-zero-dist, TS_cam_imu inverted for cam->IMU, GNSS scale applied to
 GT, ADIS16465-inflated noises). 3 recordings converting in parallel ->
 /mnt/processing/packs4s/{drive1_city,drive2_city,drive3_country};
 xr_replay_drive (800x400) built; /root/out/drive.toml staged.
 
-### ? Iteration-2 trio IMPLEMENTED (04614dd) — fastbench series running
+### ? Iteration-2 trio IMPLEMENTED (04614dd) ï¿½ fastbench series running
 - Reactivation-lite (XR_REACT): anchor-pinned single-kf verify @400ms
   inside mapped space; priors via tight channel. fastbench v12react.
 - Correction ramp (XR_RAMP): display correction glides 500ms; map updates
