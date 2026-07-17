@@ -165,8 +165,12 @@ descriptors at every other resolution.
 - Replay NEVER latches LOST organically (no shake source) — submap and
   recovery paths are only exercised via `--kidnap`.
 - Sequence packs: EuRoC dense arms need the 736-crop packs (XFeat %32).
-- pkill patterns must be self-escaped AND never share an ssh command
-  with text that matches them.
+- pkill discipline (three incidents): patterns must be self-escaped
+  (`nam[e]`), a kill must NEVER share an ssh command with ANY text
+  matching its pattern (including rm paths and relaunch text), kill by
+  output-path-specific cmdline match rather than binary name when
+  parallel workstreams share a binary, and killing a run does NOT kill
+  its runner loop — kill the loop first or it respawns/advances.
 
 ## 12. Directory & tooling conventions
 
