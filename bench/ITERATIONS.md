@@ -1157,3 +1157,22 @@ no gain anywhere. Huber stays (okvis2-parity curiosity closed).
   hall. Best wake-up numbers recorded; blackout-OKVIS comparison
   pending on .181.
 - DRIVES r2/r3 fired on .58 (headline 1.19%-vs-3.3% needs n=3).
+
+### x STAGE-5B GATE DISAMBIGUATION (.15, n=5, 160 runs) — DEFENSE IN DEPTH
+- Rooms DOSE-RESPONSE confirmed, monotone in arb threshold: room1
+  13.0 -> 9.9(4px) -> 7.9(8px) -> 6.5(no-arb); room5 18.1 -> 16.9 ->
+  14.2 -> 11.7. g999 = FULL historical prize (6.4/11 ungated).
+- BUT the 8m gate LEAKS where median depth dips under it: corr3 g999
+  29.5 vs off 17.9 (poison returns without arbitration). Arbitration
+  catches the leakage: g8 best corridors of the round (corr1 5.3,
+  corr3 10.8). Gate and arbitration are COMPLEMENTARY, not redundant —
+  first-round "safety is all gate" read was too simple.
+- Aggregates: g8 12.48 < g999 14.10 < s5off 16.79 < s5auto(4px) 17.96.
+- Magistrale UNRESOLVED: deeply bimodal across rounds even for control
+  (s5off lost 3/5 mag1 runs in s5 round, 0/5 here; mag1 med flips
+  46<->90). g8 lost 3/5 mag2 runs here (n=2) — a within-round harm
+  signal that must be settled before freeze.
+- S5C FIRED (.15, 175 runs): gate-threshold x arb matrix (s5off/s5auto/
+  g8/g8s6/g999s6) on discriminating seqs; xr_map.c gains
+  XR_LMMARG_SCENE_M runtime override + scene_ema telemetry (3233768)
+  to diagnose leakage directly.
