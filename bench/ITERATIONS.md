@@ -633,3 +633,12 @@ FLEET v14 = THE FREEZE FLEET queued behind v13 on bench-1: arms bad /
 xdlg6(meg) / fullm(meg+SEQVOTE deploy-twin) / full(EIG+SEQVOTE = the
 deploy config). v14's full-vs-fullm is the definitive fleet-scale
 retrieval pair; v14 'full' median table = the APK freeze numbers.
+
+### x Retrieval-flip caveat (user challenge): verdict was INDOOR-ONLY
+The EigenPlaces win was measured on corridors/rooms; published MegaLoc
+advantages + our magistrale2 result both live in the large/outdoor
+regime. OUTDOOR PAIR RUNNING: drive reloc r4-eig (iteration container)
+vs r4-meg (bench-2 chain), identical 2000-kf/60m/DESPERATE/RELOCSWEEP
+config. Deploy decision holds only if EigenPlaces doesn't collapse
+outdoors; otherwise the pick becomes PROFILE-SPLIT (eig indoor / meg
+large-map+outdoor — both models resident is fine within the 1GB budget).
