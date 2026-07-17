@@ -1019,3 +1019,10 @@ while keeping transient posts ungated. fz16.1 building.
 LATENCY METRIC = GOLD: single-frame time-to-relocalize ~55ms, ttv ~55-61
 (sub-frame; the AR-critical number nobody else measures). Keep the metric
 + rulebook it; drop the index.
+
+### x LMMARG confidence gate (afe5be4): fold only nin>=14 closures;
+LMTRACK re-posts stay transient (sigma sign, ABS for weight). Smoke:
+118 fold-eligible + 192 transient posts cleanly separated. Focused A/B
+fz16.1 running (.15 rooms/corridors/mag, .58 msd) vs fleet16's ungated
+fz16 + fzbase cells — must KEEP rooms (room1 -5.2, room5 -6.5) while
+killing mag1 bimodal [43/130/137].
