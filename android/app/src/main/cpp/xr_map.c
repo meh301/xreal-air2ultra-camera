@@ -1070,10 +1070,19 @@ static void scene_depth_update(const xr_kf *kf) {
     SCENE_DEPTH_EMA = SCENE_DEPTH_EMA <= 0 ? med
                     : 0.9f * SCENE_DEPTH_EMA + 0.1f * med;
 }
+/* scene threshold, runtime-tunable: XR_LMMARG_SCENE_M overrides */
+static float lmmarg_scene_max(void) {
+    static float v = -1.0f;
+    if (v < 0) {
+        const char *e = getenv("XR_LMMARG_SCENE_M");
+        v = (e && *e) ? (float)atof(e) : LMMARG_MAX_SCENE_M;
+    }
+    return v;
+}
 /* fold permission by scene scale (always 1 when the auto-gate is off) */
 static int lmmarg_scene_ok(void) {
     if (!lmmarg_auto_on()) return 1;
-    return SCENE_DEPTH_EMA > 0 && SCENE_DEPTH_EMA < LMMARG_MAX_SCENE_M;
+    return SCENE_DEPTH_EMA > 0 && SCENE_DEPTH_EMA < lmmarg_scene_max();
 }
 #ifndef LMMARG_MIN_NIN
 #define LMMARG_MIN_NIN 10          /* inlier floor to earn a permanent fold */
@@ -5054,8 +5063,10 @@ static void process_keyframe(void) {
         CLOUD_DIRTY = 1;
         if (invidx_on()) ivx_insert_kf(slot, &KF[slot]);
         scene_depth_update(&KF[slot]);
-        LOGI("session map: kf#%d stored (%d landmarks, %d kps, seg=%d)",
-             KF_N - 1, work.n_lm, work.n_kp, CUR_SEG);
+        LOGI("session map: kf#%d stored (%d landmarks, %d kps, seg=%d, "
+             "scene_ema=%.1fm)",
+             KF_N - 1, work.n_lm, work.n_kp, CUR_SEG,
+             (double)SCENE_DEPTH_EMA);
     }
     /* refresh the authoritative display cloud whenever the graph changed
      * (a store, an eviction, or a closure-driven deformation) */
