@@ -1295,3 +1295,20 @@ full prize (s5e, low-noise, 3x dose-response lineage), corridors
 neutral (corr10 n=10), halls neutral-to-better (mag10 n=10).
 NOTE: reloc17 recall numbers predate stage-7 (mapping phase ran the
 buggy fold-everything stack) — finale re-measures reloc at fz18.
+
+### ✓ HELD-OUT CONFIRMS — fz18 FROZEN (the composition survives EVALUATION §12)
+120/120 runs, zero divergences. Sequences tuning never saw: rooms
+UNIFORMLY better (room2 3.42 vs 4.87, room3 3.71 vs 5.56, room4 4.17
+vs 4.92, room6 1.75 vs 2.00), corr2 18.4 vs 25.1, corr4 neutral,
+slides1 24.4 vs 25.8, slides2 33.0 vs 39.5. Aggregate g99fl 11.20 vs
+off 11.84 (adfl 10.55 but hall-fragile per mag10 — g99fl stays the
+pick: simpler, hall-robust).
+FZ18 (FROZEN) = COVKEEP PGO LMDESC TIGHT TIGHTSUB SEQVOTE TRUSTVPR
++ LMFACT LMTRACK LMMARG LMMARG_AUTO SCENE_M=6 FOLD_PX=999
++ LMTRACK_PERSIST (+ reloc stack: cap400, SNAP 0.50, TRUSTVPR,
+BURSTPNP, MULTIHYP-lost-only).
+TUM-VI TABLE ALREADY COMPLETE from within-round pairs on the stage-7
+stack: s5e (room1/5) + heldout (rooms2-4/6, corr2/4, slides) + corr10
+n=10 (corr1/3/5) + mag10 n=10 (mag1/2). No tumvi finale rerun needed.
+Remaining finale: .58 euroc+msd fz18 wave, .181 bigtum fz18 wave +
+reloc re-measure (rl18/rb18). Drives banked at n=3.
