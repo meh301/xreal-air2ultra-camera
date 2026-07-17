@@ -1084,6 +1084,59 @@ static int lmmarg_scene_ok(void) {
     if (!lmmarg_auto_on()) return 1;
     return SCENE_DEPTH_EMA > 0 && SCENE_DEPTH_EMA < lmmarg_scene_max();
 }
+/* XR_LMMARG_ADAPT — scene-adaptive fold arbitration. Median landmark
+ * depth cannot separate rooms from corridors (both ~2m: landmarks sit on
+ * the near walls), but MAP EXTENT can: a room's stored keyframes stay
+ * inside its footprint (<~7 m diagonal) forever, a corridor strings past
+ * 10 m within seconds. Rooms earn un-arbitrated folds (full prize, s5b/c
+ * dose-response), corridors keep 8 px fold-time arbitration (corr3
+ * replicated), big spaces stay depth-gated. Both keys are online-
+ * observable and causal: extent = how far apart aliasable places can be,
+ * depth = how big the visible space is. Room-class batches ride the
+ * existing sigma channel with a +1000 magnitude offset (sign still means
+ * persist); basalt decodes and skips arbitration for them. */
+static float MAP_EXT_MIN[3], MAP_EXT_MAX[3];
+static int MAP_EXT_INIT;               /* map thread only */
+static void map_extent_update(const float p[3]) {
+    if (!MAP_EXT_INIT) {
+        for (int a = 0; a < 3; a++)
+            MAP_EXT_MIN[a] = MAP_EXT_MAX[a] = p[a];
+        MAP_EXT_INIT = 1;
+        return;
+    }
+    for (int a = 0; a < 3; a++) {
+        if (p[a] < MAP_EXT_MIN[a]) MAP_EXT_MIN[a] = p[a];
+        if (p[a] > MAP_EXT_MAX[a]) MAP_EXT_MAX[a] = p[a];
+    }
+}
+static float map_extent_diag(void) {
+    if (!MAP_EXT_INIT) return 0.0f;
+    float dx = MAP_EXT_MAX[0] - MAP_EXT_MIN[0];
+    float dy = MAP_EXT_MAX[1] - MAP_EXT_MIN[1];
+    float dz = MAP_EXT_MAX[2] - MAP_EXT_MIN[2];
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+static int lmmarg_adapt_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LMMARG_ADAPT");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LMMARG scene-ADAPTIVE arbitration ON");
+    }
+    return v;
+}
+static float lmmarg_room_ext(void) {
+    static float v = -1.0f;
+    if (v < 0) {
+        const char *e = getenv("XR_LMMARG_ROOM_EXT");
+        v = (e && *e) ? (float)atof(e) : 10.0f;
+    }
+    return v;
+}
+/* room-class: the whole stored map still fits a room-sized footprint */
+static int lmmarg_room_class(void) {
+    return MAP_EXT_INIT && map_extent_diag() < lmmarg_room_ext();
+}
 #ifndef LMMARG_MIN_NIN
 #define LMMARG_MIN_NIN 10          /* inlier floor to earn a permanent fold */
 #endif
@@ -1163,9 +1216,14 @@ static void lmfact_post(const float (*uv)[2], const float (*ps)[3], int n,
         fxyz[3 * m + 2] = po[2];
     }
     float sg = persist ? lmf_sigma() : -lmf_sigma();
+    /* scene-adaptive: room-class persist batches skip fold arbitration
+     * (+1000 magnitude offset on the sigma channel, decoded in basalt) */
+    int noarb = persist && lmmarg_adapt_on() && lmmarg_room_class();
+    if (noarb) sg += 1000.0f;
     if (xr_slam_landmark_factors(ts, 0, fuv, fxyz, n, sg) > 0)
         LOGI("session map: LMFACT posted %d landmark factors%s", n,
-             persist ? " (fold-eligible)" : "");
+             persist ? (noarb ? " (fold-eligible, room-class)"
+                             : " (fold-eligible)") : "");
 }
 
 /* XR_LMTRACK — CONTINUOUS landmark-factor coverage. LMFACT alone posts
@@ -5063,10 +5121,11 @@ static void process_keyframe(void) {
         CLOUD_DIRTY = 1;
         if (invidx_on()) ivx_insert_kf(slot, &KF[slot]);
         scene_depth_update(&KF[slot]);
+        map_extent_update(KF[slot].p);
         LOGI("session map: kf#%d stored (%d landmarks, %d kps, seg=%d, "
-             "scene_ema=%.1fm)",
+             "scene_ema=%.1fm, ext=%.1fm)",
              KF_N - 1, work.n_lm, work.n_kp, CUR_SEG,
-             (double)SCENE_DEPTH_EMA);
+             (double)SCENE_DEPTH_EMA, (double)map_extent_diag());
     }
     /* refresh the authoritative display cloud whenever the graph changed
      * (a store, an eviction, or a closure-driven deformation) */
