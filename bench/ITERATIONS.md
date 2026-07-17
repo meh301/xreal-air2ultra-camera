@@ -934,3 +934,15 @@ Cap-invariant for rooms/euroc/msd (cap never binds); the untested
 vkfobs x cap400 corridor interaction cell now runs on .15 (n=5).
 euroc/msd half: launcher died twice (CRLF re-poisoning after re-scp; the
 sed was killed by its own pkill) — fixed, resumed, 10 workers.
+
+### x FLEET15 FULL VERDICT: vkfobs VETOED by held-out (the discipline works)
+Full 40-seq, corridors n=5: rooms 5.47->4.85 (uniform, real) BUT
+corridor1 6.66->24.95 (+18), magistrale2 47.8->68.8 (+21), mag1 +7.7,
+MSD losers reversed (MOO01 +3.4), euroc subset promise 5.18 -> 6.39
+(wash). TRUSTVPR is inert in mapping ATE (fires only while relocalizing)
+so the scatter is pure vkfobs: denser keyframing is a big-space closure
+lottery. THREE subset A/Bs had "confirmed" it — the held-out fleet
+killed it. FREEZE BASE STAYS v14 config. Surviving keepers: TRUSTVPR +
+BURSTPNP (reloc scenario), infra fixes, cap400 (interaction cell
+pending). Follow-up: moderated point (kf_after 4, kp 0.75, obs 0.42)
+on rooms + the harmed/helped corridors, fzbase fleet cells as comparator.
