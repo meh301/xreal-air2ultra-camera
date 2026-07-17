@@ -1244,3 +1244,21 @@ same protocol: reloc17 = corridors 100% burst recall (3-5cm med err,
 ~55ms), mag2 80%. Claim wording must say "reference harness deadlocks
 at the camera gap", not "cannot relocalize". Processes killed, .181
 freed.
+
+### x STAGE-5E (.15, n=5, 140 runs) — FIRST HONEST ROUND FLIPS THE ARB STORY
+- g99fl (no-arb + 6m gate + LMTRACK_PERSIST) = BEST AGGREGATE OF THE
+  PROGRAM: 11.83 (off 18.03, adf 17.12, adfl 26.24). Per-seq: room1
+  6.55 / room5 11.09 (full prize), corr1 5.75 (best), corr3 11.83
+  (best; off 22.1), mag2 58.9 with 5/5 runs kept (off 55.3 n=4),
+  corr5 22.2 vs off 16.4 (one blemish), mag1 85.7 n=3 (unresolvable).
+- LMTRACK_PERSIST hypothesis CONFIRMED: designed track-factor folding
+  delivers the rooms prize (adfl 7.7/9.6 vs adf 11.9/14.7).
+- The "corr3 no-arb poison" of s5b/s5c was a BUG ARTIFACT: folding
+  EVERY transient un-arbitrated = poison; folding only the gated
+  persist population un-arbitrated = best-in-round. On the fixed stack
+  arbitration may be unnecessary — the candidate FINAL COMPOSITION is
+  g99fl: LMFACT+LMTRACK+LMMARG+AUTO, SCENE_M=6, FOLD_PX=999,
+  LMTRACK_PERSIST=1 (ADAPT not needed). Fold everything trusted,
+  gate by scene depth only. Simple, uniform.
+- DECISION RESTS ON: corr10 (.58 n=10: is corr5/corr1 real?) + mag10
+  (.181 n=10: halls truly neutral?). Both running, same arms.
