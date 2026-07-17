@@ -1262,3 +1262,13 @@ freed.
   gate by scene depth only. Simple, uniform.
 - DECISION RESTS ON: corr10 (.58 n=10: is corr5/corr1 real?) + mag10
   (.181 n=10: halls truly neutral?). Both running, same arms.
+
+### x CORR10 POWER ROUND (.58, n=10, 120 runs) — CORRIDORS ARE ARM-NEUTRAL
+corr1: off 26.6 / adf 30.3 / adfl 28.3 / g99fl 28.4. corr3: 15.2/15.2/
+18.1/17.2. corr5: 22.8/23.7/19.3/23.1. At n=10 NO arm separates from
+control in any corridor — every corridor "win"/"poison" of rounds
+s5..s5e (incl. s5e's g99fl corr1 5.75) was bimodal-noise draw. The
+factor stack is corridor-NEUTRAL: no harm, no help. Composition is
+therefore decided by rooms (replicated low-noise win: g99fl/adfl
+6.5-11) + halls (mag10 pending) + held-out (pending). Corridors clear
+g99fl of the corr5-blemish suspicion (22.8 off vs 23.1 g99fl, noise).
