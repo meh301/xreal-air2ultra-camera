@@ -126,3 +126,27 @@ DESPERATE / ROTSTORE), (b) blackout-reloc baselines published, (b2) fleet v14 'f
 stage-3 landmark-factor decision is made (build vs defer), and (d) the
 harness exit-hang fix lands (also affects on-device shutdown paths).
 Freeze = a fleet-validated env set baked into the APK defaults.
+
+### 2026-07-17 freeze verdict (fleet v14, 480 runs)
+
+Gates (a), (b2), (c) are CLOSED. The frozen config is
+**dense XFeat + LighterGlue-L6 + descriptor union + tight coupling +
+TIGHTSUB + EigenPlaces retrieval + SEQVOTE + SNAP_MIN 0.50**
+(`XR_COVKEEP XR_PGO XR_LMDESC XR_TIGHT XR_TIGHTSUB XR_SEQVOTE`, EigenPlaces
+model; SNAP_MIN 0.50 is now the compiled default).
+
+All-40-seq map median: **freeze 7.64 cm** vs freezem (MegaLoc) 8.03,
+xdlg6 10.71, bad 10.27. Per group (median over per-seq medians):
+
+| group | bad | freeze | freezem | verdict |
+|---|---|---|---|---|
+| EuRoC (11) | 8.13 | **6.62** | 6.72 | behind OKVIS2+LC (3.82); VIO-bound |
+| TUM-VI long (9) | 30.21 | **23.21** | 41.39 | BEATS OKVIS2+LC (31.8) by 8.6 cm; retrieval flip decisive (EIG ~2x MegaLoc) |
+| rooms (6) | 5.22 | 5.22 | 5.24 | gated = VIO; OKVIS2+LC gap (~1.2 cm) stands, LMFACT rejected |
+| MSD (14) | 6.22 | **6.15** | 6.13 | lead held |
+
+TIGHTSUB STAYS: v14 freeze long 23.21 beats the v12 no-TIGHTSUB 27.04
+(v13's harm signal was a MegaLoc-context artifact). Stage-3 LMFACT:
+REJECTED for freeze (rooms unmoved, corridor harm — see ITERATIONS.md).
+Remaining before push: (b) blackout baselines (running on bench-2) and
+(d) the exit-hang fix.

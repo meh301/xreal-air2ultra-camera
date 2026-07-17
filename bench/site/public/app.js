@@ -2,18 +2,33 @@
  * Data: data/{results,baselines,published,ledger,meta}.json + data/traj/<seq>_<arm>.json */
 "use strict";
 
-const ARMS = ["bad", "vpr", "megaloc", "xfeat", "xvpr", "xmegaloc", "xdlg6", "full"];
+const ARMS = ["bad", "vpr", "megaloc", "xfeat", "xvpr", "xmegaloc", "xdlg6", "full",
+  "freeze", "freezem", "fulleig", "lfbase", "lfonly", "lfts", "sn30", "sn50"];
+/* iteration A/B arms: exported and selectable, but off by default so the
+ * overview stays readable */
+const AB_ARMS = new Set(["fulleig", "lfbase", "lfonly", "lfts", "sn30", "sn50"]);
 const ARM_LABEL = {
   bad: "BAD/TEBLID", vpr: "BAD + EigenPlaces", megaloc: "BAD + MegaLoc",
   xfeat: "XFeat", xvpr: "XFeat + EigenPlaces", xmegaloc: "XFeat + MegaLoc",
   "bad-vio": "VIO only", "xfeat-vio": "VIO only (XFeat)",
   "xdlg6-vio": "VIO only (dense arms)",
+  "freeze-vio": "VIO only (freeze cfg)",
   okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
   orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
   xdense: "XFeat-dense + MegaLoc", xdenselg6: "XFeat-dense + MegaLoc + LGlue",
-  lmdesc: "dense+LGlue + landmark bank", clip15: "dense+LGlue, clip-15 probes",
+  lmdesc: "dense+LGlue + landmark bank",
+  clip1: "wake-up probe, 1 frame", clip15: "wake-up probe, 15 frames",
   xdlg6: "dense + MegaLoc + LGlue", full: "FULL (dense+LGlue+union+tight)",
   utf: "FULL (dense+LGlue+union+tight)",
+  freeze: "FREEZE (dense+LGlue+EigenPlaces+SeqVote+TightSub)",
+  freezem: "FREEZE variant (MegaLoc retrieval)",
+  fulleig: "FULL + EigenPlaces (retrieval flip A/B)",
+  lfbase: "deploy base (A/B ref, no TightSub)",
+  lfonly: "deploy + landmark factors (LMFACT)",
+  lfts: "deploy + TightSub + LMFACT",
+  sn30: "deploy, SNAP_MIN 0.30", sn50: "deploy, SNAP_MIN 0.50",
+  padeig: "drive reloc, EigenPlaces (padded XFeat)",
+  padmeg: "drive reloc, MegaLoc (padded XFeat)",
 };
 /* deterministic color for arms without a CSS variable (new A/B arms) */
 function armColor(a) {
@@ -24,10 +39,10 @@ function armColor(a) {
   return `hsl(${h % 360},62%,50%)`;
 }
 /* every plot key the trajectory panel may offer, in display order */
-const TRAJ_KEYS = ["bad-vio", "xfeat-vio", "xdlg6-vio", ...ARMS,
+const TRAJ_KEYS = ["bad-vio", "xfeat-vio", "xdlg6-vio", "freeze-vio", ...ARMS,
   "okvis2lc0", "okvis2lc1", "orb3lc0", "orb3lc1", "openvinslc0"];
 const TRAJ_COLOR = {
-  "bad-vio": "vio", "xfeat-vio": "vio",
+  "bad-vio": "vio", "xfeat-vio": "vio", "freeze-vio": "vio",
   okvis2lc0: "base", okvis2lc1: "base", orb3lc0: "xvpr", orb3lc1: "xvpr",
   openvinslc0: "pub",
 };
@@ -41,7 +56,7 @@ const GROUP_TITLE = Object.fromEntries(GROUPS);
 
 const S = {
   runs: [], baselines: [], published: [], ledger: [], meta: {},
-  tab: "overview", armOn: Object.fromEntries(ARMS.map(a => [a, true])),
+  tab: "overview", armOn: Object.fromEntries(ARMS.map(a => [a, !AB_ARMS.has(a)])),
   useRte: false,
 };
 

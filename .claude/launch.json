@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bench-site",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["bench/site/server.js", "8080"],
+      "port": 8080
+    }
+  ]
+}

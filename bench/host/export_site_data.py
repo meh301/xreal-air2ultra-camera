@@ -145,7 +145,8 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
             m = name_re.match(f.name)
             if not m:
                 continue
-            seq = m.group("seq")
+            # double-underscore result names leave a trailing _ on seq
+            seq = m.group("seq").rstrip("_")
             gt, ds = gt_for(seq)
             if not gt:
                 continue
@@ -153,7 +154,9 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
             if cache is not None and key in cache:
                 rows.append(cache[key])
                 continue
-            meta[str(f)] = (m.groupdict(), key)
+            gd = m.groupdict()
+            gd["seq"] = seq
+            meta[str(f)] = (gd, key)
             jobs.append((str(f), str(gt), ds))
     n = 0
     with ProcessPoolExecutor(max_workers=12) as ex:
@@ -262,17 +265,18 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
     jobs = []
     for d in results_dirs:
         for f in sorted(Path(d).glob("*_r1_map.tum")):
-            m = re.match(r"(.+)_(bad|vpr|megaloc|xfeat|xvpr|xmegaloc|xdlg6|full)_r1_map",
+            m = re.match(r"(.+?)_{1,2}(bad|vpr|megaloc|xfeat|xvpr|xmegaloc"
+                         r"|xdlg6|fulleig|freezem|freeze|full)_r1_map",
                          f.stem)
             if m:
-                jobs.append((f, m.group(1), m.group(2)))
+                jobs.append((f, m.group(1).rstrip("_"), m.group(2)))
         # VIO track: one per descriptor family — vpr/megaloc VIO is identical
         # to bad's (map layer has no feedback into VIO). xdlg6 covers the
-        # dense arms (full's VIO differs only via tight priors).
+        # dense arms; freeze's VIO differs again (tight priors + seqvote).
         for f in sorted(Path(d).glob("*_r1_vio.tum")):
-            m = re.match(r"(.+)_(bad|xfeat|xdlg6)_r1_vio", f.stem)
+            m = re.match(r"(.+?)_{1,2}(bad|xfeat|xdlg6|freeze)_r1_vio", f.stem)
             if m:
-                jobs.append((f, m.group(1), m.group(2) + "-vio"))
+                jobs.append((f, m.group(1).rstrip("_"), m.group(2) + "-vio"))
     for d in baseline_dirs:
         for f in sorted(Path(d).glob("*.tum")):
             m = re.match(r"(.+)_(okvis2|orb3|openvins)_lc([01])$", f.stem)
@@ -348,7 +352,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     ours_re = re.compile(
-        r"(?P<seq>.+)_(?P<arm>bad|vpr|megaloc|xfeat|xvpr|xmegaloc|xdlg6|full)"
+        r"(?P<seq>.+?)_{1,2}"
+        r"(?P<arm>bad|vpr|megaloc|xfeat|xvpr|xmegaloc|xdlg6|fulleig|freezem"
+        r"|freeze|fullm|full|lfbase|lfonly|lfts|sn30|sn50)"
         r"_r(?P<run>\d+)_(?P<track>vio|map)\.tum$")
     base_re = re.compile(
         r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins)_lc(?P<lc>[01])\.tum$")

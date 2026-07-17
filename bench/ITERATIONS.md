@@ -714,3 +714,23 @@ the standard wake-up scenario alongside single-frame probes.
 chain PIDs survived); stage-3 of bench2_chain (big-map r3 + r4-meg, old
 unpadded binary) killed by PID — superseded by the pad redo. Blackout
 OKVIS outputs live in baseline_reloc/ (MH01_bo, corr1_bo, room1_bo).
+
+### x FLEET V14 (freeze fleet, 480 runs): FREEZE CONFIRMED
+Arms bad / xdlg6 / freezem(=FULL w/ MegaLoc) / freeze(=FULL w/ EIG+SEQVOTE
++TIGHTSUB), 40 seqs x3. All-seq map median: freeze 7.64 / freezem 8.03 /
+bad 10.27 / xdlg6 10.71 — best program-wide aggregate to date.
+Groups (med): euroc 6.62/6.72 (EIG~=meg), LONG 23.21 vs 41.39 (EIG ~2x
+better — retrieval flip is decisively confirmed where it matters),
+rooms 5.22 flat (gated), msd 6.15 flat. TIGHTSUB KEPT: freeze long 23.21
+< v12 no-TIGHTSUB 27.04 (v13 harm signal was MegaLoc-context). Site arms
+renamed freeze/freezem (v14 'full' config differs from v12/13 'full').
+vs baselines: long BEATS OKVIS2+LC 31.8; euroc still behind OKVIS2+LC
+3.82 (VIO-bound); rooms gap stands. Freeze block written to
+GEN5_DEPLOYMENT.md §6. Remaining gates: blackout baselines, exit-hang.
+
+### x pad-drive redo: first nonzero outdoor reloc
+With real dense descriptors (post-fc73042): drive3 3/30 verified (was
+0/30 with BAD), drive2 still 0, drive1 mapping. MegaLoc twin relaunched
+on .58 after shipping xr_slam.c (stage-3 wrapper was .15-only — link
+error caught the gap). Site: results.json 3774 rows / 13 arms, clip grid
+in reloc.json, server on :8080 via .claude/launch.json (bench-site).
