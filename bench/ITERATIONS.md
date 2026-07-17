@@ -1383,3 +1383,13 @@ v2 (480c836): one-shot ARMED only by an APPLIED closure, 20s
 refractory, 0.10m polish floor, TIGHT-channel arbitration (inside the
 envelope the fused D posts as a VIO prior; only beyond it steps CORR).
 Dual A/B fired (.15 + .58, 240 runs); third replication on .181.
+
+### x LOOPBURST v1 REPLICATED on .181 (sync error made it a v1 round —
+.181 built pre-v2 source; ledgered honestly). Second independent n=10:
+corr2 18.9->46.9, corr5 28.4->39.8, room1 7.2->10.5 (18 applications/
+run again), corr4/mag2 neutral, corr1 "improvement" 32->26.6 = corridor
+noise. v1 harm CONFIRMED cross-container. NEW defect visible in its
+logs: 0.46-0.80m corrections APPLIED at 46-59% joint consensus (the
+30% gate admits structurally-disagreeing solves — high-consensus
+solves run 90-98%). v2 apply gate must also require >=60% consensus.
+True v2 verdict pending from .15/.58.
