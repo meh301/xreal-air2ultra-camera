@@ -226,6 +226,30 @@ static int CUR_SEG;                    /* active segment; 0 = primary. Map
                                           thread writes under MAP_LOCK */
 static uint64_t LOST_SINCE_NS;         /* map thread only: when LOST began */
 
+/* XR_SEQVOTE: decaying per-SLOT retrieval votes across consecutive
+ * relocalizing searches (SeqSLAM idea): a place that keeps scoring 0.35
+ * for ten frames should beat a single 0.5 spike — repetitive corridors
+ * fail single-frame appearance but survive temporal consistency. */
+#ifndef SEQV_W
+#define SEQV_W 0.5f
+#define SEQV_DECAY 0.75f
+#endif
+static float SEQV[XR_MAP_MAX_KF];      /* physical-slot indexed, map thread */
+/* XR_DESPERATE: after this long LOST (or for one-shot probes), widen the
+ * retrieval shortlist and lower the similarity floor — nothing to lose. */
+#ifndef DESPERATE_AFTER_NS
+#define DESPERATE_AFTER_NS 5000000000ull
+#define DESPERATE_MIN_SIM 0.15f
+#endif
+#define VPR_SHORTLIST_MAX 32
+/* XR_ROTSTORE: allow an early store on a heading change > ~25 deg —
+ * time-gated storage under-samples turns, which is exactly the reverse-
+ * viewpoint coverage the reloc bestm~0 mode is missing. */
+#ifndef ROTSTORE_RAD
+#define ROTSTORE_RAD 0.44f
+#endif
+static float LAST_STORE_Q[4];          /* map thread only */
+
 /* ---- lifetime landmark descriptor bank (XR_LMDESC). A direct-mapped
  * CACHE of the freshest descriptor per landmark id, across every keyframe
  * that ever observed it — so 2D-3D association stops depending on which
@@ -267,6 +291,8 @@ static void kf_slots_reset(void) {
     for (int i = 0; i < XR_MAP_MAX_KF; i++) KF_FREE[i] = i;
     CUR_SEG = 0;
     atomic_fetch_add(&LMB_EPOCH, 1);   /* bank voided: map thread clears it */
+    memset(SEQV, 0, sizeof SEQV);
+    memset(LAST_STORE_Q, 0, sizeof LAST_STORE_Q);
 }
 __attribute__((constructor)) static void kf_slots_ctor(void) { kf_slots_reset(); }
 
@@ -904,6 +930,33 @@ static int tightsub_on(void) {
         const char *e = getenv("XR_TIGHTSUB");
         v = (e && *e && *e != '0') ? 1 : 0;
         if (v) LOGI("session map: TIGHT SUB-GATE confirmations ON");
+    }
+    return v;
+}
+static int seqvote_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_SEQVOTE");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: SEQUENCE VOTING (reloc retrieval) ON");
+    }
+    return v;
+}
+static int desperate_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_DESPERATE");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: DESPERATION WIDENING (long-LOST retrieval) ON");
+    }
+    return v;
+}
+static int rotstore_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_ROTSTORE");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: ROTATION-GATED storage ON");
     }
     return v;
 }
@@ -2342,9 +2395,22 @@ static void process_keyframe(void) {
     if (react_active && search_iv > REACT_IV_NS) search_iv = REACT_IV_NS;
     int do_search = last_search_ns == 0 || q_only ||
                     work.ts - last_search_ns >= search_iv;
+    /* XR_ROTSTORE: heading change > ~25 deg unlocks an early store (at a
+     * third of the interval) — turns get viewpoint coverage */
+    int rot_kick = 0;
+    if (rotstore_on() && LAST_STORE_Q[0] != 0.f &&
+        work.ts - snap_last_store_ns >= STORE_MIN_INTERVAL_NS / 3) {
+        float qi[4], qe[4], rv[3];
+        qconj(LAST_STORE_Q, qi);
+        qmul(qi, work.q, qe);
+        rv_from_q(qe, rv);
+        rot_kick = rv[0]*rv[0] + rv[1]*rv[1] + rv[2]*rv[2] >
+                   ROTSTORE_RAD * ROTSTORE_RAD;
+    }
     int may_store = mapping && !q_only && !lost && !shake_freeze &&
                     work.n_lm >= STORE_MIN_LM &&
-                    work.ts - snap_last_store_ns >= STORE_MIN_INTERVAL_NS;
+                    (work.ts - snap_last_store_ns >= STORE_MIN_INTERVAL_NS ||
+                     rot_kick);
     if (!do_search && !may_store) {
         /* nothing heavy to do this pass, but a state TRANSITION (e.g. a shake
          * flipping HEALTHY->LOST on a pass that neither searches nor stores)
@@ -2523,8 +2589,16 @@ static void process_keyframe(void) {
     if (relocsweep_on() && relocalizing) use_vpr = 0;
     if (use_vpr) {
         memset(vpr_pick, 0, (size_t)lim);
-        float bs[VPR_SHORTLIST];
-        int bi[VPR_SHORTLIST], bn = 0;
+        /* XR_DESPERATE: long-LOST (or one-shot probes) widen the shortlist
+         * and lower the similarity floor — every extra candidate is a PnP
+         * try we can afford when the alternative is staying lost */
+        int wide = desperate_on() &&
+                   (q_only || (lost && LOST_SINCE_NS &&
+                               work.ts - LOST_SINCE_NS > DESPERATE_AFTER_NS));
+        const int shortn = wide ? VPR_SHORTLIST_MAX : VPR_SHORTLIST;
+        const float minsim = wide ? DESPERATE_MIN_SIM : VPR_MIN_SIM;
+        float bs[VPR_SHORTLIST_MAX];
+        int bi[VPR_SHORTLIST_MAX], bn = 0;
         for (int i = 0; i < lim; i++) {
             /* pre-VPR or other-model keyframes stay always-eligible */
             if (!KFA(i).has_emb || KFA(i).emb_dim != work.emb_dim) {
@@ -2535,12 +2609,20 @@ static void process_keyframe(void) {
             float s = 0;
             for (int d = 0; d < work.emb_dim; d++) s += a[d] * b[d];
             if (s > vpr_top) vpr_top = s;
-            if (s < VPR_MIN_SIM) continue;
-            int pos = bn < VPR_SHORTLIST
-                          ? bn : (s > bs[VPR_SHORTLIST - 1] ? VPR_SHORTLIST - 1
-                                                            : -1);
+            /* XR_SEQVOTE: rank by score + decayed history (use the OLD
+             * vote, then fold this search's score in) */
+            if (seqvote_on() && relocalizing) {
+                int sl = KFO[i];
+                float sv = SEQV[sl];
+                SEQV[sl] = sv * SEQV_DECAY + s;
+                s += SEQV_W * sv;
+            }
+            if (s < minsim) continue;
+            int pos = bn < shortn
+                          ? bn : (s > bs[shortn - 1] ? shortn - 1
+                                                     : -1);
             if (pos < 0) continue;
-            if (bn < VPR_SHORTLIST) bn++;
+            if (bn < shortn) bn++;
             while (pos > 0 && bs[pos - 1] < s) {
                 bs[pos] = bs[pos - 1];
                 bi[pos] = bi[pos - 1];
@@ -3109,6 +3191,7 @@ static void process_keyframe(void) {
      * through and insert the contaminated frame. */
     if (may_store) {
         LAST_STORE_NS = work.ts;
+        memcpy(LAST_STORE_Q, work.q, sizeof LAST_STORE_Q);
         if (KF_N == XR_MAP_MAX_KF) {
             /* evict the least-recently-useful keyframe: free its SLOT and drop
              * it from the time order. Only the small order array shifts (a few
@@ -3151,6 +3234,7 @@ static void process_keyframe(void) {
             for (int i = 1; i < KF_N; i++)
                 if (KFA(i).last_used < KFA(vpos).last_used) vpos = i;
             }
+            SEQV[KFO[vpos]] = 0;                   /* vote dies with the slot */
             KF_FREE[KF_FREE_N++] = KFO[vpos];      /* slot returns to the pool */
             memmove(&KFO[vpos], &KFO[vpos + 1],
                     sizeof(int) * (size_t)(KF_N - 1 - vpos));
