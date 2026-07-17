@@ -33,7 +33,8 @@ bursts, or on event (closures/welds). The universal duty cap
 |---|---|---|---|
 | XFeat dense A8W8 | search/store pass | 3.6 ms | 1-1.5 ms |
 | dense C tail + anchors | same pass | ~3 ms CPU | ~2 ms CPU |
-| MegaLoc embed fp16 (W8 proj) | same pass | — | 18-35 ms |
+| **EigenPlaces-512 embed (DEPLOY PICK, 2026-07-17)** | same pass | 16.6 ms [M] | **~5 ms** |
+| MegaLoc embed fp16 (large-map profile only) | same pass | — | 18-35 ms |
 | LighterGlue L6 (4.6 MB) | ≤4 calls/search (budgeted) | — | 1-3 ms/call |
 | retrieval dots 200×8448 | per search | <1 ms | <1 ms |
 | COVKEEP/PGO/weld/bank | event | µs-ms | µs-ms |
@@ -91,11 +92,12 @@ Memory (user budget: <1 GB is fine → no pressure):
 
 | item | size |
 |---|---|
-| MegaLoc fp16 resident | ~457 MB (W8 option: ~230 MB) |
+| EigenPlaces resident (deploy) | **~45 MB** |
+| MegaLoc fp16 (large-map profile, optional) | ~457 MB |
 | XFeat + LG6 + LAS2 models | ~9 MB |
 | session map @200 kf | 11 MB (float emb) |
 | ORT/QNN arenas | ~50-100 MB |
-| **total** | **~530-580 MB** ✓ |
+| **total** | **~120-180 MB** (deploy) / +457 MB with the MegaLoc profile ✓ |
 
 int8 stored embeddings (planned) are for map CAPACITY, not fit:
 6 MB @200 kf → 29 MB @1000 kf (the eviction-horizon fix for
@@ -120,7 +122,7 @@ building-scale sessions; drives needed 2000).
 ## 6. Pre-push gate (pipeline freeze criteria)
 
 Ship to device when: (a) the augmentation A/B verdicts land (SEQVOTE /
-DESPERATE / ROTSTORE), (b) blackout-reloc baselines published, (c) the
+DESPERATE / ROTSTORE), (b) blackout-reloc baselines published, (b2) fleet v14 'full' (EigenPlaces+SEQVOTE) confirms the retrieval flip at fleet scale, (c) the
 stage-3 landmark-factor decision is made (build vs defer), and (d) the
 harness exit-hang fix lands (also affects on-device shutdown paths).
 Freeze = a fleet-validated env set baked into the APK defaults.
