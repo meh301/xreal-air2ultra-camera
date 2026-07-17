@@ -1405,9 +1405,13 @@ static int burstpnp_on(void) {
 #define LBURST_MIN_FRAMES 3            /* minimum worth solving at expiry */
 #define LBURST_WINDOW_NS 2500000000ull /* hard window from the anchor */
 #define LBURST_IDLE_NS 1000000000ull   /* give up if verification stops */
+#define LBURST_REFRACT_NS 20000000000ull /* min gap between polishes */
+#define LBURST_MIN_DEV_M 0.10f         /* polish floor: below this the
+                                        * estimator handles it better */
 static struct {
+    int armed;                         /* set on an APPLIED closure only */
     int active, nframes, n;
-    uint64_t t0_ns, last_ns;
+    uint64_t t0_ns, last_ns, done_ns;
     float aq[4], ap[3];                /* anchor frame's raw odom pose */
     float S[LBURST_MAX][3];            /* odom-frame query bearings */
     float P[LBURST_MAX][3];            /* session-frame landmark points */
@@ -4485,7 +4489,11 @@ static void process_keyframe(void) {
     if (loopburst_on() && !relocalizing && !PROBE_REQ) {
         int lb_verified = best_i >= 0 && best_nin >= VER_MIN_PAIRS && lb_n > 0;
         if (lb_verified) {
-            if (!LBURST.active) {
+            /* one-shot: only an APPLIED closure arms a pass, and never
+             * within the refractory window of the previous polish */
+            if (!LBURST.active && LBURST.armed &&
+                work.ts - LBURST.done_ns > LBURST_REFRACT_NS) {
+                LBURST.armed = 0;
                 LBURST.active = 1;
                 LBURST.n = 0;
                 LBURST.nframes = 0;
@@ -4550,23 +4558,46 @@ static void process_keyframe(void) {
                     rv_from_q(qe2, rv2);
                     float angf = sqrtf(rv2[0] * rv2[0] + rv2[1] * rv2[1] +
                                        rv2[2] * rv2[2]);
-                    /* polish, not a snap: must disagree beyond noise but
-                     * stay small — a large fused delta means the burst and
-                     * the applied closure disagree structurally: distrust */
-                    if (devf > 0.04f && devf < 1.5f && angf < 0.26f) {
-                        memcpy(CORR.q, Dfq, sizeof CORR.q);
-                        memcpy(CORR.p, Dfp, sizeof CORR.p);
-                        CORR.gen++;
-                        LAST_SNAP_NS = work.ts;
-                        LOGI("session map: LOOPBURST refined registration "
-                             "%.2fm %.0fdeg over %d frames (%d/%d joint "
-                             "inliers)", (double)devf,
-                             (double)(angf * 57.3f), LBURST.nframes, jin,
-                             LBURST.n);
-                    } else if (devf >= 0.04f) {
+                    /* polish, not a snap: must disagree beyond the floor
+                     * (below it the estimator handles residue better than
+                     * a CORR step) but stay small — a large fused delta
+                     * means the burst and the applied closure disagree
+                     * structurally: distrust */
+                    LBURST.done_ns = work.ts;
+                    if (devf > LBURST_MIN_DEV_M && devf < 1.5f &&
+                        angf < 0.26f) {
+                        /* same channel arbitration as the closure system:
+                         * inside the TIGHT envelope the estimator owns the
+                         * correction (a CORR step would double-correct
+                         * against the absorbing prior) — post the fused D
+                         * as a prior; beyond it, step CORR directly */
+                        if (TIGHT && devf <= TIGHT_MAX_DEV_M &&
+                            angf <= TIGHT_MAX_DEV_ANG) {
+                            tight_post_prior(Dfq, Dfp, work.ts);
+                            LOGI("session map: LOOPBURST refined "
+                                 "registration %.2fm %.0fdeg over %d frames "
+                                 "(%d/%d joint inliers) — posted to VIO",
+                                 (double)devf, (double)(angf * 57.3f),
+                                 LBURST.nframes, jin, LBURST.n);
+                        } else {
+                            memcpy(CORR.q, Dfq, sizeof CORR.q);
+                            memcpy(CORR.p, Dfp, sizeof CORR.p);
+                            CORR.gen++;
+                            LAST_SNAP_NS = work.ts;
+                            LOGI("session map: LOOPBURST refined "
+                                 "registration %.2fm %.0fdeg over %d frames "
+                                 "(%d/%d joint inliers) — CORR stepped",
+                                 (double)devf, (double)(angf * 57.3f),
+                                 LBURST.nframes, jin, LBURST.n);
+                        }
+                    } else if (devf >= LBURST_MIN_DEV_M) {
                         LOGI("session map: LOOPBURST fused D REJECTED "
                              "(%.2fm %.0fdeg, %d/%d)", (double)devf,
                              (double)(angf * 57.3f), jin, LBURST.n);
+                    } else {
+                        LOGI("session map: LOOPBURST registration CONFIRMED "
+                             "(%.2fm residual over %d frames)",
+                             (double)devf, LBURST.nframes);
                     }
                 }
             }
@@ -5084,6 +5115,16 @@ static void process_keyframe(void) {
                     LOOP_STATS.matches = best_m;
                     VER_LAST.outcome = VOUT_APPLIED;
                 }
+                /* XR_LOOPBURST v2: ARM the one-shot multi-frame
+                 * verification pass on an APPLIED closure only — v1
+                 * cycled continuously on revisit stretches (room1: 17
+                 * CORR micro-steps/run) and fought the estimator
+                 * (corr2/3/5 +15-26cm). One refinement per applied
+                 * closure, fresh accumulator. */
+                LBURST.armed = 1;
+                LBURST.active = 0;
+                LBURST.n = 0;
+                LBURST.nframes = 0;
             }
 
             /* AR flash + panel marker: the winner's landmarks in session */
