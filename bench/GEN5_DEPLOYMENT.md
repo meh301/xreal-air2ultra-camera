@@ -1,0 +1,126 @@
+# Gen 5 Deployment Plan — FULL pipeline on Snapdragon 8 Elite Gen 5
+
+Cost evaluation and device-day validation plan for shipping the FULL
+configuration (dense-XFeat + MegaLoc + LighterGlue-L6 + COVKEEP + PGO +
+LMDESC + TIGHT/TIGHTSUB) plus the depth pipeline to the Xperia 1 VIII
+(SM8850, Hexagon V81 HTP, fp16-native HMX, larger VTCM,
+`qnn_context_priority` preemption).
+
+**Status: device IN HAND (2026-07-17). Deliberate strategy: finish the
+pipeline improvement arc on the bench first; push to device once the
+config freezes.** Companion docs: `bench/EVALUATION.md` (scoring rules),
+`bench/ITERATIONS.md` (verdicts).
+
+Confidence marks: **[M]** measured (SD888 HTP / bench container),
+**[P]** projected (888→Gen5 median scaling ×3.55, measured across model
+classes; V79 AI Hub anchors per the verified VPR research). Every [P]
+becomes [M] during device-day validation (§5).
+
+---
+
+## 1. Architectural cost shape
+
+The AR frame loop (camera → Basalt VIO → render, 30/60 fps) inherits
+ONE new cost from FULL: TIGHT's pose priors — a few float terms inside
+an optimization Basalt already runs. Everything else executes on the
+map thread at keyframe/search cadence (~0.5-2 Hz) as duty-cycled NPU
+bursts, or on event (closures/welds). The universal duty cap
+(bench-validated) bounds map-thread cost at ~25% of its own cadence.
+
+## 2. Mapping stack budget
+
+| component | trigger | SD888 [M] | Gen 5 [P] |
+|---|---|---|---|
+| XFeat dense A8W8 | search/store pass | 3.6 ms | 1-1.5 ms |
+| dense C tail + anchors | same pass | ~3 ms CPU | ~2 ms CPU |
+| MegaLoc embed fp16 (W8 proj) | same pass | — | 18-35 ms |
+| LighterGlue L6 (4.6 MB) | ≤4 calls/search (budgeted) | — | 1-3 ms/call |
+| retrieval dots 200×8448 | per search | <1 ms | <1 ms |
+| COVKEEP/PGO/weld/bank | event | µs-ms | µs-ms |
+| LMDESC direct fallback | LOST-only, duty-capped | 20-40 ms CPU | ~10 ms |
+| TIGHT/TIGHTSUB priors | per confirmed closure | ~0 | ~0 |
+
+**One search+store pass ≈ 25-45 ms at 0.5-1 Hz → 2-4% NPU duty,
+~50-100 mW average.** (Reference: the measured EVA tracking service runs
+385 mW continuously.)
+
+## 3. Depth budget — the largest NPU consumer
+
+| config | SD888 [M] | Gen 5 [P] | note |
+|---|---|---|---|
+| LAS2 A16W8 @192 (shipped) | 32 ms HVX | 9-12 ms | d1 0.819, corr .987 |
+| LAS2 A8W8 @192 | 13 ms HMX | ~4 ms | **unusable — A8 quant broke depth quality** |
+| LAS2 fp16 @192 | n/a (V68 int-only) | **5-8 ms** | V81 fp16 HMX: HMX speed w/o quant damage — expected strict win, validate FIRST |
+| LAS2 fp16 @256-288 | — | 12-20 ms | ~1.4× finer disparity |
+| LAS2 fp16 @384 | — | 25-55 ms | near-native; 2× better far-field depth (err ∝ Z²/fB); needs V81 VTCM headroom |
+
+Stereo cost scales ~4-8× per resolution doubling (cost volume =
+pixels × disparity range; range grows with width). V68's 4 MB VTCM
+forced tiling at 192; V81's larger scratchpad is the enabler for 288+.
+
+**Two-tier depth architecture (recommended):**
+1. Base: fp16 @192 at 10-30 Hz (occlusion continuity) — 6-15% duty.
+2. Keyframe tier: @384 at 1-2 Hz aligned with map keyframes (meshing,
+   stereo-verified landmarks via the dormant depth-calibration plumbing)
+   — 3-8% duty.
+3. Guided/joint-bilateral upsampling of tier-1 against full-res gray
+   (1-2 ms GPU/CPU) — recovers most of the perceived 192→384 edge
+   quality for free.
+
+Total depth: **~10-20% duty, ~0.2-0.5 W.** EVA offload option: if the
+Qualcomm EVA SDK entitlement lands, DFS does 720p60 <8 ms @385 mW [M]
+on the dedicated block — the whole depth line leaves the HTP.
+
+## 4. Totals & memory
+
+| consumer | NPU duty | avg power |
+|---|---|---|
+| depth (two-tier) | 10-20% | 0.2-0.5 W |
+| FULL mapping stack | 2-4% | 0.05-0.1 W |
+| AR perception extras (hands 1.5 ms, det 0.9 ms, 6DoF 2-3 ms, seg 2 ms — feasibility study) | 5-10% | 0.1-0.2 W |
+| **total** | **≤~35%** | **~0.4-0.8 W** |
+
+**AR verdict: comfortable.** ≥65% NPU headroom for applications, an
+untouched frame loop, and V81 priority preemption keeps latency-critical
+models ahead of MegaLoc's 25 ms bursts. What FULL buys the AR layer:
+78% mean cold-reloc at cm precision, submap self-healing (post-weld
+15 cm vs VIO 72 cm after 15 s blindness), drift ≤ VIO everywhere,
+TUM-long beyond OKVIS2+LC.
+
+Memory (user budget: <1 GB is fine → no pressure):
+
+| item | size |
+|---|---|
+| MegaLoc fp16 resident | ~457 MB (W8 option: ~230 MB) |
+| XFeat + LG6 + LAS2 models | ~9 MB |
+| session map @200 kf | 11 MB (float emb) |
+| ORT/QNN arenas | ~50-100 MB |
+| **total** | **~530-580 MB** ✓ |
+
+int8 stored embeddings (planned) are for map CAPACITY, not fit:
+6 MB @200 kf → 29 MB @1000 kf (the eviction-horizon fix for
+building-scale sessions; drives needed 2000).
+
+## 5. Device-day validation order
+
+1. **LAS2 fp16 @192 vs shipped A16W8** — expect strict win (speed AND
+   quality); becomes the new depth base.
+2. XFeat dense fp16/A8 on V81 + dense-tail timings; anchors on-device.
+3. MegaLoc fp16 bring-up (322², W8 projection) — the big [P]→[M];
+   validate the 18-35 ms window and DDR behavior.
+4. LighterGlue L6 static-shape fp16 port (exists as ONNX; low risk).
+5. VTCM ceiling: LAS2 @288/@384 feasibility.
+6. `qnn_context_priority` replaces the `XR_NPU_GATE` mutex (V68-only
+   workaround); per-run clock votes → burst/balanced (the 888
+   overheating lesson — never `sustained_high` for periodic loads).
+7. Whole-stack soak: depth two-tier + FULL map + VIO, thermals + power
+   rails, then the on-device kidnap walk (the original field-failure
+   scenario, now with submaps).
+
+## 6. Pre-push gate (pipeline freeze criteria)
+
+Ship to device when: (a) the augmentation A/B verdicts land (SEQVOTE /
+DESPERATE / ROTSTORE), (b) blackout-reloc baselines published, (c) the
+stage-3 landmark-factor decision is made (build vs defer), and (d) the
+harness exit-hang fix lands (also affects on-device shutdown paths).
+Freeze = a fleet-validated env set baked into the APK defaults.
