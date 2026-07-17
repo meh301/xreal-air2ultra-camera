@@ -1134,3 +1134,16 @@ no gain anywhere. Huber stays (okvis2-parity curiosity closed).
 - fleet17 DRIVES leg fired on .58 (composition-insensitive: scene gate
   blocks folds at km scale regardless of FOLD_PX). tumvi/euroc legs
   HELD until s5b verdict fixes the composition.
+
+### x FLEET17 DRIVES LEG (.58) — fz17 composition VALIDATED at km scale
+- drive1 1.19%/1.20% path (okvis2 3.2-3.3%, ~3x lead holds), drive2
+  3.35% (okvis2 DIVERGES both modes), drive3 1.88% (best ours yet;
+  okvis2 1.22 keeps drive3). map==vio everywhere -> scene gate blocked
+  ALL folds at km scale, exactly as designed. Full stack (LMFACT/
+  LMTRACK/LMMARG+AUTO/MULTIHYP) causes zero harm outdoors.
+- Drive reloc sweep 0/30, 0/30, 4/30(13.3% drive3): NOT a regression —
+  prior pad rounds were eig 0-10%, meg 0-3%. Outdoor single-frame reloc
+  stays matching-bound (60m+ ranges kill LighterGlue inliers). Parked.
+  fz17d drive3 13.3% is the best outdoor reloc number recorded.
+- score_drives.py extended: optional scan dir for <seq>_<arm>_rN_<tr>.tum.
+- RELOC17 leg (rl17/rb17, corr1/3/4+mag2, n=3, 24 runs) fired on .58.

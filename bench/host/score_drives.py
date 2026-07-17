@@ -8,6 +8,7 @@ import numpy as np
 
 ROOT = Path(r"F:\slam_bench\results\drivepull")
 EIG = Path(r"F:\slam_bench\results\lmfs_pull\drive_reloc_pad_eig")
+SCAN = Path(sys.argv[1]) if len(sys.argv) > 1 else None
 
 def load(p):
     a = np.loadtxt(p)
@@ -39,6 +40,10 @@ for seq in ["drive1_city", "drive2_city", "drive3_country"]:
         p = ROOT / f"{seq}_okvis_lc{lc}.final.tum"
         if p.exists():
             cands.append((f"{seq} okvis2 lc{lc}", p))
+    if SCAN is not None:
+        for p in sorted(SCAN.glob(f"{seq}_*_r*_*.tum")):
+            arm_tr = p.stem[len(seq) + 1:]  # e.g. fz17d_r1_map
+            cands.append((f"{seq} {arm_tr}", p))
     for name, p in cands:
         try:
             est = load(p)
