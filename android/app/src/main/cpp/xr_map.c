@@ -4482,7 +4482,12 @@ static void process_keyframe(void) {
              * alignment in the ring (not just the one PENDING_D slot) —
              * recovers the true revisit when aliased frames interleave and
              * would otherwise overwrite the single pending hypothesis. */
-            if (!confirmed && multihyp_on()) {
+            /* LOST-ONLY: the ring's measured gain is recovery recall
+             * (probes); in healthy mapping it admits extra closures that
+             * hurt aliased spaces (mag2 +11cm in the safety fleet). Any
+             * alignment beats being lost; healthy tracking keeps the
+             * strict single-slot 2-frame agreement. */
+            if (!confirmed && multihyp_on() && lost) {
                 for (int h = 0; h < MHYP_N && !confirmed; h++) {
                     if (!MHYP[h].have || MHYP[h].ts >= work.ts ||
                         work.ts - MHYP[h].ts >= CONFIRM_WINDOW_NS)
