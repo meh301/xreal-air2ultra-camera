@@ -1176,3 +1176,31 @@ no gain anywhere. Huber stays (okvis2-parity curiosity closed).
   g8/g8s6/g999s6) on discriminating seqs; xr_map.c gains
   XR_LMMARG_SCENE_M runtime override + scene_ema telemetry (3233768)
   to diagnose leakage directly.
+
+### x STAGE-5C (.15, n=5, 175 runs) + SCENE-EMA TELEMETRY — MECHANISM CORRECTED
+- TELEMETRY (decisive): corridors sit at scene_ema 1.9-2.4m ==
+  rooms 2.1-2.8m (XFeat landmarks live on the NEAR WALLS; median range
+  reads wall distance, not corridor length). mag1 5.7m med (78% <8m!),
+  mag2 9.7m med (42% <8m). CONSEQUENCES: (a) the depth gate NEVER
+  blocked corridor folds — every "gate saved the corridor" read (incl.
+  s5-round corr1 arb-29-vs-auto-6) was corridor bimodal noise between
+  BEHAVIORALLY IDENTICAL arms; (b) the gate only dose-reduces
+  magistrale (6m: mag1 29%, mag2 22% fold-permission) — hence 6m arms
+  kept 5/5 mag2 runs (46.6/49.1 vs off 72.2) where 8m arms lose runs.
+- Replicated-across-rounds signals (the only trustworthy ones):
+  ROOMS dose-response 3x (off 13/18 -> 4px 10-11/16 -> 8px 8/14 ->
+  no-arb 6.5-7.5/10.6-11.7 = full prize); CORR3 needs arb (8px good
+  9.1/10.8 in 3 of 4 draws, no-arb poison 29.5/32.4 both rounds);
+  MAG2 factor arms >= off both rounds, 6m eliminates run-loss.
+  corr1/corr5/mag1: noise (control itself flips 12<->30, loses runs).
+- Ideal per-regime: rooms no-arb, corridors 8px, halls blocked. Depth
+  can't split rooms|corridors -> MAP EXTENT can (rooms <7m diagonal
+  forever, corridors >10m in seconds; huge margins, geometry not
+  benchmark fitting). BUILT: XR_LMMARG_ADAPT (39fc341) — room-class
+  persist batches ride sigma+1000, basalt stage-6 decodes and skips
+  arbitration per batch (patch_stage6.py; stage5.py archived too).
+- S5D FIRED (.15, 140 runs): s5off / g8s6 / ad(aptive) / g999s6.
+  Prediction: ad = rooms ~g999s6 + corr3 ~g8 + mag2 ~6m arms.
+- DRIVES n=3 (.58 done): medians drive1 1.44% (okvis2 3.32, every run
+  wins), drive2 3.35 (okvis2 diverges), drive3 1.88 (okvis2 1.22 keeps
+  it). Headline lead now variance-backed.
