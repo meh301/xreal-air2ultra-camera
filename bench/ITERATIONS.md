@@ -831,3 +831,21 @@ SUBSETS (vkfobs on 5 euroc seqs; azall on hunt seqs). NOTHING enters the
 freeze config on subset evidence alone: every keeper must be confirmed
 on the FULL 40-seq fleet (held-out seqs included) before adoption, and
 per-seq regressions > noise on held-out cells veto the keeper.
+
+### x RELOC FUNNEL AUDIT (user-driven): the hand-off defect is the NN
+prematch gate, NOT PnP. 450 probe frames/seq: 49-56%% die at bestm<24
+while verification passes 90-92%% once a candidate exists; accepted
+frames carry vprtop 0.86-0.92 (retrieval excellent). The weak matcher
+gatekept the strong one. FIX: XR_TRUSTVPR (c9c1917) — vprtop>=0.75
+forces the top-retrieval kf into candidates; LG+PnP arbitrate. A/B
+chained on .15. mag2 remains the aliasing case (41%% die at PnP,
+correctly; burst fusion is its lever).
+
+### x EDGEGRAPH v1: REJECTED on measurement (24.1 -> 35.1, corr2 87cm,
+mag2 diverged). Root cause is architectural: our LIVE pose couples to
+the map only via CORR — whole-chain relaxation moved the map under a
+live trajectory that never heard about it (OKVIS2 can relax everything
+because its live state IS in the graph). Also sub-gate edges at 1 Hz are
+self-drift-correlated (v9's lesson applies to edges) and 0.5m-soft DCS
+kept bad edges alive. v2 (76210b4): applied-closure admission only,
+phi=0.04, CORR re-derived from the relaxed tip. A/B chained after tv_ab.
