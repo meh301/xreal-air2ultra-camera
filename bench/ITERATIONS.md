@@ -864,3 +864,10 @@ LMIDX bank fallback fires 0.1-0.3x/run in mapping mode — kidnap-only
 value, keep but do not grow. ACTIONABLE COROLLARY: rooms are estimator-
 precision-bound like euroc -> port vkfobs to the tumvi config (chained
 on .58: vtbase vs vtkfobs, rooms1-6 + corr1/3).
+
+### x TRUSTVPR A/B (single-frame probes, means over 3 runs): KEEPER
+corr1 51->53, corr2 37.8->61.1 (+23.3, r@25 35->56), corr3 55->53 (noise),
+corr4 80->83, corr5 69->70, mag2 10->13. Mean over seqs 50.6 -> 55.7.
+No harm, precision intact — the funnel fix pays exactly where repetitive
+structure starves the NN prematch. Enters the freeze-confirmation set
+with BURSTPNP (they compose: burst pools what trustvpr admits).
