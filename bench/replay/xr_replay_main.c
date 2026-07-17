@@ -422,6 +422,14 @@ int main(int argc, char **argv) {
         while (have_imu && (uint64_t)imu.ts <= f_ts) {
             xr_slam_push_imu((uint64_t)imu.ts, imu.g, imu.a);
             imu_pushed++;
+            /* drain results DURING the imu burst. At 2000 Hz (drives) one
+             * inter-frame batch is ~100 BLOCKING pushes with no poll — if
+             * the estimator's out queue fills mid-burst, it stops
+             * consuming, the bounded imu queue fills, and push_imu wedges
+             * the whole pipeline (drive1's kf~1700 deadlock, 3/3 runs:
+             * every thread in futex_wait, main inside internal_push). */
+            if ((imu_pushed & 7) == 0)
+                xr_slam_poll_each(on_pose, &ctx, &scratch);
             have_imu = fread(&imu, 32, 1, f_imu) == 1;
         }
         if (fread(fr, (size_t)2 * XR_OW * XR_OH, 1, f_raw) != 1)
