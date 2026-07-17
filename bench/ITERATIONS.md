@@ -903,3 +903,10 @@ remaining ~2x to okvis2 raw VIO on MSD is beyond config tuning
 (frontend/motion-regime difference; frontier). FLEET v15 launched:
 fzbase (v14 cfg) vs fz15 (vkfobs all-configs + TRUSTVPR), full 40 seqs,
 corridors n=5, held-out seqs included — the freeze decision.
+
+### x KFCAP A/B (n=5): 400-KF CAP KEEPER for corridors — corr3 35.0->22.1
+AND its 2 diverged c200 runs vanish; corr1 -5, mag2 -6, corr2 -3 (noise),
+corr4 flat. The 200-cap eviction was discarding revisit anchors. RAM
+~+40-80MB, fine per Gen5 budget. Folded INTO fleet v15's fz15 arm
+(composition purity: fz15 = vkfobs-all-configs + TRUSTVPR + cap400);
+both fleet halves restarted with fz15 rebuilt, fzbase runs preserved.
