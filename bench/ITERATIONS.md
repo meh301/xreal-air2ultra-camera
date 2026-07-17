@@ -1281,3 +1281,17 @@ box+binary — acceptable for euroc/MSD (stable seqs; the within-round
 law was written for bimodal corridors), ledgered for honesty. fz18
 composition = s5e candidate (g99fl); veto path = edit F18 line before
 firing final.
+
+### x MAG10 POWER ROUND (.181, n=10, 80 runs) — HALLS CLEAR g99fl
+mag1: g99fl 90.0 (8/10 runs kept!) vs off 112.8 (7/10), adfl 104.8
+(6/10), adf 111.2 (6/10). mag2: g99fl 64.4 (8/10) ~= off 63.8 (7/10);
+adfl COLLAPSES to 3/10 runs. The fixed scene gate makes the factor
+stack hall-NEUTRAL-to-BETTER with improved run survival (16/20 vs
+14/20); arbitration variants are the fragile ones.
+=> COMPOSITION DECIDED pending held-out: fz18 = FB + LMFACT + LMTRACK
++ LMMARG + AUTO + SCENE_M=6 + FOLD_PX=999 + LMTRACK_PERSIST (no ADAPT,
+no arbitration; the depth gate is the single safety). Evidence: rooms
+full prize (s5e, low-noise, 3x dose-response lineage), corridors
+neutral (corr10 n=10), halls neutral-to-better (mag10 n=10).
+NOTE: reloc17 recall numbers predate stage-7 (mapping phase ran the
+buggy fold-everything stack) — finale re-measures reloc at fz18.
