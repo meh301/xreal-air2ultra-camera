@@ -615,3 +615,21 @@ ROTSTORE = REJECT at 200-kf cap (store churn eats coverage; revisit
 with big caps). Fleet v13 (TIGHTSUB validation) predates this verdict —
 SEQVOTE folds into the freeze config pending fulleig; the deploy env
 becomes FULL + XR_SEQVOTE=1.
+
+### x RETRIEVAL VERDICT: EIGENPLACES WINS INSIDE FULL — deploy pick flipped
+fulleig (EigenPlaces-512 in FULL+TIGHTSUB) vs MegaLoc counterparts:
+RELOC (vs augbase, same config): corr1 46.7/36.7, corr2 50/40, corr3
+43/43, corr4 100/66.7(!), corr5 60/56.7 — corridor mean 60.0 vs 48.7.
+ATE (vs utf, TIGHTSUB-confounded): corr1 22.8/33.9, corr5 15.3/42.6,
+slides2 30.2/42.1, rooms tie; ONLY magistrale2 regresses (51.1/45.7).
+Mechanism hypothesis: with LG6+anchors carrying verification, retrieval
+only needs DIVERSE nomination — the weaker 512-D embedding spreads the
+shortlist; MegaLoc concentrates confidently on look-alikes. MegaLoc
+keeps the LARGE-MAP profile (magistrale2-class, drives — pairs with
+XR_DESPERATE there).
+GEN5 IMPACT: retrieval 5ms / 45MB / 2KB-per-kf (from 25ms / 457MB /
+33KB) — total resident model memory ~60MB.
+FLEET v14 = THE FREEZE FLEET queued behind v13 on bench-1: arms bad /
+xdlg6(meg) / fullm(meg+SEQVOTE deploy-twin) / full(EIG+SEQVOTE = the
+deploy config). v14's full-vs-fullm is the definitive fleet-scale
+retrieval pair; v14 'full' median table = the APK freeze numbers.
