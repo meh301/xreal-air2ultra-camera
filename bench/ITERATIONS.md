@@ -734,3 +734,23 @@ With real dense descriptors (post-fc73042): drive3 3/30 verified (was
 on .58 after shipping xr_slam.c (stage-3 wrapper was .15-only — link
 error caught the gap). Site: results.json 3774 rows / 13 arms, clip grid
 in reloc.json, server on :8080 via .claude/launch.json (bench-site).
+
+### x LMFACT SIGMA SWEEP: strength does not unlock rooms — stage-3-at-
+closure-instants is SATURATED. lfs075/lfs125 aggregates 5.60/5.54 vs
+lfbase 5.60 (rooms flat everywhere, corridor2 harm at every sigma:
+21.5/26.0 vs 20.4). sigma=1.25 marginally best -> azmax carries it.
+The rooms attack now rides on LMTRACK (continuous posting) + LOCALBA
+(structure) in the aug matrix.
+
+### x DRIVE ATE with REAL descriptors (pad runs, single-run, vs OKVIS2):
+drive1 10.6km: OURS 144m/1.35% vs okvis2 353m/3.32%, +LC 344m/3.23%
+  (2.4x BETTER on the longest drive; padeig d1 = redo on .181)
+drive2 10.8km: ours eig 451m/4.18% meg 339m/3.14%; okvis2 lc0 DIVERGED
+  (25,408 km ATE — total failure), lc1 pending
+drive3 5.1km: okvis2 61.9m/1.22% beats ours (meg 101m/1.99%, eig 172m).
+eig-vs-meg drive deltas are single-run VIO variance — do not over-read.
+Net: we hold 1.4-4.2%% everywhere; OKVIS2 catastrophically fails drive2.
+
+### x hunt15 queued (.15 idle after sweep): aug_long (azbase/azall/azmax
+x corr1/3/4+mag2+slides2 — the big-space harm gate for LMTRACK/LOCALBA)
++ fb_drives (FARBEAR outdoor reloc, drive2/3 eig — the feature's target).
