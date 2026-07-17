@@ -604,3 +604,14 @@ relaunched on a verified 2000-kf binary (BSS 128MB vs 29 = define in).
 Caught by: round 2's log showing kf#199 under -DXR_MAP_MAX_KF=2000 — the
 trust checklist (EVALUATION.md 9) gains: verify a define took effect by
 an OBSERVABLE (BSS size, log constant echo) before believing its A/B.
+
+### x AUGMENTATION A/B VERDICT (iteration container, 6 seqs x 5 arms x 30 probes)
+Mean recall: base 45.0 / SEQVOTE 48.9 / DESPERATE 38.4 / ROTSTORE 31.7 /
+all 38.3. SEQVOTE = KEEPER (wins 5/6: corr3 +10, corr4 +13, mag2 +6 —
+temporal voting works). DESPERATE = large-map profile ONLY (corr4
+67->30: wide+low-floor shortlist floods RANSAC with aliases; but mag2
++13 — the huge-space regime it was built for; stays in drive r4).
+ROTSTORE = REJECT at 200-kf cap (store churn eats coverage; revisit
+with big caps). Fleet v13 (TIGHTSUB validation) predates this verdict —
+SEQVOTE folds into the freeze config pending fulleig; the deploy env
+becomes FULL + XR_SEQVOTE=1.
