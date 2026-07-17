@@ -984,3 +984,13 @@ index (recall at scale, the last unbuilt lever), (2) time-to-relocalize
 latency metric in the rulebook + harness (unmeasured, AR-critical,
 differentiating), (3) multi-hypothesis reloc for aliased spaces (mag2),
 (4) thumbnail retention + learned verify (Gen6 watch list).
+
+### x STAGE-4 MARG-PERSISTENCE: THE BREAKTHROUGH (user-called hunch)
+lmoff/lmev/lmmg, rooms n=3 + corr2/5 n=5 same-round: rooms NEARLY HALVE
+(room1 13.1->6.4, room2 4.9->3.3, room3 5.6->3.3, room5 18.1->11.2),
+corridors IMPROVE (corr2 22.4->18.1, corr5 21.8->18.7), aggregate
+9.35 -> 5.02. The evaporating control (lmev~=lmoff) reproduces the old
+flatness exactly — mechanism validated end-to-end: post -> keyframe-
+anchored survival -> fold at kf-marg. Rooms gap vs okvis2+lc cut from
+4.5x to <3x in one change. FLEET v16 (fzbase vs fz16 = LMFACT+LMTRACK+
+LMMARG) launching for the held-out confirmation.
