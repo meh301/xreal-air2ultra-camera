@@ -1138,90 +1138,6 @@ static int depthfill_on(void) {
     }
     return v;
 }
-#define DF_PATCH 4                 /* 9x9 ZNCC window */
-#define DF_MAX_DISP 128
-#define DF_MIN_Z 1.0f
-#define DF_MIN_ZNCC 0.78f
-#define DF_MARGIN 0.06f
-static uint32_t DF_SYNTH_CTR;      /* map thread only */
-static int df_backfill(xr_kf *w, const uint8_t *L, const uint8_t *Rt) {
-    if (!STEREOG.set || !GEOM.have) return 0;
-    float maxz = VER_MAX_RANGE_M;
-    float mind = STEREOG.fx * STEREOG.base / maxz;
-    float maxd = STEREOG.fx * STEREOG.base / DF_MIN_Z;
-    if (maxd > DF_MAX_DISP) maxd = DF_MAX_DISP;
-    if (mind < 1.0f) mind = 1.0f;
-    int added = 0;
-    float Rq[9];
-    q2R(w->q, Rq);
-    for (int j = 0; j < w->n_kp && w->n_lm < XR_MAP_KP_PER_KF; j++) {
-        if (w->lm_of_kp[j] >= 0) continue;
-        int u = (int)(w->kp_uv[j][0] + 0.5f);
-        int v = (int)(w->kp_uv[j][1] + 0.5f);
-        if (u < DF_PATCH + (int)maxd || u >= XR_OW - DF_PATCH ||
-            v < DF_PATCH || v >= XR_OH - DF_PATCH)
-            continue;
-        /* left patch stats (9x9) */
-        float lsum = 0, lsum2 = 0;
-        for (int dy = -DF_PATCH; dy <= DF_PATCH; dy++)
-            for (int dx = -DF_PATCH; dx <= DF_PATCH; dx++) {
-                float px = (float)L[(v + dy) * XR_OW + u + dx];
-                lsum += px;
-                lsum2 += px * px;
-            }
-        const float NPX = (float)((2 * DF_PATCH + 1) * (2 * DF_PATCH + 1));
-        float lmean = lsum / NPX;
-        float lvar = lsum2 / NPX - lmean * lmean;
-        if (lvar < 25.0f) continue;            /* flat patch: unmatchable */
-        float lstd = sqrtf(lvar);
-        float best = -2, second = -2;
-        int bd = -1;
-        for (int d = (int)mind; d <= (int)maxd; d++) {
-            int ru = u - d;
-            float rsum = 0, rsum2 = 0, dot = 0;
-            for (int dy = -DF_PATCH; dy <= DF_PATCH; dy++)
-                for (int dx = -DF_PATCH; dx <= DF_PATCH; dx++) {
-                    float a = (float)L[(v + dy) * XR_OW + u + dx];
-                    float b = (float)Rt[(v + dy) * XR_OW + ru + dx];
-                    rsum += b;
-                    rsum2 += b * b;
-                    dot += a * b;
-                }
-            float rmean = rsum / NPX;
-            float rvar = rsum2 / NPX - rmean * rmean;
-            if (rvar < 16.0f) continue;
-            float z = (dot / NPX - lmean * rmean) / (lstd * sqrtf(rvar));
-            if (z > best) { second = best; best = z; bd = d; }
-            else if (z > second) second = z;
-        }
-        if (bd < 0 || best < DF_MIN_ZNCC || best - second < DF_MARGIN)
-            continue;
-        float dsub = (float)bd;                 /* TODO subpixel: adequate
-                                                 * for landmark seeding */
-        float z = STEREOG.fx * STEREOG.base / dsub;
-        float rc[3];
-        if (GEOM.unproject(w->kp_uv[j][0], w->kp_uv[j][1], rc)) continue;
-        if (rc[2] < 0.1f) continue;
-        float s = z / rc[2];
-        float pc[3] = { rc[0] * s, rc[1] * s, rc[2] * s };
-        float pb[3] = {
-            GEOM.R_ic[0] * pc[0] + GEOM.R_ic[1] * pc[1] +
-                GEOM.R_ic[2] * pc[2] + GEOM.p_ic[0],
-            GEOM.R_ic[3] * pc[0] + GEOM.R_ic[4] * pc[1] +
-                GEOM.R_ic[5] * pc[2] + GEOM.p_ic[1],
-            GEOM.R_ic[6] * pc[0] + GEOM.R_ic[7] * pc[1] +
-                GEOM.R_ic[8] * pc[2] + GEOM.p_ic[2],
-        };
-        int li = w->n_lm++;
-        w->lm_id[li] = (int32_t)(0x40000000u | (DF_SYNTH_CTR++ & 0x3FFFFFFFu));
-        w->lm_xyz[li][0] = Rq[0] * pb[0] + Rq[1] * pb[1] + Rq[2] * pb[2] + w->p[0];
-        w->lm_xyz[li][1] = Rq[3] * pb[0] + Rq[4] * pb[1] + Rq[5] * pb[2] + w->p[1];
-        w->lm_xyz[li][2] = Rq[6] * pb[0] + Rq[7] * pb[1] + Rq[8] * pb[2] + w->p[2];
-        w->lm_of_kp[j] = li;
-        added++;
-    }
-    return added;
-}
 static int lmtrack_on(void) {
     static int v = -1;
     if (v < 0) {
@@ -3144,6 +3060,91 @@ static int pnp2_ransac_burst(const float (*s)[3], const float (*P)[3],
     Rz_out[6] = 0;  Rz_out[7] = 0;   Rz_out[8] = 1;
     memcpy(C_out, C, 3 * sizeof(float));
     return in;
+}
+
+#define DF_PATCH 4                 /* 9x9 ZNCC window */
+#define DF_MAX_DISP 128
+#define DF_MIN_Z 1.0f
+#define DF_MIN_ZNCC 0.78f
+#define DF_MARGIN 0.06f
+static uint32_t DF_SYNTH_CTR;      /* map thread only */
+static int df_backfill(xr_kf *w, const uint8_t *L, const uint8_t *Rt) {
+    if (!STEREOG.set || !GEOM.have) return 0;
+    float maxz = VER_MAX_RANGE_M;
+    float mind = STEREOG.fx * STEREOG.base / maxz;
+    float maxd = STEREOG.fx * STEREOG.base / DF_MIN_Z;
+    if (maxd > DF_MAX_DISP) maxd = DF_MAX_DISP;
+    if (mind < 1.0f) mind = 1.0f;
+    int added = 0;
+    float Rq[9];
+    q2R(w->q, Rq);
+    for (int j = 0; j < w->n_kp && w->n_lm < XR_MAP_KP_PER_KF; j++) {
+        if (w->lm_of_kp[j] >= 0) continue;
+        int u = (int)(w->kp_uv[j][0] + 0.5f);
+        int v = (int)(w->kp_uv[j][1] + 0.5f);
+        if (u < DF_PATCH + (int)maxd || u >= XR_OW - DF_PATCH ||
+            v < DF_PATCH || v >= XR_OH - DF_PATCH)
+            continue;
+        /* left patch stats (9x9) */
+        float lsum = 0, lsum2 = 0;
+        for (int dy = -DF_PATCH; dy <= DF_PATCH; dy++)
+            for (int dx = -DF_PATCH; dx <= DF_PATCH; dx++) {
+                float px = (float)L[(v + dy) * XR_OW + u + dx];
+                lsum += px;
+                lsum2 += px * px;
+            }
+        const float NPX = (float)((2 * DF_PATCH + 1) * (2 * DF_PATCH + 1));
+        float lmean = lsum / NPX;
+        float lvar = lsum2 / NPX - lmean * lmean;
+        if (lvar < 25.0f) continue;            /* flat patch: unmatchable */
+        float lstd = sqrtf(lvar);
+        float best = -2, second = -2;
+        int bd = -1;
+        for (int d = (int)mind; d <= (int)maxd; d++) {
+            int ru = u - d;
+            float rsum = 0, rsum2 = 0, dot = 0;
+            for (int dy = -DF_PATCH; dy <= DF_PATCH; dy++)
+                for (int dx = -DF_PATCH; dx <= DF_PATCH; dx++) {
+                    float a = (float)L[(v + dy) * XR_OW + u + dx];
+                    float b = (float)Rt[(v + dy) * XR_OW + ru + dx];
+                    rsum += b;
+                    rsum2 += b * b;
+                    dot += a * b;
+                }
+            float rmean = rsum / NPX;
+            float rvar = rsum2 / NPX - rmean * rmean;
+            if (rvar < 16.0f) continue;
+            float z = (dot / NPX - lmean * rmean) / (lstd * sqrtf(rvar));
+            if (z > best) { second = best; best = z; bd = d; }
+            else if (z > second) second = z;
+        }
+        if (bd < 0 || best < DF_MIN_ZNCC || best - second < DF_MARGIN)
+            continue;
+        float dsub = (float)bd;                 /* TODO subpixel: adequate
+                                                 * for landmark seeding */
+        float z = STEREOG.fx * STEREOG.base / dsub;
+        float rc[3];
+        if (GEOM.unproject(w->kp_uv[j][0], w->kp_uv[j][1], rc)) continue;
+        if (rc[2] < 0.1f) continue;
+        float s = z / rc[2];
+        float pc[3] = { rc[0] * s, rc[1] * s, rc[2] * s };
+        float pb[3] = {
+            GEOM.R_ic[0] * pc[0] + GEOM.R_ic[1] * pc[1] +
+                GEOM.R_ic[2] * pc[2] + GEOM.p_ic[0],
+            GEOM.R_ic[3] * pc[0] + GEOM.R_ic[4] * pc[1] +
+                GEOM.R_ic[5] * pc[2] + GEOM.p_ic[1],
+            GEOM.R_ic[6] * pc[0] + GEOM.R_ic[7] * pc[1] +
+                GEOM.R_ic[8] * pc[2] + GEOM.p_ic[2],
+        };
+        int li = w->n_lm++;
+        w->lm_id[li] = (int32_t)(0x40000000u | (DF_SYNTH_CTR++ & 0x3FFFFFFFu));
+        w->lm_xyz[li][0] = Rq[0] * pb[0] + Rq[1] * pb[1] + Rq[2] * pb[2] + w->p[0];
+        w->lm_xyz[li][1] = Rq[3] * pb[0] + Rq[4] * pb[1] + Rq[5] * pb[2] + w->p[1];
+        w->lm_xyz[li][2] = Rq[6] * pb[0] + Rq[7] * pb[1] + Rq[8] * pb[2] + w->p[2];
+        w->lm_of_kp[j] = li;
+        added++;
+    }
+    return added;
 }
 
 /* XR_LMDESC direct relocalization: match the query's descriptors straight
