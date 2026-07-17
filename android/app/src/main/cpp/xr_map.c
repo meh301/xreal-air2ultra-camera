@@ -1467,7 +1467,7 @@ static void pgo_deform(int anchor, const float wq[4], const float wp[3],
  * validated by timestamp (slot reuse after eviction would silently
  * re-target an edge). */
 #define EG_MAX 64
-#define EG_DCS_PHI 0.25f               /* DCS kernel, metres^2 */
+#define EG_DCS_PHI 0.04f               /* DCS kernel (0.2m soft), m^2 */
 static struct {
     int16_t slot_ref, slot_tip;
     uint64_t ts_ref, ts_tip;           /* validity: slot-reuse detection */
@@ -4327,17 +4327,11 @@ static void process_keyframe(void) {
                     if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                 }
-                /* XR_EDGEGRAPH: sub-gate closures are verified geometry
-                 * too — remember them as edges and relax the chain at a
-                 * bounded cadence (this is the corridors 1-4 lever) */
-                if (edgegraph_on()) {
-                    static uint64_t EG_LAST_NS;   /* map thread only */
-                    eg_admit(best_i, work.q, work.p, Dq, Dp, nin);
-                    if (work.ts - EG_LAST_NS > 1000000000ull) {
-                        EG_LAST_NS = work.ts;
-                        eg_relax();
-                    }
-                }
+                /* (EDGEGRAPH v1 admitted sub-gate closures here at 1 Hz —
+                 * self-drift-correlated edges compounded and the corridor
+                 * A/B REGRESSED; edges now come only from APPLIED
+                 * closures, the same discipline the pose prior learned
+                 * in v9.) */
                 /* XR_LOCALBA: a VERIFIED sub-gate closure is the rooms
                  * regime — refine the window even though no correction
                  * applies (rate-limited; structure is what improves). */
@@ -4500,10 +4494,8 @@ static void process_keyframe(void) {
                         if (lmtrack_on())
                             lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                     }
-                    if (edgegraph_on()) {
+                    if (edgegraph_on())
                         eg_admit(best_i, work.q, work.p, Dq, Dp, nin);
-                        eg_relax();
-                    }
                     tight_applied = 1;
                     LAST_SNAP_NS = work.ts;
                     PENDING_D.have = 0;
@@ -4527,6 +4519,17 @@ static void process_keyframe(void) {
                     if (edgegraph_on()) {
                         eg_admit(best_i, work.q, work.p, Dq, Dp, nin);
                         eg_relax();
+                        /* the chain moved: re-derive the closure correction
+                         * from the RELAXED tip so the live pose follows the
+                         * graph instead of decohering from it (v1 lesson —
+                         * session = CORR o odom, and nobody else tells CORR
+                         * the map moved) */
+                        if (KF_N >= 1) {
+                            xr_kf *tip = &KFA(KF_N - 1);
+                            float qi[4], pi[3];
+                            pose_invert(tip->q, tip->p, qi, pi);
+                            pose_compose(tip->qc, tip->pc, qi, pi, Dq, Dp);
+                        }
                     }
                     CLOUD_DIRTY = 1;
                     LOGI("session map: LOOP kf#%d CLOSURE %.2fm %.0fdeg "
