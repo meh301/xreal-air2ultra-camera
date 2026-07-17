@@ -767,3 +767,11 @@ genuinely far, bearing approx invalid -> biased yaw votes (azfb arm on
 .58 isolates). FARBEAR outdoors: drive2 0->1/30, drive3 3->1/30 —
 neutral, no recall breakthrough. Awaiting .58 matrix (rooms/euroc/msd)
 before freeze-config promotion of azall.
+
+### x BURSTPNP A/B (clip-15 wake-up, single runs): KEEPER
+vs clip15 baseline: corr1 53.3->50.0 (r@10 40->43), corr3 56.7->63.3
+(r@10 43->50), mag2 23.3->30.0 with med_err 0.22->0.10m. Mean recall
++3.3pts, mean r@10 +5.6pts, accuracy up across the board — the joint
+solve fired on 14/18/9 of 30 probes. The wake-up story is now: 15-frame
+burst + joint offset-aware 4-DOF consensus. Enters the freeze validation
+round together with PGO4DOF.
