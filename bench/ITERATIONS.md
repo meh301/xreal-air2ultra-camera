@@ -642,3 +642,19 @@ vs r4-meg (bench-2 chain), identical 2000-kf/60m/DESPERATE/RELOCSWEEP
 config. Deploy decision holds only if EigenPlaces doesn't collapse
 outdoors; otherwise the pick becomes PROFILE-SPLIT (eig indoor / meg
 large-map+outdoor — both models resident is fine within the 1GB budget).
+
+### x FLEET V13 (TIGHTSUB at scale): NOT confirmed — big-space harm signal
+v13-full (meg+FULL+TIGHTSUB) vs v12-full: euroc/rooms/msd ties; LONG
+30.98 vs 27.04 — regression at the noise-floor edge, concentrated in
+BIG spaces (corr5 45.0/15.8, mag2 78.7/58.5, mag1 252.8/195.9) while
+corridor2 keeps the subgate win (20.0). Mechanism: in large aliased
+spaces, wrong sub-gate matches occasionally 2-frame-confirm and post
+bad priors — the exact failure the deviation gate existed to block.
+DECISION RULE for the freeze: v14-full (eig+SEQVOTE+TIGHTSUB) long vs
+v12's 27.0 decides — if ≥~31 again, TIGHTSUB drops from the deploy env
+(SEQVOTE stays); refinement candidate: distance-guarded TIGHTSUB (post
+sub-gate priors only for matches within corridor-scale range).
+OUTDOOR PAIR (partial): eig drives 0/30 with ALL mitigations; funnel
+dies at DESCRIPTOR MATCHING (bestm 22-31 vs indoor 60-120) — retrieval
+moot; drive single-frame reloc is a different problem domain; indoor
+deploy flip unaffected. Meg twin pending for the airtight pair.
