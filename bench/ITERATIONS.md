@@ -961,3 +961,26 @@ round; the rulebook inherits this.
 (exit _exit, imu-burst polling, tail-flush, /32 padding, ledger telem).
 vkfobs vetoed; LMFACT/LMTRACK/LOCALBA/FARBEAR/EDGEGRAPH remain flags,
 off. Remaining frontiers: marg-persistent factors, MSD frontend gap.
+
+### x VMOD (moderated tuning): half the rooms gain, FULL corridor harm
+(room6 1.80 vs 1.51/2.07; corr1 24.4, mag2 70.3 — same as the vetoed
+extreme; cross-round comparator caveat applies but the dose-response
+shape is unambiguous). Conclusion: the keyframing tradeoff is REGIME-
+BINARY, not dose-graded — no uniform setting gets the rooms prize.
+
+### FRONTIER (designed, parked): ADAPTIVE KEYFRAMING — legitimate (not
+overfitting) iff switched on an online-observable causal variable:
+median triangulated landmark depth (rooms <5m, corridors/outdoor deeper)
+— mechanism: fixed window + denser KFs = less per-KF baseline = costs
+parallax only in DEEP scenes. Threshold from a parallax-angle target
+(first principles, NOT tuned to benchmark splits); validated per-regime
+held-out. Needs a basalt runtime-setter patch (kf policy fields are
+static config today). Expected prize ~0.5-0.7cm on rooms — parked in
+favour of the reloc moat per user strategy.
+
+### STRATEGY (user): uniform behaviour everywhere -> the moat is
+RELOCALIZATION. Remaining reloc levers, in order: (1) XR_INVIDX inverted
+index (recall at scale, the last unbuilt lever), (2) time-to-relocalize
+latency metric in the rulebook + harness (unmeasured, AR-critical,
+differentiating), (3) multi-hypothesis reloc for aliased spaces (mag2),
+(4) thumbnail retention + learned verify (Gen6 watch list).
