@@ -849,3 +849,18 @@ because its live state IS in the graph). Also sub-gate edges at 1 Hz are
 self-drift-correlated (v9's lesson applies to edges) and 0.5m-soft DCS
 kept bad edges alive. v2 (76210b4): applied-closure admission only,
 phi=0.04, CORR re-derived from the relaxed tip. A/B chained after tv_ab.
+
+### x STAGE-3 FLATNESS ROOT-CAUSED (activity audit of matrix logs):
+azlt/azall posted ~236 factor batches/run, LOCALBA fired ~55x/run — the
+mechanisms were LIVE and the ATE still did not move. Two causes: (a) in
+low-drift regimes the factor 3D comes from a map the same VIO built
+minutes earlier — the factors pull toward where the estimator already
+is, BY CONSTRUCTION; (b) our basalt patch applies factors in optimize()
+but never folds them into the marginalization prior — the information
+EVAPORATES when the frame margs out (OKVIS2 persists reobservation info
+through marginalization; that is the room-regime mechanism we lack).
+Real fix = marg-persistent factors (deep basalt patch, frontier). Also:
+LMIDX bank fallback fires 0.1-0.3x/run in mapping mode — kidnap-only
+value, keep but do not grow. ACTIONABLE COROLLARY: rooms are estimator-
+precision-bound like euroc -> port vkfobs to the tumvi config (chained
+on .58: vtbase vs vtkfobs, rooms1-6 + corr1/3).
