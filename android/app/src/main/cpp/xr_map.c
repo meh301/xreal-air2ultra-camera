@@ -1031,6 +1031,50 @@ static int farbear_on(void) {
 #ifndef LMFACT_MAX
 #define LMFACT_MAX 32               /* factors per frame (basalt-side cap) */
 #endif
+/* XR_LMMARG_AUTO — depth-keyed scene-scale gate for the permanent fold
+ * (the adaptive-profile item): running median landmark range, EMA'd over
+ * stored keyframes. Rooms sit at 2-4 m, corridors 4-6, big halls 8-25 —
+ * the fold is only earned in scenes whose scale says aliasing risk is
+ * low. Online-observable, causal (aliasing scales with space size),
+ * threshold from geometry not benchmark splits. */
+#ifndef LMMARG_MAX_SCENE_M
+#define LMMARG_MAX_SCENE_M 8.0f
+#endif
+static float SCENE_DEPTH_EMA;          /* map thread only */
+static int lmmarg_auto_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LMMARG_AUTO");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LMMARG scene-scale auto-gate ON");
+    }
+    return v;
+}
+static int fltcmp(const void *a, const void *b) {
+    float d = *(const float *)a - *(const float *)b;
+    return (d > 0) - (d < 0);
+}
+/* update the scene-depth statistic from a stored keyframe's landmarks */
+static void scene_depth_update(const xr_kf *kf) {
+    if (kf->n_lm < 8) return;
+    static float rr[XR_MAP_KP_PER_KF];  /* map thread only */
+    int n = 0;
+    for (int l = 0; l < kf->n_lm && n < XR_MAP_KP_PER_KF; l++) {
+        float dx = kf->lm_xyz[l][0] - kf->p[0];
+        float dy = kf->lm_xyz[l][1] - kf->p[1];
+        float dz = kf->lm_xyz[l][2] - kf->p[2];
+        rr[n++] = sqrtf(dx * dx + dy * dy + dz * dz);
+    }
+    qsort(rr, (size_t)n, sizeof(float), fltcmp);
+    float med = rr[n / 2];
+    SCENE_DEPTH_EMA = SCENE_DEPTH_EMA <= 0 ? med
+                    : 0.9f * SCENE_DEPTH_EMA + 0.1f * med;
+}
+/* fold permission by scene scale (always 1 when the auto-gate is off) */
+static int lmmarg_scene_ok(void) {
+    if (!lmmarg_auto_on()) return 1;
+    return SCENE_DEPTH_EMA > 0 && SCENE_DEPTH_EMA < LMMARG_MAX_SCENE_M;
+}
 #ifndef LMMARG_MIN_NIN
 #define LMMARG_MIN_NIN 10          /* inlier floor to earn a permanent fold */
 #endif
@@ -4584,7 +4628,8 @@ static void process_keyframe(void) {
                 if (lmfact_on() && lf_n > 0) {
                     lmfact_post(lf_uv, lf_ps, lf_n, work.ts,
                                 nin >= LMMARG_MIN_NIN &&
-                                vpr_alias_margin > LMMARG_ALIAS_MARGIN);
+                                vpr_alias_margin > LMMARG_ALIAS_MARGIN &&
+                                lmmarg_scene_ok());
                     if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                 }
@@ -4755,7 +4800,8 @@ static void process_keyframe(void) {
                     if (lmfact_on() && lf_n > 0) {
                         lmfact_post(lf_uv, lf_ps, lf_n, work.ts,
                                 nin >= LMMARG_MIN_NIN &&
-                                vpr_alias_margin > LMMARG_ALIAS_MARGIN);
+                                vpr_alias_margin > LMMARG_ALIAS_MARGIN &&
+                                lmmarg_scene_ok());
                         if (lmtrack_on())
                             lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                     }
@@ -5007,6 +5053,7 @@ static void process_keyframe(void) {
         atomic_store(&KF_COUNT_PUB, KF_N);
         CLOUD_DIRTY = 1;
         if (invidx_on()) ivx_insert_kf(slot, &KF[slot]);
+        scene_depth_update(&KF[slot]);
         LOGI("session map: kf#%d stored (%d landmarks, %d kps, seg=%d)",
              KF_N - 1, work.n_lm, work.n_kp, CUR_SEG);
     }
