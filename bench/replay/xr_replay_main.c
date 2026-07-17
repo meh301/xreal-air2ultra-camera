@@ -14,6 +14,7 @@
 #include <inttypes.h>
 #include <math.h>
 #include <stdint.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -604,6 +605,10 @@ int main(int argc, char **argv) {
             float pq[4], pp[3];
             int inl = 0, ok = 0;
             long fi = fi0;
+            /* time-to-relocalize: per-probe solver latency + cumulative
+             * time to the FIRST verified frame within the clip */
+            double lat_sum_ms = 0, ttv_ms = -1;
+            int lat_n = 0;
             for (int c = 0; c < reloc_clip; c++) {
                 long fc = fi0 + c;
                 fseeko(f_raw, (off_t)fc * XR_OW * XR_OH * 2, SEEK_SET);
@@ -621,6 +626,8 @@ int main(int argc, char **argv) {
                     gq = vq[bv];
                 }
                 int cok;
+                struct timespec xt0, xt1;
+                clock_gettime(CLOCK_MONOTONIC, &xt0);
                 static long bv0;           /* clip start's vio index */
                 if (use_burst && reloc_clip > 1 && bv >= 0) {
                     if (c == 0) bv0 = bv;
@@ -633,6 +640,11 @@ int main(int argc, char **argv) {
                 } else {
                     cok = xr_map_probe(pimg, gq, cq, cp, &cinl);
                 }
+                clock_gettime(CLOCK_MONOTONIC, &xt1);
+                lat_sum_ms += (double)(xt1.tv_sec - xt0.tv_sec) * 1e3 +
+                              (double)(xt1.tv_nsec - xt0.tv_nsec) / 1e6;
+                lat_n++;
+                if (cok && ttv_ms < 0) ttv_ms = lat_sum_ms;
                 if (cok && cinl > inl) {
                     ok = 1;
                     inl = cinl;
@@ -662,13 +674,15 @@ int main(int argc, char **argv) {
                 for (long j = 1; j < mn; j++)
                     if (fabs(mts[j] - t) < fabs(mts[best] - t)) best = j;
                 printf("RELOC k=%d frame=%ld ok=%d inl=%d err_m=%.3f "
-                       "exp=%.3f,%.3f,%.3f got=%.3f,%.3f,%.3f\n",
+                       "exp=%.3f,%.3f,%.3f got=%.3f,%.3f,%.3f "
+                       "lat_ms=%.0f ttv_ms=%.0f\n",
                        k, fi, ok, inl, (double)err,
                        mn ? (double)mp[best][0] : 0.0,
                        mn ? (double)mp[best][1] : 0.0,
                        mn ? (double)mp[best][2] : 0.0,
                        ok ? (double)pp[0] : 0.0, ok ? (double)pp[1] : 0.0,
-                       ok ? (double)pp[2] : 0.0);
+                       ok ? (double)pp[2] : 0.0,
+                       lat_n ? lat_sum_ms / lat_n : -1.0, ttv_ms);
             }
         }
         /* summary: recall + median error + recall@0.25m/@0.10m */

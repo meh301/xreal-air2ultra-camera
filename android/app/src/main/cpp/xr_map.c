@@ -1111,6 +1111,97 @@ static struct {
  * funnel audit: 49-56% of corridor probe frames died at bestm<24 while
  * verification passed 90%+ once a candidate existed — the weak matcher
  * was gatekeeping the strong one (LighterGlue never saw those frames). */
+/* XR_INVIDX — inverted index over LSH signatures of XFeat descriptors:
+ * the DBoW structural advantage. Retrieval by shared-signature VOTES
+ * covers the whole store with no shortlist truncation; while
+ * relocalizing, the top-voted keyframes JOIN the scan set. 16-bit
+ * signatures (sign of 16 fixed random projections), buckets hold
+ * (slot, gen) pairs; slot generations invalidate evicted entries. */
+#define IVX_BITS 16
+#define IVX_BUCKETS (1 << IVX_BITS)
+#define IVX_CAP 24                     /* entries per bucket (ring) */
+#define IVX_TOP 8                      /* voted keyframes to add */
+static struct {
+    int16_t slot[IVX_BUCKETS][IVX_CAP];
+    uint8_t gen[IVX_BUCKETS][IVX_CAP];
+    uint8_t n[IVX_BUCKETS];            /* ring fill */
+    uint8_t head[IVX_BUCKETS];
+} IVX;                                  /* ~3.3 MB static */
+static uint8_t IVX_SLOT_GEN[XR_MAP_MAX_KF];
+static float IVX_PROJ[IVX_BITS][64];   /* fixed random hyperplanes */
+static int ivx_init_done;
+static int invidx_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_INVIDX");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: INVERTED-INDEX retrieval ON");
+    }
+    return v;
+}
+static void ivx_init(void) {
+    if (ivx_init_done) return;
+    ivx_init_done = 1;
+    uint32_t s = 0x1DFACE5u;
+    for (int b = 0; b < IVX_BITS; b++)
+        for (int c = 0; c < 64; c++) {
+            s = s * 1664525u + 1013904223u;
+            IVX_PROJ[b][c] = ((float)(s >> 8) / 8388608.0f) - 1.0f;
+        }
+}
+static uint16_t ivx_sig(const int8_t d[64]) {
+    uint16_t sig = 0;
+    for (int b = 0; b < IVX_BITS; b++) {
+        float acc = 0;
+        for (int c = 0; c < 64; c++) acc += IVX_PROJ[b][c] * (float)d[c];
+        if (acc > 0) sig |= (uint16_t)(1u << b);
+    }
+    return sig;
+}
+/* index a stored keyframe's descriptors (map thread, after store) */
+static void ivx_insert_kf(int slot, const xr_kf *kf) {
+    if (kf->desc_type != DESC_XFEAT) return;
+    ivx_init();
+    IVX_SLOT_GEN[slot]++;
+    for (int j = 0; j < kf->n_kp; j++) {
+        uint16_t sg = ivx_sig(kf->desc.xfeat[j]);
+        uint8_t h = IVX.head[sg];
+        IVX.slot[sg][h] = (int16_t)slot;
+        IVX.gen[sg][h] = IVX_SLOT_GEN[slot];
+        IVX.head[sg] = (uint8_t)((h + 1) % IVX_CAP);
+        if (IVX.n[sg] < IVX_CAP) IVX.n[sg]++;
+    }
+}
+/* vote: query descriptors -> per-slot counts (exact bucket + 1-bit
+ * neighbours for recall); returns top-IVX_TOP slots by votes */
+static int ivx_vote(const xr_kf *w, int out_slots[IVX_TOP]) {
+    if (w->desc_type != DESC_XFEAT) return 0;
+    ivx_init();
+    static uint16_t votes[XR_MAP_MAX_KF];      /* map thread only */
+    memset(votes, 0, sizeof votes);
+    for (int j = 0; j < w->n_kp; j++) {
+        uint16_t sg = ivx_sig(w->desc.xfeat[j]);
+        for (int fb = -1; fb < IVX_BITS; fb++) {
+            uint16_t s2 = fb < 0 ? sg : (uint16_t)(sg ^ (1u << fb));
+            for (int e = 0; e < IVX.n[s2]; e++) {
+                int sl = IVX.slot[s2][e];
+                if (sl >= 0 && sl < XR_MAP_MAX_KF &&
+                    IVX.gen[s2][e] == IVX_SLOT_GEN[sl])
+                    votes[sl]++;
+            }
+        }
+    }
+    int ns = 0;
+    for (int it = 0; it < IVX_TOP; it++) {
+        int best = -1, bv = 3;                 /* min 4 votes to matter */
+        for (int sl = 0; sl < XR_MAP_MAX_KF; sl++)
+            if ((int)votes[sl] > bv) { bv = votes[sl]; best = sl; }
+        if (best < 0) break;
+        out_slots[ns++] = best;
+        votes[best] = 0;
+    }
+    return ns;
+}
 #ifndef TRUSTVPR_MIN
 #define TRUSTVPR_MIN 0.75f
 #endif
@@ -3954,6 +4045,16 @@ static void process_keyframe(void) {
          * restores worst-case recall at the cost the BAD arm already pays. */
         if (sweep) use_vpr = 0;
     }
+    /* XR_INVIDX: while relocalizing, the inverted index's top-voted
+     * keyframes JOIN the scan set before it runs — whole-store coverage
+     * without shortlist truncation, DBoW-style */
+    if (invidx_on() && relocalizing && use_vpr) {
+        int vs[IVX_TOP];
+        int nv = ivx_vote(&work, vs);
+        for (int v2 = 0; v2 < nv; v2++)
+            for (int i2 = scan_lo; i2 < scan_hi; i2++)
+                if (KFO[i2] == vs[v2]) { vpr_pick[i2] = 1; break; }
+    }
     for (int i = scan_lo; i < scan_hi; i++) {
         if (use_vpr && !vpr_pick[i]) continue;
         /* the spatial gate only means anything within OUR segment; other
@@ -4803,6 +4904,7 @@ static void process_keyframe(void) {
         }
         atomic_store(&KF_COUNT_PUB, KF_N);
         CLOUD_DIRTY = 1;
+        if (invidx_on()) ivx_insert_kf(slot, &KF[slot]);
         LOGI("session map: kf#%d stored (%d landmarks, %d kps, seg=%d)",
              KF_N - 1, work.n_lm, work.n_kp, CUR_SEG);
     }
