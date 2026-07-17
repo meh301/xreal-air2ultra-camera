@@ -1023,7 +1023,12 @@ static int farbear_on(void) {
 #define LMFACT_MAX 32               /* factors per frame (basalt-side cap) */
 #endif
 #ifndef LMMARG_MIN_NIN
-#define LMMARG_MIN_NIN 14          /* inliers to earn a PERMANENT marg fold */
+#define LMMARG_MIN_NIN 10          /* inlier floor to earn a permanent fold */
+#endif
+#ifndef LMMARG_ALIAS_MARGIN
+#define LMMARG_ALIAS_MARGIN 0.06f  /* VPR cosine margin vs the nearest
+                                    * distinct place; below this = aliased,
+                                    * the fold is unsafe (fleet16 mag1/2) */
 #endif
 #ifndef LMFACT_SIGMA_PX
 #define LMFACT_SIGMA_PX 2.0f        /* reprojection measurement std [px] */
@@ -3937,6 +3942,8 @@ static void process_keyframe(void) {
     int use_vpr = 0;                   /* retrieval pre-rank active */
     float vpr_top = 0;                 /* best cosine this search (ledger) */
     int vpr_top_i = -1;                /* its keyframe (XR_TRUSTVPR rider) */
+    float vpr_alias_margin = 1.0f;     /* top vs best distinct-place cosine:
+                                        * small = aliased, unsafe to fold */
     float bDq[4], bDp[3];
     /* XR_LMFACT: the WINNING candidate's inlier 2D-3D pairs (query pixel +
      * session-frame landmark), kept for the apply branch (map thread only) */
@@ -4046,6 +4053,25 @@ static void process_keyframe(void) {
             bi[pos] = i;
         }
         for (int t = 0; t < bn; t++) vpr_pick[bi[t]] = 1;
+        /* XR_LMMARG aliasing guard: cosine margin between the winner and
+         * the best SPATIALLY-DISTINCT shortlist keyframe. A small margin =
+         * repetitive structure (two places look alike) so a permanent fold
+         * would be a coin-flip; a large margin = unambiguous revisit, safe
+         * to persist. This is the online signal inlier-count cannot give:
+         * an aliased wrong place matches with HIGH inliers too. */
+        if (bn >= 1) {
+            vpr_alias_margin = 1.0f;   /* no distinct competitor = safe */
+            for (int t = 1; t < bn; t++) {
+                float dx = KFA(bi[t]).pc[0] - KFA(bi[0]).pc[0];
+                float dy = KFA(bi[t]).pc[1] - KFA(bi[0]).pc[1];
+                float dz = KFA(bi[t]).pc[2] - KFA(bi[0]).pc[2];
+                if (KFA(bi[t]).seg == KFA(bi[0]).seg &&
+                    dx * dx + dy * dy + dz * dz < COVIS_R_M * COVIS_R_M)
+                    continue;          /* same place, not a competitor */
+                vpr_alias_margin = bs[0] - bs[t];
+                break;
+            }
+        }
         gate = 0;                      /* retrieval supersedes the gate */
         /* Periodic full-recall sweep, same cadence the non-VPR path gets:
          * appearance embeddings alias on repetitive structure (corridor
@@ -4496,7 +4522,9 @@ static void process_keyframe(void) {
                  * revisits younger than 30s are exactly what the prior
                  * channel could never absorb. */
                 if (lmfact_on() && lf_n > 0) {
-                    lmfact_post(lf_uv, lf_ps, lf_n, work.ts, nin >= LMMARG_MIN_NIN);
+                    lmfact_post(lf_uv, lf_ps, lf_n, work.ts,
+                                nin >= LMMARG_MIN_NIN &&
+                                vpr_alias_margin > LMMARG_ALIAS_MARGIN);
                     if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                 }
@@ -4663,7 +4691,9 @@ static void process_keyframe(void) {
                      * NOT stepped in this branch, so the CORR⁻¹ transform
                      * inside matches the prior's E = CORR⁻¹∘D exactly). */
                     if (lmfact_on() && lf_n > 0) {
-                        lmfact_post(lf_uv, lf_ps, lf_n, work.ts, nin >= LMMARG_MIN_NIN);
+                        lmfact_post(lf_uv, lf_ps, lf_n, work.ts,
+                                nin >= LMMARG_MIN_NIN &&
+                                vpr_alias_margin > LMMARG_ALIAS_MARGIN);
                         if (lmtrack_on())
                             lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
                     }
