@@ -1003,3 +1003,19 @@ Missing cells = probe-phase TIMEOUTS at the bigger maps (latency metric
 will quantify; probe duty may need relief). sh20 REJECT (slower, no
 gain); tv065 insensitive (keep 0.75). ATE: kp256 21.6->18.1 subset —
 promote to held-out cell; cad02 mild (-1.6).
+
+### x FLEET16 MARG-PERSISTENCE: rooms CONFIRM held-out, big-space variance
+Full 40-seq: rooms 5.32->3.87 (-1.46, uniform: room1 -5.2, room5 -6.5),
+long 27.1->21.0 (-6.1), euroc/msd flat. 5/40 regress >2cm — BIMODAL on
+aliased big spaces: mag1 fz16=[43.5,130,137] vs base=[64,73]; corr3
+fz16=[7.7,8.1,21,32,42]. Root cause: a wrong-place closure now folds
+PERMANENTLY into the marg prior (can't evaporate) — poisons aliased
+spaces where the covis+2frame gate still passes wrong matches. Same
+class as EDGEGRAPH, milder. FIX: confidence-gate the FOLD (nin>=high)
+while keeping transient posts ungated. fz16.1 building.
+
+### x INVIDX: REJECT (redundant with TRUSTVPR). recall 81.1 vs 81.7, +3ms
+— TRUSTVPR already admits the top-VPR kf, no truncation gap left. But
+LATENCY METRIC = GOLD: single-frame time-to-relocalize ~55ms, ttv ~55-61
+(sub-frame; the AR-critical number nobody else measures). Keep the metric
++ rulebook it; drop the index.
