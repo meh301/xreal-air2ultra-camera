@@ -38,6 +38,16 @@
 #define IMG_H XR_OH      /* 640 */
 #define GRID_W (IMG_W / 8)   /* 60: dense desc/reliability grid */
 #define GRID_H (IMG_H / 8)   /* 80 */
+/* The dense backbone downsamples by 32 with floor, so a non-multiple-of-32
+ * input (4Seasons 800x400 -> 48 rows, not 50) shrinks the output grid and
+ * the shape check rejects EVERY frame. Zero-pad the inference input up to
+ * the next multiple of 32 and run all dense-grid math on the padded dims;
+ * when the frame is already clean (every indoor set, the device) the padded
+ * dims collapse to the plain ones and nothing changes. */
+#define IMG_PW (((IMG_W + 31) / 32) * 32)
+#define IMG_PH (((IMG_H + 31) / 32) * 32)
+#define PGRID_W (IMG_PW / 8)
+#define PGRID_H (IMG_PH / 8)
 
 /* u8 quantization of the A8W8 context's IO (ctx_xfeat_a8 meta.json). The
  * input scale is 0.998046875 ~= 1.0 with offset 0, so the raw 8-bit gray
@@ -65,12 +75,12 @@ static struct {
                               * dense: by role 0 scores, 1 feats, 2 rel */
     int cpu_dense;           /* CPU session is the dense export */
     int dense_in_ch;         /* input channels the dense graph traced (1/3) */
-    float input[3 * IMG_H * IMG_W];
+    float input[3 * IMG_PH * IMG_PW];
 
     /* last extract's dense descriptor map, for xr_xfeat_sample (map thread
      * only). kind: 0 none, 1 float (CPU dense), 2 u8 (NPU dense). */
     int dense_kind;
-    float dense_f[64 * GRID_H * GRID_W];
+    float dense_f[64 * PGRID_H * PGRID_W];
     uint8_t dense_u8[64 * GRID_H * GRID_W];
 
     /* NPU path: dense EPContext (score/desc/reliability maps, u8 IO) */
@@ -457,11 +467,12 @@ static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
  * ZERO (no clamp). The u8/NPU path keeps the device-validated
  * (p+0.5)/8-0.5 + clamp variant it has always used. */
 static void xfeat_sample_one(float x, float y, int8_t out[64]) {
-    const int plane = GRID_H * GRID_W;
     float v[64], nrm = 0;
-    if (X.dense_kind == 1) {
-        float gx = x * (float)GRID_W / (float)(IMG_W - 1) - 0.5f;
-        float gy = y * (float)GRID_H / (float)(IMG_H - 1) - 0.5f;
+    if (X.dense_kind == 1) {               /* CPU dense map: PADDED dims —
+                                              the model saw the padded image */
+        const int plane = PGRID_H * PGRID_W;
+        float gx = x * (float)PGRID_W / (float)(IMG_PW - 1) - 0.5f;
+        float gy = y * (float)PGRID_H / (float)(IMG_PH - 1) - 0.5f;
         float fxf = floorf(gx), fyf = floorf(gy);
         int x0 = (int)fxf, y0 = (int)fyf;
         float wx = gx - fxf, wy = gy - fyf;
@@ -471,14 +482,16 @@ static void xfeat_sample_one(float x, float y, int8_t out[64]) {
         int ys[4] = { y0, y0, y0 + 1, y0 + 1 };
         for (int c = 0; c < 64; c++) v[c] = 0;
         for (int t = 0; t < 4; t++) {
-            if (xs[t] < 0 || xs[t] >= GRID_W || ys[t] < 0 || ys[t] >= GRID_H)
+            if (xs[t] < 0 || xs[t] >= PGRID_W ||
+                ys[t] < 0 || ys[t] >= PGRID_H)
                 continue;                  /* grid_sample zeros padding */
-            const float *p = X.dense_f + ys[t] * GRID_W + xs[t];
+            const float *p = X.dense_f + ys[t] * PGRID_W + xs[t];
             for (int c = 0; c < 64; c++) v[c] += w[t] * p[c * plane];
         }
         for (int c = 0; c < 64; c++) nrm += v[c] * v[c];
     } else {                               /* u8 (NPU): offset -127, scale
                                               cancels in the L2 norm */
+        const int plane = GRID_H * GRID_W;
         float gx = (x + 0.5f) * 0.125f - 0.5f;
         float gy = (y + 0.5f) * 0.125f - 0.5f;
         if (gx < 0) gx = 0; if (gx > GRID_W - 1.001f) gx = GRID_W - 1.001f;
@@ -529,13 +542,24 @@ int xr_xfeat_can_sample(void) {
 
 static int xfeat_cpu_dense_extract(const uint8_t *img, float (*uv)[2],
                                    int8_t (*desc)[64], int max) {
-    const int plane_px = IMG_H * IMG_W;
-    for (int i = 0; i < plane_px; i++) X.input[i] = (float)img[i];
+    /* fill the (possibly padded) inference plane: real rows at the padded
+     * stride, zeros in the pad band (grid_sample's zero-padding convention
+     * matches, so padded taps contribute nothing) */
+    const int plane_px = IMG_PH * IMG_PW;
+    for (int y = 0; y < IMG_H; y++) {
+        const uint8_t *s = img + y * IMG_W;
+        float *d = X.input + y * IMG_PW;
+        for (int x = 0; x < IMG_W; x++) d[x] = (float)s[x];
+        for (int x = IMG_W; x < IMG_PW; x++) d[x] = 0.0f;
+    }
+    if (IMG_PH > IMG_H)
+        memset(X.input + IMG_H * IMG_PW, 0,
+               sizeof(float) * (size_t)(IMG_PH - IMG_H) * IMG_PW);
     if (X.dense_in_ch == 3) {
         memcpy(X.input + plane_px, X.input, sizeof(float) * plane_px);
         memcpy(X.input + 2 * plane_px, X.input, sizeof(float) * plane_px);
     }
-    const int64_t shape[4] = { 1, X.dense_in_ch, IMG_H, IMG_W };
+    const int64_t shape[4] = { 1, X.dense_in_ch, IMG_PH, IMG_PW };
     OrtValue *in = NULL;
     if (!ort_ok(X.api->CreateTensorWithDataAsOrtValue(
                     X.meminfo, X.input,
@@ -568,10 +592,10 @@ static int xfeat_cpu_dense_extract(const uint8_t *img, float (*uv)[2],
             X.api->GetDimensions(ti, d, nd < 4 ? nd : 4);
             X.api->ReleaseTensorTypeAndShapeInfo(ti);
         }
-        if (d[1] != 64 || d[2] != GRID_H || d[3] != GRID_W) {
+        if (d[1] != 64 || d[2] != PGRID_H || d[3] != PGRID_W) {
             LOGE("XFeat dense: feats %dx%dx%d != 64x%dx%d — wrong-resolution "
                  "model, extraction off this frame", (int)d[1], (int)d[2],
-                 (int)d[3], GRID_H, GRID_W);
+                 (int)d[3], PGRID_H, PGRID_W);
             for (int k = 0; k < 3; k++)
                 if (ov[k]) X.api->ReleaseValue(ov[k]);
             return -1;
@@ -580,11 +604,13 @@ static int xfeat_cpu_dense_extract(const uint8_t *img, float (*uv)[2],
     memcpy(X.dense_f, feats, sizeof X.dense_f);
     X.dense_kind = 1;
 
-    /* separable 5x5 max filter, row pass (float twin of the NPU tail) */
-    static float frowmax[IMG_H * IMG_W];
+    /* separable 5x5 max filter, row pass (float twin of the NPU tail).
+     * The score plane is PADDED-stride; peaks are only sought in the real
+     * region so the pad band never spawns a keypoint. */
+    static float frowmax[IMG_PH * IMG_PW];
     for (int y = 0; y < IMG_H; y++) {
-        const float *s = score + y * IMG_W;
-        float *r = frowmax + y * IMG_W;
+        const float *s = score + y * IMG_PW;
+        float *r = frowmax + y * IMG_PW;
         for (int x = 0; x < IMG_W; x++) {
             int x0 = x - 2 < 0 ? 0 : x - 2,
                 x1 = x + 2 >= IMG_W ? IMG_W - 1 : x + 2;
@@ -599,20 +625,21 @@ static int xfeat_cpu_dense_extract(const uint8_t *img, float (*uv)[2],
     const int plane_g = GRID_H * GRID_W;
     (void)plane_g;
     for (int y = XFN_BORDER; y < IMG_H - XFN_BORDER; y++) {
-        const float *s = score + y * IMG_W;
+        const float *s = score + y * IMG_PW;
         for (int x = XFN_BORDER; x < IMG_W - XFN_BORDER; x++) {
             float v = s[x];
             if (v < XFC_SCORE_THR) continue;
             float m = 0;
             for (int dy = -2; dy <= 2; dy++) {
-                float rm = frowmax[(y + dy) * IMG_W + x];
+                float rm = frowmax[(y + dy) * IMG_PW + x];
                 if (rm > m) m = rm;
             }
             if (v != m) continue;
             /* reliability via the same validated InterpolateSparse2d
-             * convention as descriptor sampling (zero-padded taps) */
-            float gx = (float)x * (float)GRID_W / (float)(IMG_W - 1) - 0.5f;
-            float gy = (float)y * (float)GRID_H / (float)(IMG_H - 1) - 0.5f;
+             * convention as descriptor sampling (zero-padded taps); the
+             * model saw the PADDED image, so its dims drive the mapping */
+            float gx = (float)x * (float)PGRID_W / (float)(IMG_PW - 1) - 0.5f;
+            float gy = (float)y * (float)PGRID_H / (float)(IMG_PH - 1) - 0.5f;
             float fxf = floorf(gx), fyf = floorf(gy);
             int x0g = (int)fxf, y0g = (int)fyf;
             float wx = gx - fxf, wy = gy - fyf;
@@ -622,10 +649,10 @@ static int xfeat_cpu_dense_extract(const uint8_t *img, float (*uv)[2],
             const int xs[4] = { x0g, x0g + 1, x0g, x0g + 1 };
             const int ys[4] = { y0g, y0g, y0g + 1, y0g + 1 };
             for (int t = 0; t < 4; t++) {
-                if (xs[t] < 0 || xs[t] >= GRID_W ||
-                    ys[t] < 0 || ys[t] >= GRID_H)
+                if (xs[t] < 0 || xs[t] >= PGRID_W ||
+                    ys[t] < 0 || ys[t] >= PGRID_H)
                     continue;
-                rl += wt[t] * rel[ys[t] * GRID_W + xs[t]];
+                rl += wt[t] * rel[ys[t] * PGRID_W + xs[t]];
             }
             float sc = v * rl;
             if (hn < max) {

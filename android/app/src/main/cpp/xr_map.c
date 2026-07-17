@@ -2842,11 +2842,15 @@ static void process_keyframe(void) {
     match_us = (unsigned)(map_mono_us() - t_match0);
     /* closure ledger: one line per search so retrieval recall/precision is
      * measurable offline (the benchmark GT-labels candidates post-hoc) */
-    if (use_vpr)
+    /* sweep-mode searches (XR_RELOCSWEEP) and probes must stay measurable
+     * too — the drive-reloc 0/30 was invisible because this line was
+     * vpr-gated. Extra fields go at the END (parsers key on the prefix). */
+    if (use_vpr || q_only || lost)
         LOGI("session map: LEDGER q=%llu vprtop=%.3f searched=%d cand=%d "
-             "bestm=%d n3=%d nin=%d lost=%d",
+             "bestm=%d n3=%d nin=%d lost=%d cov=%d%s%s",
              (unsigned long long)work.ts, (double)vpr_top, searched, ncand,
-             raw_best_m, any_pairs, best_nin, lost);
+             raw_best_m, any_pairs, best_nin, lost, best_covis,
+             use_vpr ? "" : " sweep", PROBE_REQ ? " probe" : "");
     }   /* end LOCK-FREE candidate search */
 
     /* ---- write / publish: LOCKED, but BRIEF (no match, no PnP). The VIO
