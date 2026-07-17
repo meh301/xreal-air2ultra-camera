@@ -1026,3 +1026,22 @@ LMTRACK re-posts stay transient (sigma sign, ABS for weight). Smoke:
 fz16.1 running (.15 rooms/corridors/mag, .58 msd) vs fleet16's ungated
 fz16 + fzbase cells — must KEEP rooms (room1 -5.2, room5 -6.5) while
 killing mag1 bimodal [43/130/137].
+
+### x LMMARG GATE PROGRESSION (the fold-safety problem):
+v1 nin>=14: did NOT fix big-space poison (mag2 52->104) — aliased wrong
+places have high inliers too. v2 ALIASING-MARGIN (VPR top vs nearest
+distinct-place cosine, >0.06): the causal signal; small margin = two
+places look alike = fold is a coin-flip. Room6 smoke: 123 folds still
+fire in clean space. fz16.2 held-out A/B running (.15 tumvi n=5 on
+aliased+winner seqs, .58 euroc+msd). This decides the freeze.
+
+### x REMAINING LIST — built this round, A/B pending container free:
+* XR_MULTIHYP (ee15fc9): 4-deep hypothesis ring so the true revisit
+  confirms against ANY recent same-place alignment, not just the single
+  PENDING_D slot an aliased frame overwrites. Flag-gated, default path
+  bit-identical, compiles clean. Targets magistrale2 reloc recall.
+* MSD frontend diagnostic (prepped): optical-flow sweep (levels 4, iters
+  10, denser grid) on the losing MSD seqs — isolates whether the 3-5x
+  raw-VIO drift vs OKVIS2 is KLT tracking on fast headset motion.
+Still unbuilt: Cauchy kernel, GravCal probe weighting, right-eye stereo
+probing, MASt3R oracle (Gen-6).
