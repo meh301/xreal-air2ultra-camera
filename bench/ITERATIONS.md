@@ -754,3 +754,16 @@ Net: we hold 1.4-4.2%% everywhere; OKVIS2 catastrophically fails drive2.
 ### x hunt15 queued (.15 idle after sweep): aug_long (azbase/azall/azmax
 x corr1/3/4+mag2+slides2 — the big-space harm gate for LMTRACK/LOCALBA)
 + fb_drives (FARBEAR outdoor reloc, drive2/3 eig — the feature's target).
+
+### x AUG-LONG HARM GATE: azall is a BIG-SPACE WINNER
+azbase/azall/azmax x (corr1/3/4, mag2, slides2) x3, freeze base:
+corr1 28.6->12.3, corr3 17.9->12.1, corr4+slides2 flat, mag2 50->66
+(2-run cell, highest-variance seq). Aggregate 28.6 -> 18.7. LOCALBA+
+LMTRACK+LMFACT actively HELPS corridors — the corridor-harm signal from
+lfonly-era closure-instant factors INVERTS once structure is refined and
+posting is continuous. azmax (adds sigma1.25+FARBEAR) is WORSE than
+azall (corr3 35.5) — suspect FARBEAR indoors: 6m-gate rejects are not
+genuinely far, bearing approx invalid -> biased yaw votes (azfb arm on
+.58 isolates). FARBEAR outdoors: drive2 0->1/30, drive3 3->1/30 —
+neutral, no recall breakthrough. Awaiting .58 matrix (rooms/euroc/msd)
+before freeze-config promotion of azall.
