@@ -27,7 +27,7 @@
  * keyframes through a 200-slot map — every probe location evicted before
  * probing = 0 percent reloc recall from capacity alone). */
 #ifndef XR_MAP_MAX_KF
-#define XR_MAP_MAX_KF 200
+#define XR_MAP_MAX_KF 400
 #endif
 enum {
     XR_MAP_KP_PER_KF = 200,    /* keypoints/descriptors per keyframe */

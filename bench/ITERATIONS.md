@@ -946,3 +946,18 @@ killed it. FREEZE BASE STAYS v14 config. Surviving keepers: TRUSTVPR +
 BURSTPNP (reloc scenario), infra fixes, cap400 (interaction cell
 pending). Follow-up: moderated point (kf_after 4, kp 0.75, obs 0.42)
 on rooms + the harmed/helped corridors, fzbase fleet cells as comparator.
+
+### x CAP400 INTERACTION CELL: does not rescue vetoed vkfobs (corr1 25.0,
+mag2 75.9 under fz15+c400) — but its same-round base-config keeper
+evidence stands, and with vkfobs vetoed THAT is the shipping
+composition. XR_MAP_MAX_KF default 200 -> 400 (rooms/euroc/msd never
+bind; corridors gain same-round; RAM +~40-80MB within Gen5 budget).
+Cross-round corridor variance note: fzbase corr1 swung 6.66 <-> 28
+between rounds at n=5 — corridor numbers are only comparable WITHIN a
+round; the rulebook inherits this.
+
+### FREEZE v15-FINAL = v14 flag set + XR_MAP_MAX_KF 400 + SNAP_MIN 0.50
++ TRUSTVPR & BURSTPNP (reloc/wake-up path) + the five pipeline fixes
+(exit _exit, imu-burst polling, tail-flush, /32 padding, ledger telem).
+vkfobs vetoed; LMFACT/LMTRACK/LOCALBA/FARBEAR/EDGEGRAPH remain flags,
+off. Remaining frontiers: marg-persistent factors, MSD frontend gap.
