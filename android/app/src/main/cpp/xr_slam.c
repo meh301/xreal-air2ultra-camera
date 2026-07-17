@@ -39,6 +39,8 @@ static struct {
     vit_result_t (*xreal_pose_prior)(vit_tracker_t *, const double[4], const double[3],
                                      double, double, int64_t);
     vit_result_t (*xreal_seed_kps)(vit_tracker_t *, int64_t, int, const float *, int);
+    vit_result_t (*xreal_lm_factors)(vit_tracker_t *, int64_t, int32_t,
+                                     const float *, const float *, int32_t, float);
 
     vit_tracker_t *tracker;
     atomic_int running;
@@ -143,10 +145,12 @@ int xr_slam_load(void) {
     /* optional XREAL tight-coupling extensions — absent on stock VIT libs */
     *(void **)&B.xreal_pose_prior = dlsym(B.dl, "vit_tracker_xreal_pose_prior");
     *(void **)&B.xreal_seed_kps = dlsym(B.dl, "vit_tracker_xreal_seed_keypoints");
+    *(void **)&B.xreal_lm_factors = dlsym(B.dl, "vit_tracker_xreal_landmark_factors");
     uint32_t maj = 0, min = 0, pat = 0;
     B.get_version(&maj, &min, &pat);
-    LOGI("Basalt VIT backend loaded, interface %u.%u.%u%s", maj, min, pat,
-         B.xreal_pose_prior ? " (+xreal pose prior)" : "");
+    LOGI("Basalt VIT backend loaded, interface %u.%u.%u%s%s", maj, min, pat,
+         B.xreal_pose_prior ? " (+xreal pose prior)" : "",
+         B.xreal_lm_factors ? " (+lm factors)" : "");
     return 1;
 }
 
@@ -164,6 +168,20 @@ int xr_slam_pose_prior(const float E_q_xyzw[4], const float E_p[3],
     return B.xreal_pose_prior(B.tracker, q, p, (double)sigma_t_m,
                               (double)sigma_r_rad,
                               (int64_t)expiry_t_ns) == VIT_SUCCESS;
+}
+
+/* Stage-3 map->VIO coupling: post re-observed map landmarks as fixed-3D
+ * reprojection factors on frame ts_ns (see xr_slam.h). Returns 1 if
+ * delivered, 0 when the tracker is down, -1 when the backend lacks the
+ * extension (stock libbasalt keeps working — the caller just gets -1). */
+int xr_slam_landmark_factors(uint64_t ts_ns, int cam, const float *uv,
+                             const float *xyz_odom, int n, float sigma_px) {
+    if (!B.xreal_lm_factors) return -1;
+    if (!B.tracker || !uv || !xyz_odom || n <= 0 ||
+        !atomic_load_explicit(&B.running, memory_order_acquire))
+        return 0;
+    return B.xreal_lm_factors(B.tracker, (int64_t)ts_ns, cam, uv, xyz_odom,
+                              n, sigma_px) == VIT_SUCCESS;
 }
 
 /* Detector unification: post external keypoint seeds (u,v interleaved,
