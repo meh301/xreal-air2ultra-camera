@@ -1332,3 +1332,23 @@ reloc re-measure (rl18/rb18). Drives banked at n=3.
   NEXT-ARC candidates: post-weld joint refinement of the re-entry
   against stored landmarks (LOCALBA machinery exists), multi-closure
   fusion at return, subpixel PnP refinement.
+
+### ✓✓ FINALE COMPLETE — fz18 across the entire program (2026-07-18)
+EuRoC+MSD wave (.58, within-box waves, frozen binary): fz18 SAFE on all
+25 seqs, helps where closures exist: MH01 7.03->4.65, MH02 6.88->6.08,
+MH04 8.94->7.37, MOO01 25.9->20.5, rest neutral (MOO13 27.9->32.1
+inside its historical spread). Aggregate 6.78->6.08.
+PROGRAM SCOREBOARD AT CLOSE (vs okvis2+lc, site canonical):
+- TUM-VI long 24.4 vs 31.8 (OURS; their corridors-1-4 fortress stands,
+  our robustness wins corr5/mag/slides — they blow up 101/180/160)
+- TUM-VI rooms 3.9 vs 1.20 (gap halved by factor stack)
+- EuRoC 6.08 vs 3.82; MSD ~6 vs 2.29 (calibration-class, documented)
+- 4Seasons drives n=3: 1.44%/3.35%/1.88% vs 3.32/DIVERGED/1.22
+- Wake-up: burst 99-100% corridors r@10 90-96%, mag2 85.6%, ~55ms;
+  OKVIS2 DNF (gap deadlock all 6 arms)
+- fz18 uniform: ZERO regressions on 40 seqs; run-survival improves in
+  halls. Site refreshed: 32164 rows, reloc18 tab, 580 trajectories.
+NEXT ARC (documented, not started in anger): XR_LOOPBURST — corridor
+return-registration via multi-frame joint solve (autopsy: single rigid
+~60cm residual; single-frame PnP depth-axis weakness; machinery =
+BURST accumulator + pnp2_ransac_burst over the confirm window).
