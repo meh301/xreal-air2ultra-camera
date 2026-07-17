@@ -1137,6 +1137,17 @@ static float lmmarg_room_ext(void) {
 static int lmmarg_room_class(void) {
     return MAP_EXT_INIT && map_extent_diag() < lmmarg_room_ext();
 }
+/* XR_LMTRACK_PERSIST: LMTRACK re-posts are fold-eligible too (scene-
+ * gated at the call site; arbitration class decided in lmfact_post) */
+static int lmtrack_persist_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LMTRACK_PERSIST");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LMTRACK persist (fold-eligible re-posts) ON");
+    }
+    return v;
+}
 #ifndef LMMARG_MIN_NIN
 #define LMMARG_MIN_NIN 10          /* inlier floor to earn a permanent fold */
 #endif
@@ -4996,7 +5007,12 @@ static void process_keyframe(void) {
             tn++;
         }
         if (tn >= LMT_MIN_MATCH) {
-            lmfact_post(tuv, tps, tn, work.ts, 0);  /* re-match: transient only */
+            /* XR_LMTRACK_PERSIST: fold the continuous-coverage factors
+             * too (rooms love it — the s5d "accidental" g999s6 edge was
+             * exactly these folding). Scene-gated like closure persists;
+             * room-class no-arb / corridor-class arb via lmfact_post. */
+            lmfact_post(tuv, tps, tn, work.ts,
+                        lmtrack_persist_on() && lmmarg_scene_ok());
             LMT.until_ns = work.ts + LMT_WINDOW_NS;   /* still seen: slide */
         } else if (tn * 2 < LMT_MIN_MATCH) {
             LMT.n = 0;                                 /* scene moved on */
