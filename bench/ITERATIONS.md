@@ -801,3 +801,17 @@ Path to OKVIS2's 5.19/3.82 is open.
 ### x OKVIS2 drive baselines FINAL: drive2 diverges in BOTH modes
 (lc0 25,408 km / lc1 65,908 km ATE). Complete drive scoreboard: ours
 1.35-4.2%% of path everywhere; OKVIS2 wins only drive3-country.
+
+### x VIO COMBO: vkfobs KEEPER — EuRoC 6.50 -> 5.18, EDGES OKVIS2-no-LC (5.19)
+vkfobs (min_frames_after_kf 3, kp_thresh 0.8, obs_std 0.35) = 5.18 med;
+vall 5.24 (huber adds nothing), vkfhub 6.02. MH_05 18.6->14.7, V1_02
+4.57. The estimator-bound gap is HALF closed by config alone. vkfobs
+becomes the VIO tuning of the freeze candidate (euroc config; port the
+same ratios to tumvi/msd configs next fleet).
+
+### x DEPTHFILL outdoor A/B: marginal recall (drive3 3->4/30, drive2 0),
+med err halves (0.94->0.50m) on 925 backfills. 3D availability was not
+the last outdoor bottleneck either — remaining loss is verify-thresholds
+vs genuine 60m-range aliasing. Next diagnostic: MASt3R oracle on failed
+probes; also consider r@1m as the honest outdoor metric. DEPTHFILL kept
+(free accuracy + denser maps), not a recall unlock.
