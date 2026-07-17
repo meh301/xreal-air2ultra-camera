@@ -1096,3 +1096,15 @@ law). SCOPED to LOST frames only (the measured benefit is recovery
 recall; healthy tracking keeps strict 2-frame). With that scope MULTIHYP
 joins the freeze reloc stack. FINAL freeze reloc stack: TRUSTVPR +
 BURSTPNP + MULTIHYP(lost-only) + cap400 + ~55ms latency.
+
+### x STAGE-5 BUILT (item 2, staged): 5a fold-time ARBITRATION — the fold
+decision moves from post-time (all 3 gates failed there) to marg-time:
+median reprojection residual against the CURRENT state (seconds of
+IMU+vision evidence since the closure) must stay <4px; rejected batches
+consumed, never retried. + XR_LM_CAUCHY kernel option (okvis2 parity)
++ XR_LMMARG_AUTO scene-scale gate (7d0f129, item 1: median landmark
+range EMA <8m earns folds). DECISIVE A/B on .15: s5off/s5arb/s5auto,
+poison set + keepers, n=5, 120 runs. Fleet v17 finale suite STAGED on
+all three containers (ATE + reloc scenario + drives) — fires on the s5
+verdict. Full lmdb-injection (true revived observations) remains the
+escalation if arbitration fails.
