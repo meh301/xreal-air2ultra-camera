@@ -29,9 +29,9 @@
 #ifndef XR_MAP_MAX_KF
 #define XR_MAP_MAX_KF 400
 #endif
-enum {
-    XR_MAP_KP_PER_KF = 200,    /* keypoints/descriptors per keyframe */
-};
+#ifndef XR_MAP_KP_PER_KF
+#define XR_MAP_KP_PER_KF 200       /* keypoints/descriptors per keyframe */
+#endif
 
 /* Stage the XFeat ONNX model (app files dir); call before streaming.
  * Without it the mini-ORB fallback is used. */

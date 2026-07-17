@@ -64,7 +64,9 @@
  * evicted the good map at the rolling cap. A keyframe earns storage by
  * carrying geometry, at a bounded rate. */
 #define STORE_MIN_LM 20            /* a sparse frame is not worth a keyframe */
+#ifndef STORE_MIN_INTERVAL_NS
 #define STORE_MIN_INTERVAL_NS 350000000ull
+#endif
 
 /* The correction is a RECOVERY from significant drift, not a continuous
  * clamp: only snap when the VIO has strayed meaningfully from the map,
@@ -141,7 +143,9 @@ enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
  * up (has_emb=0) stay always-eligible so a mid-session rollout can't hide
  * part of the map. */
 #ifndef VPR_SHORTLIST
+#ifndef VPR_SHORTLIST
 #define VPR_SHORTLIST 12
+#endif
 #endif
 #define VPR_MIN_SIM 0.25f
 #define VPR_MIN_KF (VPR_SHORTLIST + 4)  /* smaller maps: full scan is cheap */
@@ -1107,7 +1111,9 @@ static struct {
  * funnel audit: 49-56% of corridor probe frames died at bestm<24 while
  * verification passed 90%+ once a candidate existed — the weak matcher
  * was gatekeeping the strong one (LighterGlue never saw those frames). */
+#ifndef TRUSTVPR_MIN
 #define TRUSTVPR_MIN 0.75f
+#endif
 static int trustvpr_on(void) {
     static int v = -1;
     if (v < 0) {
