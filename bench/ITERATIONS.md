@@ -1108,3 +1108,6 @@ poison set + keepers, n=5, 120 runs. Fleet v17 finale suite STAGED on
 all three containers (ATE + reloc scenario + drives) — fires on the s5
 verdict. Full lmdb-injection (true revived observations) remains the
 escalation if arbitration fails.
+
+### x CAUCHY KERNEL: REJECT — rooms identical, corr2 worse (32 vs 22),
+no gain anywhere. Huber stays (okvis2-parity curiosity closed).
