@@ -588,3 +588,19 @@ bench). All 3 drive packs rebuilt (calib_orig.txt preserved); full-drive
 first light running: 3 drives x {xdlg6, full+TIGHTSUB}, shutdown-hang
 nanny active (xr_dr_drive hangs in a futex at exit — separate bug,
 harness-side thread join, to fix later).
+### x EXTRA DEFINES WERE NEVER WIRED — label correction, verdicts survive
+Makefile.linux never referenced $(EXTRA): every -D passed through it
+(the program's entire history) was INERT. True constants of every build:
+SNAP_MIN_M=0.30 (not the labeled 0.50), TIGHT_MAX_DEV_M=0.60 (hybrid
+routing, not the intended 0.0). AUDIT: all env-flag A/Bs (trio, union,
+tight, TIGHTSUB, dense/LG6 stack, fleet v12, baselines-ours) are VALID —
+arms shared identical constants; only labels lied. INVALIDATED: the
+historic SNAP_MIN sweep (identical binaries; '0.50 wins' was noise) and
+v9's '=0.0' define intent (inert — v9's gain was its code change).
+Fixed 76dac2d: CFLAGS += $(EXTRA); placebo defines stripped from all
+batch scripts so the newly-working flag doesn't change fleet-validated
+semantics. OPEN: a REAL SNAP_MIN 0.30-vs-0.50 A/B. Big-map drive round 3
+relaunched on a verified 2000-kf binary (BSS 128MB vs 29 = define in).
+Caught by: round 2's log showing kf#199 under -DXR_MAP_MAX_KF=2000 — the
+trust checklist (EVALUATION.md 9) gains: verify a define took effect by
+an OBSERVABLE (BSS size, log constant echo) before believing its A/B.
