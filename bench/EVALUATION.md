@@ -165,6 +165,9 @@ descriptors at every other resolution.
 - Replay NEVER latches LOST organically (no shake source) — submap and
   recovery paths are only exercised via `--kidnap`.
 - Sequence packs: EuRoC dense arms need the 736-crop packs (XFeat %32).
+- Cloned containers inherit completion-marker files (DONE, *.done):
+  sweep them before arming watchdogs — a stale marker fires premature
+  completion events and can unblock chained launchers early.
 - pkill discipline (three incidents): patterns must be self-escaped
   (`nam[e]`), a kill must NEVER share an ssh command with ANY text
   matching its pattern (including rm paths and relaunch text), kill by
