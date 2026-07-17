@@ -994,3 +994,12 @@ flatness exactly — mechanism validated end-to-end: post -> keyframe-
 anchored survival -> fold at kf-marg. Rooms gap vs okvis2+lc cut from
 4.5x to <3x in one change. FLEET v16 (fzbase vs fz16 = LMFACT+LMTRACK+
 LMMARG) launching for the held-out confirmation.
+
+### x MICRO-FLEET: cap400+TRUSTVPR reloc step-change; kp256 promising
+Reloc (cross-round caveat vs tv_ab2, but the jump is far beyond noise):
+corridors 94-99%% single-frame recall (was 43-73%%), mag2 44-47%% (was
+10-23%%) — the compiled cap400 default removed revisit-anchor eviction.
+Missing cells = probe-phase TIMEOUTS at the bigger maps (latency metric
+will quantify; probe duty may need relief). sh20 REJECT (slower, no
+gain); tv065 insensitive (keep 0.75). ATE: kp256 21.6->18.1 subset —
+promote to held-out cell; cad02 mild (-1.6).
