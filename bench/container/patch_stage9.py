@@ -49,8 +49,7 @@ old = """    mean = sum / num_valid_points;
     data /= mean;
   }"""
 new = """    mean = sum / num_valid_points;
-    xr_zncc_bound = xr_zncc();
-    if (xr_zncc_bound) {
+    if (xr_zncc()) {
       /* zero-mean / unit-variance: gain AND bias invariant */
       Scalar var = 0;
       int nv = 0;
@@ -78,8 +77,7 @@ old = """    mean = sum / num_valid_points;
 assert t.count(old) == 1, "jac anchor A"
 t = t.replace(old, """    mean = sum / num_valid_points;
 
-    xr_zncc_bound = xr_zncc();
-    if (xr_zncc_bound) {
+    if (xr_zncc()) {
       Scalar var = 0;
       int nv = 0;
       for (int i = 0; i < PATTERN_SIZE; i++)

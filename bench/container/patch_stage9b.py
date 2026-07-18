@@ -57,6 +57,11 @@ assert t.count(old) == 1, "zncc helper anchor"
 t = t.replace(old, new)
 if "#include <atomic>" not in t:
     t = t.replace("#pragma once", "#pragma once\n#include <atomic>", 1)
+old = """    setDataJacSe2(img, pos, mean, data, J_se2);"""
+new = """    setDataJacSe2(img, pos, mean, data, J_se2);
+    xr_zncc_bound = xr_zncc();   /* v5: bind normalization at creation */"""
+assert t.count(old) == 1, "setFromImage anchor"
+t = t.replace(old, new)
 f.write_text(t, encoding="utf-8")
 
 # ---- frame_to_frame_optical_flow.h: the detector ------------------------
