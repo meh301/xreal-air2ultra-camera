@@ -359,6 +359,8 @@ static struct {
     float q[4], p[3];                  /* session-frame pose of the query */
 } PROBE_RES;
 static int PROBE_REQ;                  /* map thread only (set at dequeue) */
+/* external candidate override for the NEXT probe (benchmark use) */
+static struct { uint64_t ts[8]; int n; } PCANDS;      /* MAP_LOCK */
 static struct { float q[4], p[3]; int have; } LAST_POSE;
 static uint64_t LAST_ACCEPT_NS;        /* stationary query cadence anchor */
 static uint64_t LAST_STORE_NS;         /* keyframe store rate limit */
@@ -5567,8 +5569,6 @@ static void *map_thread(void *arg) {
  * against the CURRENT map with an identity odom pose; returns 1 with the
  * query's session-frame pose on a verified match, 0 otherwise. Blocking
  * (worst case one VPR embed + full descriptor scan). Bench/test use. */
-/* external candidate override for the NEXT probe (benchmark use) */
-static struct { uint64_t ts[8]; int n; } PCANDS;      /* MAP_LOCK */
 void xr_map_set_probe_cands(const uint64_t *ts_ns, int n) {
     pthread_once(&THREAD_ONCE, thread_start);
     pthread_mutex_lock(&MAP_LOCK);
