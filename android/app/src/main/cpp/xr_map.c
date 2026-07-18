@@ -1369,14 +1369,25 @@ static void radv_trigger(uint64_t ts) {
 /* v2 gate: called from the confirmed-applied site with the closure's
  * evidence; v1 ignores the gates. dev = |correction| in metres. */
 static void radv_trigger2(uint64_t ts, int nin, int n3, int covis,
-                          float dev) {
+                          float dev, float margin) {
     int lv = radv_level();
     if (lv < 1) return;
-    if (lv >= 2) {
+    if (lv == 2) {
+        /* v2 (REJECTED, ledger): per-closure dev>=0.10m gate killed the
+         * mechanism — TIGHT absorbs continuously so discrete closure
+         * corrections are tiny; mag2 fired ZERO rebuilds. */
         if (covis < 6) return;
         if (nin < LMMARG_MIN_NIN) return;
-        if (n3 > 0 && nin * 100 < 60 * n3) return;   /* evidence ratio */
-        if (dev < 0.10f) return;   /* micro-corrections need no rebuild */
+        if (n3 > 0 && nin * 100 < 60 * n3) return;
+        if (dev < 0.10f) return;
+    } else if (lv >= 3) {
+        /* v3: v1 FREQUENCY (the active ingredient — mag2/corr3 wins
+         * came from ~12 rebuilds/run), SPACE-quality selection via the
+         * fold discriminator: covis + VPR alias margin. mag1's aliased
+         * hellscape has structurally low margins -> auto-disable. */
+        (void)dev;
+        if (covis < 6) return;
+        if (margin <= LMMARG_ALIAS_MARGIN) return;
     }
     radv_trigger(ts);
 }
@@ -5090,6 +5101,9 @@ static void process_keyframe(void) {
                         lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
                 }
                 if (radv_level() == 1) radv_trigger(work.ts);
+                else if (radv_level() >= 3 && covis >= 6 &&
+                         vpr_alias_margin > LMMARG_ALIAS_MARGIN)
+                    radv_trigger(work.ts);
                 /* (EDGEGRAPH v1 admitted sub-gate closures here at 1 Hz —
                  * self-drift-correlated edges compounded and the corridor
                  * A/B REGRESSED; edges now come only from APPLIED
@@ -5282,7 +5296,8 @@ static void process_keyframe(void) {
                     {
                         float rdv = sqrtf(Dp[0] * Dp[0] + Dp[1] * Dp[1] +
                                           Dp[2] * Dp[2]);
-                        radv_trigger2(work.ts, nin, n3, covis, rdv);
+                        radv_trigger2(work.ts, nin, n3, covis, rdv,
+                                      vpr_alias_margin);
                     }
                     LOOP_STATS.matches = best_m;
                     VER_LAST.outcome = VOUT_APPLIED;
