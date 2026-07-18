@@ -36,6 +36,8 @@ int main(int argc, char** argv) {
   const char* refp = argv[5];
   const char* probesp = argv[6];
   const int STRIDE = 12;
+  const double EXCL_S = 3.0;           /* temporal self-match exclusion */
+  const int DB_CAP = 400;              /* match our map's keyframe cap */
 
   // ref trajectory: ts -> pos
   std::vector<double> rt; std::vector<std::array<double,3>> rp;
@@ -107,9 +109,14 @@ int main(int argc, char** argv) {
   for (long pi : probes) {
     if (!probeBow.count(pi) || !probePos.count(pi)) continue;
     auto& q = probeBow[pi]; auto& qp = probePos[pi];
+    double qt = fts[pi] * 1e-9;
     std::vector<std::pair<double,int>> sc;
-    for (int k = 0; k < (int)kfs.size(); k++)
+    int step = kfs.size() > (size_t)DB_CAP ? (int)(kfs.size() / DB_CAP) : 1;
+    for (int k = 0; k < (int)kfs.size(); k += step) {
+      if (fabs(kfs[k].t - qt) < EXCL_S) continue;   /* place, not moment */
       sc.push_back({voc.score(q, kfs[k].bow), k});
+    }
+    if (sc.size() < 5) continue;
     std::sort(sc.rbegin(), sc.rend());
     auto dist = [&](int k) {
       double dx = kfs[k].p[0]-qp[0], dy = kfs[k].p[1]-qp[1], dz = kfs[k].p[2]-qp[2];

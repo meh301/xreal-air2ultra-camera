@@ -400,6 +400,33 @@ int main(int argc, char **argv) {
     /* v9 detector unification: XFeat maxima seed Basalt corner detection
      * (needs --xfeat for the model AND XR_SEED=1; extension is dlsym'd so
      * stock basalt libs simply ignore the seeds) */
+    /* XR_RELOC_CANDS: per-probe external candidate file
+     * (lines: k t1_s t2_s ... up to 5 kf timestamps in seconds) */
+    static uint64_t cand_ts[64][8];
+    static int cand_n[64];
+    {
+        const char *cf = getenv("XR_RELOC_CANDS");
+        if (cf && *cf) {
+            FILE *fc = fopen(cf, "r");
+            if (fc) {
+                char ln[512];
+                while (fgets(ln, sizeof ln, fc)) {
+                    int k;
+                    double a[5];
+                    int m = sscanf(ln, "%d %lf %lf %lf %lf %lf", &k, &a[0],
+                                   &a[1], &a[2], &a[3], &a[4]);
+                    if (m >= 2 && k >= 0 && k < 64) {
+                        cand_n[k] = m - 1;
+                        for (int j = 0; j < m - 1; j++)
+                            cand_ts[k][j] = (uint64_t)(a[j] * 1e9);
+                    }
+                }
+                fclose(fc);
+                fprintf(stderr, "xr_replay: external reloc candidates ON
+");
+            }
+        }
+    }
     int lockstep = 0;
     {
         const char *ls = getenv("XR_LOCKSTEP");
@@ -659,6 +686,8 @@ int main(int argc, char **argv) {
                     gq = vq[bv];
                 }
                 int cok;
+                if (k < 64 && cand_n[k] > 0)
+                    xr_map_set_probe_cands(cand_ts[k], cand_n[k]);
                 struct timespec xt0, xt1;
                 clock_gettime(CLOCK_MONOTONIC, &xt0);
                 static long bv0;           /* clip start's vio index */

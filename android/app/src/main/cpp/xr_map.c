@@ -4033,6 +4033,11 @@ static void process_keyframe(void) {
     memcpy(work.lm_xyz, MBOX.lm_xyz, sizeof(float) * 3 * (size_t)work.n_lm);
     memcpy(work.lm_uv, MBOX.lm_uv, sizeof(float) * 2 * (size_t)work.n_lm);
     MBOX.full = 0;
+    static uint64_t pc_ts[8];          /* map thread only */
+    static int pc_n;
+    pc_n = PCANDS.n;
+    for (int pcx = 0; pcx < pc_n; pcx++) pc_ts[pcx] = PCANDS.ts[pcx];
+    PCANDS.n = 0;                      /* consumed by this work item */
     /* Capture the store's generation, count and correction AT DEQUEUE, under
      * the lock — the coherent state this (possibly stale) offer belongs to.
      * The lock-free search below reads only these snapshots, never KF_N /
@@ -4503,6 +4508,27 @@ static void process_keyframe(void) {
         }
     }
 
+    /* EXTERNAL CANDIDATES (apples-to-apples retrieval benchmark): a
+     * probe with xr_map_set_probe_cands skips retrieval entirely and
+     * verifies exactly the supplied keyframes through the normal funnel */
+    if (PROBE_REQ && pc_n > 0) {
+        ncand = 0;
+        for (int pcx = 0; pcx < pc_n && ncand < RELOC_TOPK; pcx++) {
+            int bi = -1;
+            uint64_t bd = 500000000ull;              /* 0.5 s tolerance */
+            for (int s2 = 0; s2 < kfn; s2++) {
+                uint64_t d = KFA(s2).ts > pc_ts[pcx]
+                                 ? KFA(s2).ts - pc_ts[pcx]
+                                 : pc_ts[pcx] - KFA(s2).ts;
+                if (d < bd) { bd = d; bi = s2; }
+            }
+            if (bi >= 0) {
+                cand_i[ncand] = bi;
+                cand_m[ncand] = CAND_MIN_MATCHES;
+                ncand++;
+            }
+        }
+    }
     /* verify every candidate cluster; keep the geometrically strongest
      * (most inliers, covisibility-backed) — still lock-free */
     for (int c = 0; c < ncand; c++) {
@@ -5543,6 +5569,17 @@ static void *map_thread(void *arg) {
  * against the CURRENT map with an identity odom pose; returns 1 with the
  * query's session-frame pose on a verified match, 0 otherwise. Blocking
  * (worst case one VPR embed + full descriptor scan). Bench/test use. */
+/* external candidate override for the NEXT probe (benchmark use) */
+static struct { uint64_t ts[8]; int n; } PCANDS;      /* MAP_LOCK */
+void xr_map_set_probe_cands(const uint64_t *ts_ns, int n) {
+    pthread_once(&THREAD_ONCE, thread_start);
+    pthread_mutex_lock(&MAP_LOCK);
+    if (n > 8) n = 8;
+    PCANDS.n = n > 0 ? n : 0;
+    for (int i = 0; i < PCANDS.n; i++) PCANDS.ts[i] = ts_ns[i];
+    pthread_mutex_unlock(&MAP_LOCK);
+}
+
 int xr_map_probe(const uint8_t *img, const float grav_q[4], float out_q[4],
                  float out_p[3], int *out_inliers) {
     pthread_once(&THREAD_ONCE, thread_start);

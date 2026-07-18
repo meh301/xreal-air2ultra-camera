@@ -143,6 +143,11 @@ int xr_map_get_reseed(const float q[4], const float p[3],
 int xr_map_probe(const uint8_t *img, const float grav_q[4], float out_q[4],
                  float out_p[3], int *out_inliers);
 
+/* Apples-to-apples retrieval swap: the NEXT probe skips VPR retrieval
+ * and verifies exactly these candidate keyframes (matched by stored-kf
+ * timestamp, ns). Consumed by one probe; benchmark use (XR_RELOC_CANDS). */
+void xr_map_set_probe_cands(const uint64_t *ts_ns, int n);
+
 /* XR_BURSTPNP wake-up burst probe: like xr_map_probe, but the frames of
  * one burst are FUSED into a single joint 4-DOF solve. rel_p = this
  * frame's VIO position relative to the burst's first frame (same odom
