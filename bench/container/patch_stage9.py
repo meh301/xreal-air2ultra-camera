@@ -20,8 +20,8 @@ f = W / "include/basalt/optical_flow/patch.h"
 t = f.read_text(encoding="utf-8")
 
 # 0. env flag helper (file-local, read once)
-anchor = "  template <typename ImgT>
-  static void setData(const ImgT &img,"
+anchor = ("  template <typename ImgT>\n"
+          "  static void setData(const ImgT &img,")
 assert t.count(anchor) == 1
 t = t.replace(anchor, """  static inline bool xr_zncc() {
     static const bool v = [] {
