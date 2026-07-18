@@ -1253,6 +1253,40 @@ static int lminj_on(void) {
     }
     return v;
 }
+/* XR_DEFGUARD — deform-channel quality gates (event forensics, ledger):
+ * wrong-place closures cascade through the DEFORM path (MH_01-fz19
+ * 1.3->2.9m escalation seeded by a covis-3 closure; MH_05 9/27-inlier
+ * deform; MOO15 7.97m deform on a ~10m scan). The fold channel earned
+ * nin/alias gates long ago; the deform channel never did. Guards:
+ * inlier-ratio floor, covis floor, extent-relative magnitude cap, and
+ * an anti-escalation rule (a bigger deform shortly after a previous one
+ * needs stronger evidence). Rejected deforms downgrade to TIGHT-prior
+ * posting (soft absorption) instead of moving the map. */
+static int defguard_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_DEFGUARD");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: DEFORM GUARDS ON");
+    }
+    return v;
+}
+static uint64_t DEF_LAST_NS;           /* map thread only */
+static float DEF_LAST_DEV;
+/* 1 = deform allowed; 0 = downgrade to soft absorption */
+static int defguard_ok(float dev, int nin, int n3, int covis, uint64_t ts) {
+    if (!defguard_on()) return 1;
+    if (n3 > 0 && nin * 100 < 55 * n3) return 0;       /* evidence floor */
+    if (covis < 8) return 0;
+    float ext = map_extent_diag();
+    float cap = 1.5f > 0.6f * ext ? 1.5f : 0.6f * ext; /* extent-relative */
+    if (dev > cap) return 0;
+    if (DEF_LAST_NS && ts - DEF_LAST_NS < 45000000000ull &&
+        dev > 1.2f * DEF_LAST_DEV && (n3 <= 0 || nin * 100 < 75 * n3))
+        return 0;                                      /* anti-escalation */
+    return 1;
+}
+
 /* session-frame inliers -> odom frame -> basalt injection (same CORR
  * transform as lmfact_post; ids pair 1:1 with uv/ps rows) */
 static void lminj_post(const float (*uv)[2], const float (*ps)[3],
@@ -4929,8 +4963,10 @@ static void process_keyframe(void) {
                                 nin >= LMMARG_MIN_NIN &&
                                 vpr_alias_margin > LMMARG_ALIAS_MARGIN &&
                                 lmmarg_scene_ok());
-                    if (lminj_on() && lmmarg_scene_ok())
-                    lminj_post(lf_uv, lf_ps, lf_id, lf_n, work.ts);
+                    if (lminj_on() && lmmarg_scene_ok() &&
+                        nin >= LMMARG_MIN_NIN &&
+                        vpr_alias_margin > LMMARG_ALIAS_MARGIN)
+                        lminj_post(lf_uv, lf_ps, lf_id, lf_n, work.ts);
                 if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
                 }
@@ -5103,7 +5139,9 @@ static void process_keyframe(void) {
                                 nin >= LMMARG_MIN_NIN &&
                                 vpr_alias_margin > LMMARG_ALIAS_MARGIN &&
                                 lmmarg_scene_ok());
-                        if (lminj_on() && lmmarg_scene_ok())
+                        if (lminj_on() && lmmarg_scene_ok() &&
+                        nin >= LMMARG_MIN_NIN &&
+                        vpr_alias_margin > LMMARG_ALIAS_MARGIN)
                         lminj_post(lf_uv, lf_ps, lf_id, lf_n, work.ts);
                     if (lmtrack_on())
                             lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
@@ -5119,6 +5157,22 @@ static void process_keyframe(void) {
                     LOGI("session map: LOOP kf#%d TIGHT-PRIOR %.2fm %.0fdeg "
                          "(%d/%d inliers, %d covis) — posted to VIO", best_i,
                          (double)dev, (double)(sang * 57.3f), nin, n3, covis);
+                } else if (defguard_on() &&
+                           !defguard_ok(dev, nin, n3, covis, work.ts)) {
+                    /* XR_DEFGUARD: closure verified but not deform-grade —
+                     * absorb softly (TIGHT prior + factor channel) instead
+                     * of moving the map. The estimator arbitrates; a true
+                     * revisit keeps re-verifying and can earn the deform
+                     * with better evidence. */
+                    if (TIGHT) tight_post_prior(Dq, Dp, work.ts);
+                    tight_applied = 1;      /* CORR must NOT step */
+                    LAST_SNAP_NS = work.ts;
+                    PENDING_D.have = 0;
+                    VER_LAST.outcome = VOUT_APPLIED;
+                    LOGI("session map: LOOP kf#%d DEFORM-GUARDED %.2fm "
+                         "%.0fdeg (%d/%d inliers, %d covis) — soft absorb",
+                         best_i, (double)dev, (double)(sang * 57.3f), nin,
+                         n3, covis);
                 } else {
                     /* HEALTHY accumulated-drift closure: DEFORM the drifted
                      * tail onto the reference (real co-localization). Pass
@@ -5128,6 +5182,8 @@ static void process_keyframe(void) {
                     float qsp[3];
                     qrotv(CORR.q, work.p, qsp);
                     qsp[0] += CORR.p[0]; qsp[1] += CORR.p[1]; qsp[2] += CORR.p[2];
+                    DEF_LAST_NS = work.ts;
+                    DEF_LAST_DEV = dev;
                     if (pgo_on()) pgo_deform(best_i, work.q, work.p, Dq, Dp);
                     else          graph_deform(best_i, qsp, Dq, Dp);
                     if (edgegraph_on()) {
