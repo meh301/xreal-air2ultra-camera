@@ -86,6 +86,63 @@ corridors at large drift.
 
 ## In flight
 
+### 🏆 2026-07-18 — XRV stage 11 VALIDATED: reversible marginalization works inside basalt's sqrt form
+- **P3a re-advance engine** (XR_DELAYMARG capture + XR_READVANCE rebuild):
+  after a six-fix debugging arc, the stress smoke (readvance every 8th marg
+  event, 12 full prior rebuilds installed, room1) scores **ATE 0.128 m vs
+  baseline 0.129 m** — the rebuild is numerically transparent. The six
+  fixes, in order (each smoke-verified, all in patch_stage10/11.py):
+  1. IMU factors only between 15-dof frame_states (ImuBlock .at()s the
+     states map; pose-demoted endpoints excluded).
+  2. Prior-order resurrections need setLinTrue (computeDelta asserts the
+     FEJ contract on every marg-order var).
+  3. Stock keeps young sliding states OUT of the marg prior: aom/new-order
+     restricted to prior-connectivity vars; live imu factors must NOT fold
+     (double-count). Vel-bias-demoted window kfs get PROMOTED to 15-dof
+     (pose at its own FEJ lin point + captured vel/bias), vel/bias columns
+     re-marged per-column, object demoted back after.
+  4. addLandmark copies neither obs nor the host→target index — resurrected
+     landmarks re-add every obs via addObservation (≥2 in-aom obs guard:
+     1-obs landmark QR is degenerate).
+  5. Flow-lost landmarks are folded by stock at every marg event (the
+     event's main vision info) — captured in full (lost_lms) and replayed
+     via the lost_landmarks selection channel.
+  6. **THE diverger** (30 km fly-off): the post-install rebase
+     `marg_data.b -= H·delta` (stock sqrt_keypoint_vio.cpp ~1553,
+     "recover delta-independent residual"). Without it the installed prior
+     re-counts the entire accumulated delta as fresh residual — gradient
+     diagnostics showed g_rebuilt ≈ b_incumbent exactly.
+  Diagnostics that cracked it: dry-run mode (side effects w/o install →
+  ATE parity proved prior content was the sole corruption), then per-var
+  H-diag/b/gradient segment logging (H matched to 0.05%, b 500× off,
+  g_n ≈ b_i ⇒ missing rebase term).
+- **P3b closure trigger** (stage 12, XR_RADV): vit_tracker_xreal_readvance
+  API chain + xr_map radv_trigger (2 s debounce) at both verified-closure
+  sites. Smoke: 12 closure-triggered rebuilds, room1 map quick-ATE 0.070
+  (typical ~0.13). A/B queued: s12_ab.sh on .15 (ctrl vs radv, rooms+
+  corr1/3+mag2, n=5) — runs after the zn refire drains.
+- **ZNCC verdict update**: +10 offset fix confirmed ALIVE and healthy
+  (pure-VIO room1: base 0.129 / zncc 0.137); value case is the photometric
+  events (MH_05 ramp, V2_03 flicker) — zn arm refired clean on .15
+  (previous zn results were mixed-lib contaminated: the batch ran through
+  the rebuild storm).
+- **UNITS DISCIPLINE**: the site/per-seq tables are in **cm** ("map median
+  ATE cm"). corr1 fz18 "36.9" = 36.9 cm. A units slip this session briefly
+  manufactured a phantom 70× corridor regression + phantom .181 anomaly —
+  both dissolved on canonical rescoring (corr1 fz18 med 0.37 m ✓ = 36.9 cm
+  table row ✓ same batch).
+- **Lockstep verdict (partial, .181 r234_lock)**: corr1 lock 5/5 runs at
+  0.10 m vs control 10-run spread 0.10-0.40 med 0.13 — variance collapse
+  confirmed on corr1; corr3 inconclusive (lock DNF'd at 5400 s timeouts;
+  completion refire queued at 21600 s). XRV corridor A/Bs should run
+  lockstep-on when wall-clock allows.
+- **DBoW2 apples-to-apples queued** (.58 dbw_a2a.sh): dbow2_bench refired
+  with per-probe CAND top-5 dumps → XR_RELOC_CANDS feeds them through the
+  UNCHANGED verify/PnP pipeline on the same rl19 probes; control = the
+  existing rl19 grid.
+
+---
+
 ### ✅ Fleet v6 — SNAP_MIN_M=0.50 — VALIDATED, NEW BASELINE (on site)
 - **v5→v6**: EuRoC bad/vpr 7.6→6.45 (VIO 5.82 — map penalty now ~0.6 cm);
   rooms XFeat-family outlier CURED (xmegaloc 16.2→5.56 ≈ VIO, xvpr −5.3);
