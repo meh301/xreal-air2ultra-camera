@@ -5041,8 +5041,7 @@ static void process_keyframe(void) {
                                 vpr_alias_margin > LMMARG_ALIAS_MARGIN &&
                                 lmmarg_scene_ok());
                     if (lminj_on() && lmmarg_scene_ok() &&
-                        nin >= LMMARG_MIN_NIN &&
-                        vpr_alias_margin > LMMARG_ALIAS_MARGIN)
+                        nin >= LMMARG_MIN_NIN && covis >= 6)
                         lminj_post(lf_uv, lf_ps, lf_id, lf_n, work.ts);
                 if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
@@ -5225,8 +5224,7 @@ static void process_keyframe(void) {
                                 vpr_alias_margin > LMMARG_ALIAS_MARGIN &&
                                 lmmarg_scene_ok());
                         if (lminj_on() && lmmarg_scene_ok() &&
-                        nin >= LMMARG_MIN_NIN &&
-                        vpr_alias_margin > LMMARG_ALIAS_MARGIN)
+                        nin >= LMMARG_MIN_NIN && covis >= 6)
                         lminj_post(lf_uv, lf_ps, lf_id, lf_n, work.ts);
                     if (lmtrack_on())
                             lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
