@@ -1534,3 +1534,18 @@ FZ19 VALIDATION FIRED: .58 euroc+msd fz19 wave; .15 TUM held-out
   only) + sgo (SIGMA only) waves fired on .58 (150 runs, same frozen
   binary). Uniform-composition principle holds: fz19 ships only if the
   regression is fixed or attributed to a gateable condition.
+
+### ✓ ATTRIBUTION + FREEZE fz19 = fz18 + XR_LMINJ (sigma REJECTED uniform)
+Decomposition (.58, 4 arms x 25 seqs, frozen binary): V2_03 fz18 16.6 /
+injo 15.4 (BETTER) / sgo 24.3 (CULPRIT) / fz19(comp) 22.6. MOO13: injo
+24.5 vs sgo 31.3. sigma-1.0's strong fixed-3D pull poisons the
+TRACK-class (blurred frontend + overweighted stale 3D) — helps only
+sharp-fisheye TUM. REJECTED as uniform lever (sigma stays 2.0).
+INJECTION alone: TUM rooms all improve + corr3 halved + corr5/mag1/
+mag2/slides2 better (2x2 + held-out, n=5) AND euroc/MSD neutral-to-
+positive (V2_03 15.4, V2_01 3.57, MOO01 13.6; regressions all <=0.7cm
+n=3 noise-level). UNIFORM-SAFE => FREEZE fz19 := fz18 + XR_LMINJ=1.
+(Ledger note: "fz19" earlier meant fz18+sigma+inj — REDEFINED here to
+the injection-only composition; the sigma composite is retired.)
+corr10-v2 fired on fixed .58 (fz18 vs fz19, corridors n=10) — the
+re-validation owed since the contamination find.
