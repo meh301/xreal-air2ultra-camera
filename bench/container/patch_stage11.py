@@ -154,7 +154,7 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
     for (const int64_t id : res_states) frame_states.erase(id);
     for (const auto& ro : res_obs)
       if (lmdb.landmarkExists(ro.first))
-        lmdb.removeLandmarkObservations(ro.first, {ro.second});
+        lmdb.removeObservations(ro.first, {ro.second});
     for (const int id : res_lm_ids)
       if (lmdb.landmarkExists(id)) lmdb.removeLandmark(id);
     std::cerr << "[xr] READVANCE bail: prior var unresolvable" << std::endl;
@@ -229,7 +229,7 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
   /* ---- 5. BURY the resurrected objects ---- */
   for (const auto& ro : res_obs)
     if (lmdb.landmarkExists(ro.first))
-      lmdb.removeLandmarkObservations(ro.first, {ro.second});
+      lmdb.removeObservations(ro.first, {ro.second});
   for (const int id : res_lm_ids)
     if (lmdb.landmarkExists(id)) lmdb.removeLandmark(id);
   for (const int64_t id : res_poses) frame_poses.erase(id);
