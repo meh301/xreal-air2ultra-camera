@@ -86,6 +86,58 @@ corridors at large drift.
 
 ## In flight
 
+### 🔬 2026-07-19 — FULL ARCHITECTURE FORENSIC REVIEW (8-dim, 48 agents, 30 confirmed)
+User: "we have no advantage anywhere, go through the architecture line by
+line vs literature." Done. Report: bench/site/public/forensic.html
+(+ /forensic.json). 30 findings adversarially verified (code-truth +
+literature-truth), 9 refuted, 0 uncertain. **The DBoW2 scare was a
+misread**: dbw19 swapped ONLY retrieval; verify/PnP were ours in both.
+86.5 vs 88.8 = noise. The real finding: learned VPR buys nothing because
+the bottleneck is downstream of retrieval.
+
+FOUR ROOT-CAUSE THREADS:
+1. Reference robustness ships OFF: landmark-recall, PGO4DOF, switchable
+   kernels, COVKEEP, LTKF anchoring, FARBEAR all flag-gated — every
+   scored run used a crippled default.
+2. Cascade of HARD gates where the field weights by uncertainty (6m depth
+   cut, covis>=3 floor, additive match margin, 400-KF cap, absolute
+   cosines) — drop true correspondences before geometry arbitrates,
+   compound multiplicatively, ENGINE-INDEPENDENT (= why VPR swap is null).
+3. Closure coupling self-defeating: map factors drive the increment but
+   are EXCLUDED from the LM accept/reject test (optimizer rejects exactly
+   the meter-scale corrections closures induce), weighted 16x below a KLT
+   track, J=I on a moving target, no in-window kf to attach to → measured
+   1.0-1.2x absorption vs OKVIS2 1.7-31.9x.
+4. Magistrale collapse is CAPACITY: 400 slots x 0.30m = ~120m vs 460-920m
+   sequences; closure target evicted before revisit.
+
+⚠ MEASUREMENT ARTIFACTS FOUND (the panic was partly self-inflicted):
+- **-DXR_MAP_MAX_KF override was INERT until 2026-07-17** (EXTRA not in
+  CFLAGS) — every prior magistrale number was measured at hard 400-cap,
+  NOT the intended cap. Verified fixed now (-D...=2000 -> 2000).
+- Pooled 'long' median HID a 2x corridor loss (18.0 vs 9.2 cm).
+- ORB-SLAM3 baseline DEAD: MH_01 870cm (~230x published), lc0==lc1
+  byte-identical (LC no-op), V1_01 LC 15x WORSE. Quarantined from site.
+- score.py RTE>10cm divergence gate (ledger-rejected) still live →
+  fastbench incomparable to site.
+- MSD calib: 200Hz BMI160 noise densities declared at imu_update_rate=1000
+  → basalt sqrt(rate) scaling inflates IMU noise 2.24x on all MOO seqs.
+BUT the OKVIS2+LC gap is REAL (their corr1 2.8 / room1 1.2 = published).
+
+STEP-1 HARNESS FIXES DONE (committed): score.py ATE-only divergence;
+site 'long'->corridor+hall split (client-side group derive); orb3
+quarantine (BASELINE_QUARANTINE); -D propagation verified.
+RANKED ATTACK ORDER (see report): (2) raise KF cap 2000-4000 + COVKEEP
+eviction; (3) add XR factor error to LM cost/ratio test [rank-2, highest
+absorption leverage]; (4) reloc correspondence batch (soften 6m cut,
+COVIS_MIN_KF 1+ratio, Lowe-after-RANSAC, guided reproj pass, TOPK 6-8);
+(5) factor sigma ~1px + tight-prior Jacobian; (6) enable dormant
+robustness A/Bs; (7) frontend affine-photometric + track-quality gate;
+(8) VPR fisheye undistort LAST (gates mask it until 2-4 open).
+ALL PRIOR CONTAINER JOBS KILLED per user. Nothing running.
+
+---
+
 ### ⚠️ 2026-07-19 — GLOBAL-TRIGGER RADV: NOT VALIDATED (rfreq verdict)
 The frequency-response round flipped the story a third time: mag2 ctrl
 drew well (med 65.5, max 171) and BOTH gapped arms were worse (g8 84.7,
