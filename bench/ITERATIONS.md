@@ -1650,3 +1650,23 @@ Wake-up at the frozen composition CONFIRMED; site reloc tab = fz19.
 Both open verdicts from the state report now closed except lockstep
 (grinding, 6h budget). NEXT ARC ON DECK: continuous map
 self-consistency (background micro-PGO, old-keyframe edges only).
+
+### x DBOW2 RETRIEVAL BENCHMARK (user request) — the wake-up moat holds
+Harness (bench/tools/dbow2_bench.cpp): ORB-SLAM3's DBoW2 + ORBvoc +
+cv::ORB(1000) on OUR exact rl19 probe frames, db = stride-12 kfs capped
+400, +-3s temporal exclusion (place recognition, not moment matching),
+reference = fz19 trajectory. First run WITHOUT exclusion scored 100%
+everywhere = temporal self-match confound (caught before quoting).
+Corrected numbers — DBoW2 retrieval recall@1/@5 @3m vs OUR END-TO-END
+VERIFIED single-frame (rl19) / burst (rb19):
+  corridor1  57/70  vs  93/100   corridor2  80/87  vs  87/93
+  corridor3  37/60  vs  90/100   corridor4  80/87  vs  90/100
+  corridor5  47/63  vs  97/100   magistrale2 70/83 vs  50/87
+VERDICT: DBoW2's retrieval CEILING (verification can only remove hits)
+sits far below our end-to-end verified recall on corridors 1/3/5;
+comparable corr2/4; mag2 retrieval 70% > our 50% single-frame verified
+(caveat: unverified retrieval in an aliased hall — many hits would be
+rejected or wrong-accepted; our burst 87% exceeds their ceiling).
+CAVEATS: cv::ORB vs ORB3's octree extractor (slightly better spread);
+retrieval-only vs end-to-end favors DBoW2 in this table. room1 cell
+absent (probes parse; minor, not re-run).
