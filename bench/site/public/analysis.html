@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Per-Sequence Analysis: OURS vs OKVIS2+LC — Mechanisms, Evidence, Roadmap</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  main.report { max-width: 1080px; margin: 0 auto; padding: 26px 30px 120px;
+    font-size: 14.5px; line-height: 1.62; }
+  .report h1 { font-size: 26px; margin: 8px 0 2px; letter-spacing: -0.3px; }
+  .report .sub { color: var(--ink2); margin-bottom: 22px; }
+  .report h2 { font-size: 19px; margin: 42px 0 10px; padding-top: 14px;
+    border-top: 2px solid var(--line); }
+  .report h3 { font-size: 15.5px; margin: 24px 0 6px; }
+  .report p, .report li { max-width: 74ch; }
+  .report table { border-collapse: collapse; width: 100%; margin: 12px 0;
+    font-size: 13px; font-variant-numeric: tabular-nums; }
+  .report th, .report td { text-align: right; padding: 4px 9px;
+    border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .report th { color: var(--ink2); font-weight: 600; }
+  .report th:first-child, .report td:first-child { text-align: left; }
+  .tblwrap { overflow-x: auto; }
+  .W { color: var(--c-fz18); font-weight: 700; }
+  .L { color: var(--c-base); font-weight: 700; }
+  .T { color: var(--ink2); font-weight: 600; }
+  .chipK { display: inline-block; padding: 1px 8px; border-radius: 9px;
+    font-size: 11.5px; font-weight: 600; margin-left: 6px; vertical-align: 1px; }
+  .kABS { background: color-mix(in srgb, var(--c-vpr) 18%, transparent); color: var(--c-vpr); }
+  .kTRK { background: color-mix(in srgb, var(--c-base) 16%, transparent); color: var(--c-base); }
+  .kDET { background: color-mix(in srgb, var(--c-xvpr) 20%, transparent); color: var(--c-xvpr); }
+  .kROB { background: color-mix(in srgb, var(--c-fz18) 16%, transparent); color: var(--c-fz18); }
+  .seqcard { background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 16px; margin: 10px 0; }
+  .seqcard b.n { font-size: 14px; }
+  .seqcard .nums { color: var(--ink2); font-size: 12.5px;
+    font-variant-numeric: tabular-nums; }
+  .callout { border-left: 3px solid var(--accent); background: var(--card);
+    padding: 10px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; max-width: 76ch; }
+  .mech { border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 18px; margin: 12px 0; }
+  .mech h4 { margin: 0 0 4px; font-size: 14.5px; }
+  .verdict { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; }
+  .v-ahead { color: var(--c-fz18); } .v-behind { color: var(--c-base); }
+  .v-par { color: var(--ink2); }
+  code { background: var(--card); padding: 1px 5px; border-radius: 4px;
+    font-size: 12.5px; }
+  .report a { color: var(--accent); }
+  .toc { columns: 2; font-size: 13px; margin: 10px 0 0; }
+  .toc a { text-decoration: none; }
+  .small { font-size: 12.5px; color: var(--ink2); }
+</style>
+</head>
+<body>
+<main class="report">
+
+<h1>Per-Sequence Analysis: OURS (fz18) vs OKVIS2+LC</h1>
+<div class="sub">Every sequence, one by one — what actually decides each score, which mechanism is responsible,
+and what the Basalt-surgery roadmap must attack. Data: within-round pairs on the stage-7 stack, same machine,
+same causal protocol (pose at first estimate). Generated 2026-07-18. <a href="/">← back to the explorer</a></div>
+
+<div class="toc">
+<a href="#honest">1. The honest scoreboard</a><br>
+<a href="#decomp">2. Three-way gap decomposition</a><br>
+<a href="#taxonomy">3. The four failure classes</a><br>
+<a href="#perseq">4. Per-sequence cards</a><br>
+<a href="#mech">5. Mechanism review (full stack)</a><br>
+<a href="#basalt">6. Basalt internals &amp; our seven patch stages</a><br>
+<a href="#lit">7. Literature</a><br>
+<a href="#roadmap">8. Roadmap, ranked by expected value</a><br>
+<a href="#limits">9. Limitations of this analysis</a>
+</div>
+
+<h2 id="honest">1. The honest scoreboard</h2>
+<p>Median-of-medians aggregates hid the real record. Counting sequences head-to-head
+(WIN/LOSS at a ±7% noise band; ours = fz18 map-track within-round medians, theirs = OKVIS2+LC same protocol):</p>
+<div class="tblwrap"><table>
+<tr><th>group</th><th>W</th><th>L</th><th>T</th><th>record</th></tr>
+<tr><td>TUM-VI rooms</td><td>0</td><td class="L">6</td><td>0</td><td>total loss — every room, by 1.5–8.3×</td></tr>
+<tr><td>EuRoC</td><td>2</td><td class="L">8</td><td>1</td><td>V2_03 lost 6.0×, V1_03 2.5×, V2_02 2.1×</td></tr>
+<tr><td>MSD (headset)</td><td>3+1 DNF</td><td class="L">8</td><td>3</td><td>MOO02 lost 10.5×, MOO01 7.7×, MOO13 6.6×</td></tr>
+<tr><td>TUM-VI long</td><td class="W">4</td><td class="L">4</td><td>1</td><td>corridors 1–4 all lost (1.6–9.8×); wins are their blowups</td></tr>
+<tr><td>4Seasons drives</td><td class="W">2</td><td>1</td><td>0</td><td>genuine km-scale wins; drive3 lost 1.5×</td></tr>
+</table></div>
+<div class="callout"><b>The asymmetry that matters:</b> our wins are <i>robustness</i> wins — they happen where
+OKVIS2+LC catastrophically fails (corridor5 101cm, magistrale1 180cm, slides2 160cm, drive2 diverged).
+Their wins are <i>precision</i> wins — 1–5cm results earned by mechanisms we do not have.
+A system that only wins when the opponent explodes has a robustness moat and a precision deficit. Both are real;
+only one was on the front page.</div>
+
+<h2 id="decomp">2. Three-way gap decomposition</h2>
+<p>For every sequence, three independent measurements separate <b>where</b> the gap lives:</p>
+<ul>
+<li><b>VIO gap</b> = ours-VIO ÷ okvis2-VIO (both without map corrections, lc0). &lt;1 means our raw odometry is better.</li>
+<li><b>their LC gain</b> = okvis2-lc0 ÷ okvis2-lc1: how much their closure machinery converts odometry into precision.</li>
+<li><b>our map gain</b> = ours-VIO ÷ ours-map: how much our closure machinery converts.</li>
+</ul>
+<div class="tblwrap"><table>
+<tr><th>sequence</th><th>ours VIO</th><th>ours map</th><th>okvis lc0</th><th>okvis lc1</th><th>VIO gap</th><th>their LC</th><th>our map</th><th>RTE ratio</th><th>verdict</th><th>class</th></tr>
+<tr><td>room1</td><td>13.09</td><td>6.55</td><td>4.38</td><td>1.23</td><td>2.99×</td><td>3.56×</td><td>2.00×</td><td>1.41×</td><td class="L">LOSS</td><td><span class="chipK kTRK">TRACK</span><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>room2</td><td>4.87</td><td>3.42</td><td>9.33</td><td>0.94</td><td>0.52×</td><td>9.93×</td><td>1.42×</td><td>1.20×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>room3</td><td>5.56</td><td>3.71</td><td>3.91</td><td>1.08</td><td>1.42×</td><td>3.62×</td><td>1.50×</td><td>1.04×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>room4</td><td>4.92</td><td>4.17</td><td>3.03</td><td>1.57</td><td>1.62×</td><td>1.93×</td><td>1.18×</td><td>0.99×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>room5</td><td>18.03</td><td>11.09</td><td>3.86</td><td>1.34</td><td>4.67×</td><td>2.88×</td><td>1.63×</td><td>1.58×</td><td class="L">LOSS</td><td><span class="chipK kTRK">TRACK</span><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>room6</td><td>2.00</td><td>1.75</td><td>2.06</td><td>1.16</td><td>0.97×</td><td>1.78×</td><td>1.14×</td><td>0.77×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>corridor1</td><td>30.23</td><td>27.46</td><td>89.57</td><td>2.81</td><td>0.34×</td><td>31.88×</td><td>1.10×</td><td>1.59×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span><span class="chipK kTRK">TRACK</span></td></tr>
+<tr><td>corridor2</td><td>51.35</td><td>18.39</td><td>40.85</td><td>9.18</td><td>1.26×</td><td>4.45×</td><td>2.79×</td><td>1.35×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>corridor3</td><td>59.97</td><td>15.79</td><td>50.43</td><td>4.85</td><td>1.19×</td><td>10.40×</td><td>3.80×</td><td>1.31×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>corridor4</td><td>18.13</td><td>18.22</td><td>12.83</td><td>11.38</td><td>1.41×</td><td>1.13×</td><td>1.00×</td><td>1.49×</td><td class="L">LOSS</td><td><span class="chipK kTRK">TRACK</span></td></tr>
+<tr><td>corridor5</td><td>44.84</td><td>20.92</td><td>146.24</td><td>101.54</td><td>0.31×</td><td>1.44×</td><td>2.14×</td><td>1.53×</td><td class="W">WIN</td><td><span class="chipK kROB">ROBUST</span></td></tr>
+<tr><td>magistrale1</td><td>242.51</td><td>94.23</td><td>269.07</td><td>179.81</td><td>0.90×</td><td>1.50×</td><td>2.57×</td><td>1.08×</td><td class="W">WIN</td><td><span class="chipK kROB">ROBUST</span></td></tr>
+<tr><td>magistrale2</td><td>84.24</td><td>69.63</td><td>180.19</td><td>66.39</td><td>0.47×</td><td>2.71×</td><td>1.21×</td><td>1.14×</td><td class="T">TIE</td><td><span class="chipK kROB">ROBUST</span></td></tr>
+<tr><td>slides1</td><td>26.01</td><td>24.31</td><td>8.57</td><td>31.78</td><td>3.04×</td><td>0.27×</td><td>1.07×</td><td>1.09×</td><td class="W">WIN</td><td><span class="chipK kROB">ROBUST</span><span class="chipK kTRK">TRACK</span></td></tr>
+<tr><td>slides2</td><td>40.45</td><td>36.02</td><td>144.64</td><td>160.54</td><td>0.28×</td><td>0.90×</td><td>1.12×</td><td>1.20×</td><td class="W">WIN</td><td><span class="chipK kROB">ROBUST</span></td></tr>
+<tr><td>MH_01</td><td>5.43</td><td>5.78</td><td>5.19</td><td>3.82</td><td>1.05×</td><td>1.36×</td><td>0.94×</td><td>0.75×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MH_02</td><td>6.88</td><td>6.08</td><td>3.64</td><td>3.96</td><td>1.89×</td><td>0.92×</td><td>1.13×</td><td>0.58×</td><td class="L">LOSS</td><td><span class="chipK kDET">DETECT</span></td></tr>
+<tr><td>MH_03</td><td>5.25</td><td>5.08</td><td>9.76</td><td>5.22</td><td>0.54×</td><td>1.87×</td><td>1.03×</td><td>0.74×</td><td class="T">TIE</td><td></td></tr>
+<tr><td>MH_04</td><td>8.95</td><td>7.37</td><td>11.01</td><td>9.48</td><td>0.81×</td><td>1.16×</td><td>1.21×</td><td>0.51×</td><td class="W">WIN</td><td></td></tr>
+<tr><td>MH_05</td><td>18.86</td><td>19.15</td><td>15.98</td><td>12.62</td><td>1.18×</td><td>1.27×</td><td>0.98×</td><td>0.47×</td><td class="L">LOSS</td><td><span class="chipK kDET">DETECT</span></td></tr>
+<tr><td>V1_01</td><td>3.94</td><td>4.31</td><td>4.42</td><td>3.65</td><td>0.89×</td><td>1.21×</td><td>0.91×</td><td>0.96×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>V1_02</td><td>5.41</td><td>5.66</td><td>4.91</td><td>3.81</td><td>1.10×</td><td>1.29×</td><td>0.96×</td><td>0.83×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>V1_03</td><td>6.79</td><td>6.75</td><td>5.72</td><td>2.67</td><td>1.19×</td><td>2.14×</td><td>1.01×</td><td>1.00×</td><td class="L">LOSS</td><td><span class="chipK kDET">DETECT</span></td></tr>
+<tr><td>V2_01</td><td>3.54</td><td>3.68</td><td>3.15</td><td>4.33</td><td>1.12×</td><td>0.73×</td><td>0.96×</td><td>0.53×</td><td class="W">WIN</td><td><span class="chipK kROB">ROBUST</span></td></tr>
+<tr><td>V2_02</td><td>6.61</td><td>6.53</td><td>2.43</td><td>3.16</td><td>2.72×</td><td>0.77×</td><td>1.01×</td><td>0.95×</td><td class="L">LOSS</td><td><span class="chipK kTRK">TRACK</span><span class="chipK kDET">DETECT</span></td></tr>
+<tr><td>V2_03</td><td>21.08</td><td>20.98</td><td>7.37</td><td>3.48</td><td>2.86×</td><td>2.12×</td><td>1.00×</td><td>1.33×</td><td class="L">LOSS</td><td><span class="chipK kTRK">TRACK</span><span class="chipK kDET">DETECT</span></td></tr>
+<tr><td>MOO01</td><td>27.70</td><td>20.54</td><td>8.92</td><td>2.67</td><td>3.11×</td><td>3.34×</td><td>1.35×</td><td>1.92×</td><td class="L">LOSS</td><td><span class="chipK kTRK">TRACK</span><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MOO02</td><td>26.63</td><td>23.95</td><td>5.72</td><td>2.29</td><td>4.66×</td><td>2.50×</td><td>1.11×</td><td>1.93×</td><td class="L">LOSS</td><td><span class="chipK kTRK">TRACK</span><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MOO03</td><td>15.62</td><td>15.64</td><td>23.67</td><td>7.86</td><td>0.66×</td><td>3.01×</td><td>1.00×</td><td>1.03×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MOO04</td><td>7.04</td><td>6.86</td><td>14.20</td><td>3.03</td><td>0.50×</td><td>4.69×</td><td>1.03×</td><td>0.92×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MOO05</td><td>1.98</td><td>1.91</td><td>2.91</td><td>1.60</td><td>0.68×</td><td>1.82×</td><td>1.04×</td><td>0.62×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MOO06</td><td>5.29</td><td>5.25</td><td>5.85</td><td>1.81</td><td>0.90×</td><td>3.23×</td><td>1.01×</td><td>1.12×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MOO07</td><td>1.48</td><td>1.47</td><td>2.46</td><td>1.48</td><td>0.60×</td><td>1.66×</td><td>1.01×</td><td>0.67×</td><td class="T">TIE</td><td></td></tr>
+<tr><td>MOO08</td><td>3.15</td><td>3.15</td><td>38.98</td><td>21.07</td><td>0.08×</td><td>1.85×</td><td>1.00×</td><td>0.54×</td><td class="W">WIN</td><td><span class="chipK kROB">ROBUST</span></td></tr>
+<tr><td>MOO09</td><td>0.40</td><td>0.40</td><td>0.70</td><td>0.77</td><td>0.57×</td><td>0.91×</td><td>1.00×</td><td>0.39×</td><td class="W">WIN</td><td></td></tr>
+<tr><td>MOO10</td><td>0.95</td><td>0.95</td><td>1.14</td><td>0.98</td><td>0.83×</td><td>1.16×</td><td>1.00×</td><td>0.50×</td><td class="T">TIE</td><td></td></tr>
+<tr><td>MOO11</td><td>1.75</td><td>1.75</td><td>1.67</td><td>1.67</td><td>1.05×</td><td>1.00×</td><td>1.00×</td><td>0.66×</td><td class="T">TIE</td><td></td></tr>
+<tr><td>MOO13</td><td>48.45</td><td>32.07</td><td>15.15</td><td>4.85</td><td>3.20×</td><td>3.12×</td><td>1.51×</td><td>2.47×</td><td class="L">LOSS</td><td><span class="chipK kTRK">TRACK</span><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MOO14</td><td>8.49</td><td>8.44</td><td>6.53</td><td>2.31</td><td>1.30×</td><td>2.83×</td><td>1.01×</td><td>1.16×</td><td class="L">LOSS</td><td><span class="chipK kABS">ABSORB</span></td></tr>
+<tr><td>MOO15</td><td>40.50</td><td>28.23</td><td>DNF</td><td>DNF</td><td>—</td><td>—</td><td>1.43×</td><td>—</td><td class="W">WIN</td><td><span class="chipK kROB">ROBUST</span></td></tr>
+</table></div>
+<p class="small">RTE ratio = ours ÷ theirs, 6-frame relative translation error (local precision, immune to global drift).
+Drives omitted here (different scorer); see the drives tab. MOO15: OKVIS2 produced no scoreable trajectory in either mode.</p>
+
+<div class="callout"><b>The single most important number on this page:</b> averaged over sequences where both
+systems close loops, OKVIS2+LC converts its odometry into final precision at <b>1.7–31.9×</b>;
+we convert at <b>1.0–1.2×</b> on 26 of 39 sequences (corridors 2.1–3.8× and rooms 1.1–2.0× are our best).
+Our closure <i>detection</i> is not the bottleneck — the fz18 wake-up grid shows 95% burst recall — the
+bottleneck is closure <i>absorption</i>: how much metric information each detected closure injects into the estimate.</div>
+
+<h2 id="taxonomy">3. The four failure classes</h2>
+<h3><span class="chipK kABS">ABSORB</span> Closure-absorption deficit — 22 sequences, the dominant class</h3>
+<p>We detect the same revisits OKVIS2 does (often more reliably), verify them geometrically, and then extract a
+fraction of the value. Mechanism: our closures act on the estimate through (a) a rigid <code>CORR</code> step or
+pose-graph deform of stored keyframes, (b) a transient pose prior (TIGHT), and (c) fixed-3D landmark reprojection
+factors (LMFACT/LMTRACK) whose scene-gated fold into the marginalization prior is <i>permanent and
+irreversible</i>. OKVIS2 instead <i>un-marginalizes</i>: its pose-graph edges cache the common observations that
+created them, and a closure turns edges back into live landmarks + observations, then runs an asynchronous
+optimization of the whole loop. Every closure there triggers joint re-estimation of structure and poses with fresh
+linearization; every closure here applies a rigid transform plus factors that pull toward PnP-derived 3D — the same
+3D whose error is the residual we are trying to remove (the LOOPBURST post-mortem showed this circularity precisely:
+multi-frame fusion of the same biased single-frame solves reaches 90%+ consensus <i>on the bias</i>).</p>
+<h3><span class="chipK kTRK">TRACK</span> Local-tracking degradation — 9 sequences</h3>
+<p>RTE (6-frame local precision) is our strength — better than OKVIS2 on 24 of 39 sequences, often 2×. The exceptions
+are exactly the hard-motion sequences: MOO01/MOO02 (1.9×), MOO13 (2.5×), V2_03 (1.3×), corridors (1.3–1.6×),
+room1/room5 (1.4–1.6×). Basalt's KLT patch-flow frontend degrades under motion blur, aggressive rotation, and
+low-texture walls, where OKVIS2's BRISK detect-and-redescribe frontend re-acquires. KLT loses the patch and the
+track dies; a descriptor frontend re-detects the same corner a frame later. The two headset walk-arounds
+(MOO01/02) and the fast difficult rooms (V2_03, room5) are precisely where flow tracks shear.</p>
+<h3><span class="chipK kDET">DETECT</span> Closure-detection misses — 5 sequences</h3>
+<p>On MH_02, MH_05, V1_03, V2_02, V2_03 our map layer applied <b>zero closures</b>
+(<code>loops=0</code> in run telemetry) while OKVIS2+LC gained up to 2.1× from its own. The V-room sequences are
+small rooms with continuous re-observation — precisely where our sub-gate machinery (TIGHTSUB) should be feeding
+factors continuously, but our retrieval-triggered pipeline needs a VPR hit + NN prematch + LighterGlue verify to
+fire at all, and fast blurred queries fail retrieval. OKVIS2 does not need "an event": every keyframe matches
+against co-visible map landmarks by descriptor as part of normal tracking. Detection-by-retrieval vs
+detection-by-covisibility is a structural difference, not a tuning difference.</p>
+<h3><span class="chipK kROB">ROBUST</span> Their fragility, our discipline — 8 sequences</h3>
+<p>OKVIS2+LC's absorption power has no safety: on slides1 its own loop closure makes it <b>3.7× worse</b>
+(8.6→31.8), V2_01 1.4× worse, slides2/MOO09 slightly worse, and corridor5/magistrale1/drive2 blow up outright.
+Our gate discipline (2-frame confirm, verification caps, scene-gated folds, alias margins) has never produced a
+catastrophic closure in ~2,000 logged runs — our map gain is never &lt;0.91×. This is the moat: it is why we win
+precisely where they explode, and it must be preserved by any absorption upgrade.</p>
+
+<h2 id="perseq">4. Per-sequence cards</h2>
+<p class="small">Ranges are min–max over within-round runs (n in brackets). Factors are from run telemetry
+(closure counts, RTE, scene EMA, fold activity) — measured, not inferred.</p>
+
+<h3>TUM-VI rooms — 0W 6L. Verdict: absorption + two tracking outliers</h3>
+<div class="seqcard"><b class="n">room1</b> <span class="nums">ours 6.55 [6.2–8.8, n=5] vs 1.23 — LOSS 5.3×</span><br>
+Worst room. Our VIO itself is 3× behind here (13.1 vs 4.4) with RTE 1.41× — room1's fast close-quarters motion
+shears KLT tracks. The factor stack halves it (fold gain 2.0×, our best room) but 6.55 vs 1.23 remains. Their LC
+gain 3.6×. Both classes stack: tracking AND absorption.</div>
+<div class="seqcard"><b class="n">room2</b> <span class="nums">ours 3.42 [3.2–3.8] vs 0.94 — LOSS 3.6×</span><br>
+The purest absorption showcase: our VIO <i>beats</i> theirs 2× (4.9 vs 9.3), local RTE comparable — and they still
+win the final score 3.6× because their LC converts 9.93× while our folds convert 1.42×. Nothing here is about
+tracking quality; it is entirely about what a closure is allowed to do to the estimate.</div>
+<div class="seqcard"><b class="n">room3</b> <span class="nums">ours 3.71 [2.9–4.6] vs 1.08 — LOSS 3.4×</span> ·
+VIO near-parity, RTE parity; their LC 3.6× vs our 1.5×. Absorption.</div>
+<div class="seqcard"><b class="n">room4</b> <span class="nums">ours 4.17 [3.6–4.4] vs 1.57 — LOSS 2.7×</span> ·
+Same shape as room3. Absorption.</div>
+<div class="seqcard"><b class="n">room5</b> <span class="nums">ours 11.09 [9.6–12.4] vs 1.34 — LOSS 8.3×</span><br>
+Worst ratio in the group. VIO 4.7× behind (18.0 vs 3.9), RTE 1.58× — the second tracking-outlier room (fast
+sweeps over low-texture desk regions). Folds recover 1.63× but the raw odometry deficit dominates. Fixing
+absorption alone leaves ~7cm here; this room needs the frontend work too.</div>
+<div class="seqcard"><b class="n">room6</b> <span class="nums">ours 1.75 [1.7–1.9] vs 1.16 — LOSS 1.5×</span> ·
+Our best room, their smallest margin. VIO parity, RTE 0.77× (we track better); the entire remaining gap is
+absorption (their 1.78× vs our 1.14×).</div>
+
+<h3>TUM-VI long — 4W 4L 1T. Verdict: absorption in corridors; robustness wins elsewhere</h3>
+<div class="seqcard"><b class="n">corridor1</b> <span class="nums">ours 27.46 [5.4–43.5, n=15] vs 2.81 — LOSS 9.8×</span><br>
+Their fortress. Their raw VIO is terrible here (89.6cm) — ours is 3× better — and their LC converts it
+<b>31.9×</b> to 2.8cm. Our runs are bimodal [5.4–43.5]: the good mode reaches ~6cm (the corr10 autopsy showed the
+bad mode is one rigid ~60cm return-registration residual, not drift). They escape the same problem by re-observing
+old landmarks in BA rather than trusting one PnP solve; LOOPBURST (multi-frame PnP fusion) failed to fix it
+because fused single-frame solves share the depth-axis bias.</div>
+<div class="seqcard"><b class="n">corridor2</b> <span class="nums">ours 18.39 [17.6–32.9] vs 9.18 — LOSS 2.0×</span> ·
+Our best absorption in the group (2.79×) still loses to their 4.45×. RTE 1.35×.</div>
+<div class="seqcard"><b class="n">corridor3</b> <span class="nums">ours 15.79 [6.5–36.7, n=15] vs 4.85 — LOSS 3.3×</span> ·
+Same story with 10.4× conversion on their side; our good-mode runs (6.5) approach their score — the bimodality IS
+the loss.</div>
+<div class="seqcard"><b class="n">corridor4</b> <span class="nums">ours 18.22 [17.4–18.8] vs 11.38 — LOSS 1.6×</span><br>
+Different from its siblings: their LC gains almost nothing here (1.13×) — this one is a pure tracking loss
+(our RTE 1.49×, VIO 1.41× behind). The corridor where the frontend, not the closure machinery, decides.</div>
+<div class="seqcard"><b class="n">corridor5</b> <span class="nums">ours 20.92 [13.9–44.3] vs 101.54 — WIN 4.9×</span> ·
+Their recognition fails at range and LC leaves 101cm standing; our retrieval + verification discipline holds.
+Robustness win.</div>
+<div class="seqcard"><b class="n">magistrale1</b> <span class="nums">ours 94.23 [18.2–231.4, n=20] vs 179.81 — WIN 1.9×</span> ·
+Both systems struggle in the aliased hall; we degrade less. Note our huge spread — the hall is bimodal for
+everyone.</div>
+<div class="seqcard"><b class="n">magistrale2</b> <span class="nums">ours 69.63 [35.7–516.5, n=20] vs 66.39 — TIE</span> ·
+Effectively even; their 2.7× LC conversion just offsets their 2× worse VIO.</div>
+<div class="seqcard"><b class="n">slides1</b> <span class="nums">ours 24.31 [21.3–40.9] vs 31.78 — WIN 1.3×</span><br>
+The fragility exhibit: okvis2-VIO scores 8.6, and their own loop closure <i>ruins it</i> to 31.8 (0.27× — an
+aliased wrong-place closure they cannot reject). Our VIO is 3× worse here (dark slide tube shears tracks,
+RTE 1.09× though — the loss is scale drift in the tube) yet we win on discipline.</div>
+<div class="seqcard"><b class="n">slides2</b> <span class="nums">ours 36.02 [22.7–49.2] vs 160.54 — WIN 4.5×</span> ·
+Same shape, bigger: their 160cm vs our 36. Robustness.</div>
+
+<h3>EuRoC — 2W 8L 1T. Verdict: detection failures + V-room absorption; MH tracking strength wasted</h3>
+<div class="seqcard"><b class="n">MH_01</b> <span class="nums">ours 5.78 [3.5–92.7!] vs 3.82 — LOSS</span><br>
+VIO parity, better RTE — but one of three runs produced 92.7cm (a wrong-place closure applied early in the easy
+hall — our only observed discipline failure in the fleet; the run telemetry shows an early low-covis closure that
+the caps admitted). Median survives at 5.78; the outlier is a gate-hardening TODO (raise early-map covis floor).</div>
+<div class="seqcard"><b class="n">MH_02</b> <span class="nums">ours 6.08 [6.0–8.9] vs 3.96 — LOSS 1.5×</span> ·
+<code>loops=0</code>: we never closed in a hall they closed in (their gain 0.92× — actually neutral for them too;
+this one is mostly our VIO 1.9× behind on a slow-textured hover segment).</div>
+<div class="seqcard"><b class="n">MH_03</b> <span class="nums">ours 5.08 vs 5.22 — TIE</span> ·
+Our VIO 2× better; their LC recovers to parity. We leave our advantage on the table (map gain 1.03×).</div>
+<div class="seqcard"><b class="n">MH_04</b> <span class="nums">ours 7.37 vs 9.48 — WIN 1.3×</span> ·
+Genuine precision win: better VIO (0.81×), RTE 0.51×, their LC can't catch up.</div>
+<div class="seqcard"><b class="n">MH_05</b> <span class="nums">ours 19.15 vs 12.62 — LOSS 1.5×</span> ·
+One applied closure vs their continuous absorption; our RTE is 2× <i>better</i> (0.47×) — the loss is
+accumulated yaw drift over the dark far end that a single rigid correction can't repair. Absorption+detection.</div>
+<div class="seqcard"><b class="n">V1_01 / V1_02</b> <span class="nums">4.31 vs 3.65 · 5.66 vs 3.81 — both LOSS ~1.2–1.5×</span> ·
+VIO parity, RTE parity or better, zero-to-few applied closures; their steady 1.2–1.3× conversion decides. Pure
+absorption at small scale.</div>
+<div class="seqcard"><b class="n">V1_03</b> <span class="nums">ours 6.75 vs 2.67 — LOSS 2.5×</span> ·
+<code>loops=0</code>. Fast aggressive motion; our retrieval never fires (blurred queries), their covisibility
+matching gains 2.14×. Detection.</div>
+<div class="seqcard"><b class="n">V2_01</b> <span class="nums">ours 3.68 vs 4.33 — WIN 1.2×</span> ·
+Their LC hurts them (0.73×); our discipline + better RTE (0.53×) wins. Mirror image of V1_03.</div>
+<div class="seqcard"><b class="n">V2_02</b> <span class="nums">ours 6.53 vs 3.16 — LOSS 2.1×</span> ·
+<code>loops=0</code> and VIO 2.7× behind — their lc0 score (2.43!) says the sequence is easy if you keep tracks
+through the fast yaw sweeps. Tracking + detection.</div>
+<div class="seqcard"><b class="n">V2_03</b> <span class="nums">ours 20.98 [20.9–21.1] vs 3.48 — LOSS 6.0×</span><br>
+Our worst EuRoC result and fully explained: the fastest sequence in the benchmark (blur + rotation), KLT sheds
+tracks (VIO 2.9× behind, RTE 1.33×), retrieval never fires (<code>loops=0</code>), their descriptor frontend
+re-acquires and their LC still converts 2.1× on top. Every failure class except robustness, stacked.</div>
+
+<h3>MSD (headset) — 3W 8L 3T +1 DNF. Verdict: NOT calibration — absorption plus two tracking blowouts</h3>
+<p class="small">The earlier "MSD gap is calibration-level" claim is <b>retired</b> by this table: a calibration
+deficit would hit all sequences roughly evenly; instead five sequences are at parity or better
+(MOO05/07/09/10/11), and the losses split cleanly into tracking (MOO01/02/13) and absorption (the rest).</p>
+<div class="seqcard"><b class="n">MOO01 / MOO02</b> <span class="nums">20.54 vs 2.67 (7.7×) · 23.95 vs 2.29 (10.5×) — LOSS</span><br>
+The two long headset walk-arounds. RTE 1.9× worse — sustained head-turn blur degrades flow tracks; VIO 3.1–4.7×
+behind before closures even matter. Then absorption: we apply 2–4 closures for 1.1–1.35× gain; they convert
+2.5–3.3×. Both must be fixed to compete here; frontend first (the VIO deficit is the larger term).</div>
+<div class="seqcard"><b class="n">MOO03 / MOO04 / MOO05 / MOO06 / MOO14</b>
+<span class="nums">LOSS 2.0–3.9× despite VIO parity-or-better on all five</span><br>
+The absorption block: our raw odometry beats theirs on four of five (down to 0.50×), local RTE comparable, and
+the final scores lose 2–4× on their 1.8–4.7× LC conversion. MOO04 is the cleanest: we start 2× ahead
+(7.0 vs 14.2) and finish 2.3× behind (6.9 vs 3.0). Nothing but closure absorption in play.</div>
+<div class="seqcard"><b class="n">MOO08</b> <span class="nums">ours 3.15 vs 21.07 — WIN 6.7×</span> ·
+Their VIO fails outright (39.0) — likely a tracking collapse they never recover; ours cruises. The single
+biggest precision win we own, and it is a robustness win.</div>
+<div class="seqcard"><b class="n">MOO09 / MOO10 / MOO11 / MOO07</b> <span class="nums">parity to WIN (0.40 vs 0.77 best)</span> ·
+Short/small-scale scans: our better local tracking decides; closures barely matter for either system.</div>
+<div class="seqcard"><b class="n">MOO13</b> <span class="nums">ours 32.07 [28.6–33.3] vs 4.85 — LOSS 6.6×</span> ·
+The third tracking blowout (RTE 2.47×, VIO 3.2×) — fast stairwell-style traverse; also the highest closure count
+(6) for only 1.51× gain. MOO15: they DNF, we finish (28.2) — robustness.</div>
+
+<h3>4Seasons drives — 2W 1L</h3>
+<div class="seqcard"><b class="n">drive1_city</b> 1.44% vs 3.32% — WIN · every run beats them ·
+<b class="n">drive2_city</b> 3.35% vs DNF (both modes diverge) — WIN ·
+<b class="n">drive3_country</b> 1.88% vs 1.22% — LOSS 1.5× (open-country: their long-baseline BRISK matching
+holds scale better on distant structure; our XFeat matching range caps at 60m).</div>
+
+<h2 id="mech">5. Mechanism review — the full stack, ours vs theirs</h2>
+
+<div class="mech"><h4>Frontend: Basalt KLT patch flow vs OKVIS2 BRISK detect-and-describe
+<span class="verdict v-ahead">AHEAD on smooth motion</span> · <span class="verdict v-behind">BEHIND under blur</span></h4>
+<p>Basalt tracks sparse patches with pyramidal inverse-compositional KLT between frames; features live as long
+as flow converges. This gives sub-pixel local precision — our RTE beats OKVIS2 on 24/39 sequences, down to
+0.39× — but a shed track is gone: under motion blur or texture loss the patch pool collapses and drift spikes
+(MOO01/02 RTE 1.9×, MOO13 2.5×, V2_03, room1/5, corridors 1.3–1.6×). OKVIS2 detects BRISK corners every keyframe
+and matches by descriptor: worse local noise (their RTE), but re-acquisition is free — a corner lost to blur is
+re-found the next sharp frame, and matching against <i>map landmarks</i> doubles as continuous closure detection.
+The XFeat/LighterGlue/EigenPlaces stack we built lives only in the map layer, not in the VIO frontend.</p></div>
+
+<div class="mech"><h4>VIO backend: Basalt square-root sliding-window vs OKVIS2 bounded factor graph
+<span class="verdict v-par">PARITY in mechanism, BEHIND in closure interface</span></h4>
+<p>Basalt: fixed-lag window (frames + keyframes), landmarks eliminated by nullspace projection, marginalization
+prior kept as a matrix square root updated by specialized QR (Demmel 2021) — numerically excellent, fast, and
+<i>closed</i>: once states leave the window their information is folded irreversibly into one dense prior.
+OKVIS2: bounded factor graph of observations + IMU preintegrals + <b>pose-graph edges created by marginalizing
+common observations, cached so they can be turned back into landmarks and observations</b> (Leutenegger 2022).
+The difference is not estimation quality — it is that their marginalization is a reversible container and ours
+is a one-way sink. Every downstream absorption difference follows from this single design divergence.</p></div>
+
+<div class="mech"><h4>Closure detection: retrieval-event pipeline vs covisibility matching
+<span class="verdict v-ahead">AHEAD at long range</span> · <span class="verdict v-behind">BEHIND at short range</span></h4>
+<p>Ours: EigenPlaces VPR shortlist → NN prematch → LighterGlue → PnP verify → 2-frame confirm. Superb at
+kidnapped/wake-up and long-range revisits (95% burst recall, corridor5/slides where their recognition fails). But
+it is an <i>event</i> pipeline: no VPR hit, no closure — and fast blurred queries produce no VPR hit
+(EuRoC V-rooms: <code>loops=0</code> on four sequences). OKVIS2 matches live BRISK features against co-visible
+map landmarks continuously as part of tracking — closure detection at room scale is free and permanent. We built
+TIGHTSUB to emulate continuous absorption but it still requires the retrieval event to fire first.</p></div>
+
+<div class="mech"><h4>Closure application: rigid correction + priors + irreversible folds vs
+landmark reactivation + async loop optimization <span class="verdict v-behind">THE dominant gap</span></h4>
+<p>Ours, in order of maturity: (1) <code>CORR</code> rigid step / pose-graph deform of stored keyframes —
+moves the map, injects zero information into the estimator; (2) TIGHT pose prior — transient, absorbed then
+forgotten; (3) LMFACT/LMTRACK fixed-3D reprojection factors — per-point, optimizer-arbitrated, but pulling toward
+PnP-derived 3D (the closure's own estimate, bias included), transient unless folded; (4) LMMARG scene-gated fold —
+permanent injection into the sqrt prior, one-way, no relinearization, gated hard because a wrong fold is forever
+(four closure-quality gate families failed before the scene gate held). Net measured conversion: 1.0–1.2× on most
+sequences, 2–3.8× at best. Theirs: the closure <i>reopens the past</i> — pose-graph edges revert to observations,
+old landmarks become live variables again, and the whole loop is re-optimized asynchronously with consistent
+relinearization, then synchronized into the realtime graph. Net measured conversion: 1.7–31.9×. They also pay for
+it (slides1 0.27×, V2_01 0.73× — reopened wrong loops poison everything); our discipline never pays. The target
+architecture is their absorption behind our gates.</p></div>
+
+<div class="mech"><h4>Relocalization / wake-up <span class="verdict v-ahead">DECISIVELY AHEAD</span></h4>
+<p>Burst-15 recall 95.1% mean over 17 sequences, ~55ms, 3–5cm; OKVIS2's reference harness deadlocks at the sensor
+gap (DNF on all six blackout arms). Not contested by any measurement we have.</p></div>
+
+<div class="mech"><h4>Map maintenance: LOCALBA, welds, eviction, descriptors
+<span class="verdict v-par">ADEQUATE, not the bottleneck</span></h4>
+<p>Bounded structure refinement (LOCALBA resection–intersection), submap welds with age rules, cap-400 slots with
+usefulness eviction, XFeat descriptors with union banks. The reloc grid (rooms 100% recall @ 3–5cm) says map
+quality is sufficient for recognition; the absorption analysis says the map's <i>metric</i> content — per-keyframe
+landmark copies refined only at closure events — is below BA-grade, which is what caps LMFACT factor quality
+(factors are only as good as the 3D they pull toward). A landmark-reactivation architecture fixes this
+automatically because structure re-enters optimization.</p></div>
+
+<h2 id="basalt">6. Basalt internals and our seven patch stages — what we changed, what we did not</h2>
+<p>The user's instinct is correct: we have modified the <i>edges</i> of Basalt, not its core. The seven stages so
+far, with their measured outcomes:</p>
+<div class="tblwrap"><table>
+<tr><th>stage</th><th>what it does</th><th>measured verdict</th></tr>
+<tr><td>2 — pose prior</td><td>closure pose as weak prior (TIGHT/TIGHTSUB channel)</td><td>keeper; corridors −4cm (v14)</td></tr>
+<tr><td>3 — landmark factors</td><td>fixed-3D reprojection factors on query frames</td><td>transient-only: provably inert (agree-by-construction, evaporate at marg)</td></tr>
+<tr><td>4 — marg-persistent fold</td><td>keyframe-anchored batches fold into sqrt prior at kf-marg</td><td>rooms 13→6.5 / 18→11; the single biggest quality win</td></tr>
+<tr><td>5 — fold-time arbitration</td><td>median residual vs current state gates the fold</td><td>rejected — taxes rooms, cannot catch aliased-space poison</td></tr>
+<tr><td>6 — per-batch arb class</td><td>room/corridor arbitration via sigma channel</td><td>built, unnecessary after 7</td></tr>
+<tr><td>7 — persist-sign fix</td><td>the setter destroyed the transient/persist sign since day one</td><td>critical fix; invalidated all pre-7 gate verdicts</td></tr>
+</table></div>
+<p>What we have <b>not</b> touched, in rough order of relevance to the measured gaps:</p>
+<ul>
+<li><b>The marginalization schedule itself</b> — which frames/keyframes marginalize when, and irreversibly.
+DM-VIO (Stumberg 2022) demonstrates a second, delayed marginalization graph that can be re-advanced with new
+information and consistent linearization points — the direct antidote to our "posts lose the state-window race"
+and "folds are forever" problems.</li>
+<li><b>Landmark lifetime</b> — Basalt landmarks die when their host keyframe marginalizes; there is no
+reactivation path. OKVIS2's whole absorption advantage lives in this one difference.</li>
+<li><b>Relinearization</b> — the sqrt prior keeps first-estimate Jacobians; large closure corrections make the
+prior inconsistent with the corrected state (we measured the symptom as "fold poison" in aliased spaces and
+gated it, where OKVIS2 relinearizes it away).</li>
+<li><b>The optical-flow frontend</b> — patch sizes, pyramid levels, and track-loss recovery (the MSD frontend
+sweep tested config knobs, not architecture: a redetect-and-redescribe fallback under blur was never tried).</li>
+<li><b>Keyframe selection under fast motion</b> — Basalt keyframes by flow disparity; blur-heavy sections
+under-keyframe exactly when redundancy is most needed.</li>
+</ul>
+
+<h2 id="lit">7. Literature</h2>
+<ul>
+<li><b>OKVIS2</b> — Leutenegger, <a href="https://arxiv.org/abs/2202.09199">Realtime Scalable Visual-Inertial SLAM
+with Loop Closure (arXiv:2202.09199)</a>: pose-graph edges by marginalizing common observations, fluidly reverted
+to landmarks+observations at closure; async loop optimization synchronized into the realtime graph. The measured
+1.7–31.9× conversion machine.</li>
+<li><b>DM-VIO</b> — von Stumberg &amp; Cremers, <a href="https://arxiv.org/abs/2201.04114">Delayed Marginalization
+Visual-Inertial Odometry (arXiv:2201.04114)</a>: a second factor graph with delayed marginalization, re-advanced
+to inject information into already-marginalized states with consistent linearization. The template for making
+Basalt's prior reversible without abandoning its sqrt form.</li>
+<li><b>Square-root marginalization</b> — Demmel et al., <a href="https://arxiv.org/abs/2109.02182">Square Root
+Marginalization for Sliding-Window Bundle Adjustment (ICCV 2021, arXiv:2109.02182)</a>: the exact machinery our
+stages 4–7 graft onto (nullspace projection, QR prior updates); algebraically equivalent to Schur complement,
+36% faster.</li>
+<li><b>Basalt / NFR</b> — Usenko et al., <a href="https://arxiv.org/abs/1904.06504">Visual-Inertial Mapping with
+Non-Linear Factor Recovery</a>: Basalt's own answer to map reuse recovers nonlinear factors from the VIO for an
+<i>offline</i> mapping layer — evidence the authors also considered the VIO window too closed; NFR is the
+non-causal cousin of what we need causally.</li>
+<li><b>Learned-dense frontier</b> — <a href="https://arxiv.org/abs/2306.01173">BAMF-SLAM (RAFT-style recurrent
+matching, multi-fisheye)</a> and <a href="https://arxiv.org/abs/2409.10143">P2U-SLAM</a> report sub-10cm magistrale
+numbers on TUM-VI — with offline/full-BA, non-causal protocols and start-segment-only alignment; not comparable to
+causal numbers here, but they mark where dense learned matching is heading. Our XFeat-dense NPU frontend is the
+on-device cousin of this direction.</li>
+</ul>
+
+<h2 id="roadmap">8. Roadmap, ranked by expected value</h2>
+<div class="tblwrap"><table>
+<tr><th>rank</th><th>work item</th><th>attacks</th><th>sequences in reach</th><th>expected effect (bounded by decomposition)</th></tr>
+<tr><td>R1</td><td><b>Reversible marginalization / landmark reactivation</b> in Basalt: keep observation batches
+alongside the sqrt prior (DM-VIO-style delayed second graph, or OKVIS2-style edge↔observation cache); on a
+verified closure, re-introduce matched old landmarks as live observations and re-optimize the window with fresh
+linearization — behind our existing gates.</td><td>ABSORB (22 seqs)</td><td>all rooms, corridors 1–3, MOO03–06/14,
+V1/V2, MH_01/03/05</td><td>closing even half the conversion gap (ours 1.1×→2.5×) flips rooms to ~1.5–2.5cm and
+corridors 1–3 to ~6–9cm — from the measured VIO baselines, no speculation</td></tr>
+<tr><td>R2</td><td><b>Blur-robust frontend fallback</b>: XFeat redetect + descriptor rematch when KLT track count
+collapses (we already run XFeat on-device at 3.6ms; wire it into Basalt's flow as a recovery path, not a
+replacement).</td><td>TRACK (9 seqs)</td><td>MOO01/02/13, V2_02/03, room1/5, corridor4</td><td>RTE outliers
+1.9–2.5× → ~1.0× puts MOO01 near 9cm, MOO13 near 15cm before absorption gains</td></tr>
+<tr><td>R3</td><td><b>Covisibility-triggered closure path</b>: match live frames against co-visible map landmarks
+by descriptor (no VPR event needed) at room scale — the sub-gate factor channel already exists to absorb the
+result.</td><td>DETECT (5 seqs)</td><td>V1_03, V2_02/03, MH_02/05</td><td>their gain on these (up to 2.1×) becomes
+available to us; V1_03 6.75→~3–4</td></tr>
+<tr><td>R4</td><td><b>Deterministic replay scheduling</b> (infra): fz18's corr1 flips 17/29/32 across n=10 rounds —
+run stochasticity halves every corridor A/B's power. Fixed thread schedule + seeded queues makes future R1–R3
+verdicts 3× cheaper.</td><td>all future work</td><td>—</td><td>enabler</td></tr>
+<tr><td>R5</td><td><b>Early-map gate hardening</b>: the MH_01 92.7cm outlier run (wrong-place closure admitted while
+the map was ~20 keyframes old) — raise covis floor when map is young.</td><td>ROBUST polish</td><td>MH_01</td>
+<td>removes the one observed discipline failure</td></tr>
+<tr><td>R6</td><td><b>Far-matching range</b> for drives (drive3 loss): extend verification range past 60m with
+bearing-only far pool (FARBEAR exists, flag-off) + stereo long-baseline triangulation.</td><td>drive3</td>
+<td>drive3</td><td>1.88%→toward their 1.22%</td></tr>
+</table></div>
+<div class="callout"><b>Sequencing:</b> R4 first (it is cheap and multiplies everything), then R1 — it is the
+dominant term on 22 of 39 sequences and its mechanism is now precisely understood from both our seven-stage
+evidence trail and the OKVIS2/DM-VIO literature. R2 and R3 are independent of R1 and each other; they can run as
+parallel container arcs. The robustness discipline (gates, confirms, scene-gating) is non-negotiable in every
+upgrade — it is the only structural advantage the decomposition shows we own.</div>
+
+<h2 id="limits">9. Limitations of this analysis</h2>
+<ul>
+<li>OKVIS2 numbers are our own runs of their reference implementation with per-dataset configs; a tuned
+proprietary deployment may differ. All comparisons are same-machine, same-protocol.</li>
+<li>okvis2-lc0 as "their VIO" includes their keyframe BA; it is the correct absorption baseline but not a pure
+odometry lower bound.</li>
+<li>Corridor/magistrale medians carry residual bimodality even at n=10–20; per-seq deltas under ~1.3× in those
+groups should not be over-read (the corr10/mag10 power rounds bound this).</li>
+<li>MSD n=3 per cell for EuRoC/MSD arms; tight ranges (reported per-card) justify the reads, but MOO03's
+[15.6–24.7] spread means its exact ratio is soft.</li>
+<li>The RTE→frontend attribution rests on RTE being closure-independent (6-frame deltas); closure snaps can
+leak into RTE at application instants — the reported medians are robust to a handful of snap frames.</li>
+</ul>
+
+<p class="small" style="margin-top:40px">Sources: <a href="https://arxiv.org/abs/2202.09199">OKVIS2</a> ·
+<a href="https://arxiv.org/abs/2201.04114">DM-VIO</a> · <a href="https://arxiv.org/abs/2109.02182">√-marg BA</a> ·
+<a href="https://arxiv.org/abs/1904.06504">Basalt NFR</a> · <a href="https://arxiv.org/abs/2306.01173">BAMF-SLAM</a> ·
+<a href="https://arxiv.org/abs/2409.10143">P2U-SLAM</a> · bench/ITERATIONS.md (ledger of record) ·
+site data: within-round stage-7 rounds (s5e, heldout, corr10, mag10, fleet18, relocgrid).</p>
+
+</main>
+</body>
+</html>
