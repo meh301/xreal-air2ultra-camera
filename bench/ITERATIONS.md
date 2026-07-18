@@ -86,6 +86,28 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — DM-VIO on MSD (missed) + UNLIMITED-map 4Seasons drives (user requests)
+1. **DM-VIO MSD run**: launcher only did EuRoC+TUM-VI. DM-VIO agent resumed
+   to add the MOO sequences (mono, mode=1, needs MSD calib->DSO camera.txt
+   conversion; agent to report if the MSD camera model is DM-VIO-incompatible).
+   Median-iter select + merge into site baselines when done.
+2. **UNLIMITED-map drives**: built xr_unl_drive (XR_MAP_MAX_KF=20000 [15x the
+   drives' ~1355 KF = effectively unlimited], KF_DIST_M=0.10f [3x denser than
+   0.30 default so the map actually grows], VER_MAX_RANGE_M=60 outdoor,
+   800x400). Note: 50000-cap FAILED (>2GB .bss R_X86_64_PC32 relocation
+   overflow — the 33KB MegaLoc embedding slot; 20000 fits at 1.11GB .bss).
+   Firing drive1_city/drive2_city/drive3_country with best-config + MegaLoc
+   + wake-up reloc on .15. Running (kf growing). Will report the ACTUAL KF
+   count the dense unlimited map reaches + ATE + reloc — the honest test of
+   whether density/cap was ever the drive limiter (at 0.30/2000-cap they
+   stored only ~1300-1355 KF and did NOT hit the cap, so this dense run is
+   what actually exercises "no mapping limits").
+
+STREAMS: .15 lockstep corridor confirm + unlimited drives; .58 HybVIO fleet
+(14/26); DM-VIO MSD agent. DM-VIO baseline (euroc/tumvi) already on site.
+
+---
+
 ### 2026-07-19 — HybVIO baseline ADDED (5th system, stereo VIO)
 Built on .58 (VIO-only/lc0; USE_SLAM off to dodge the SuiteSparse/g2o
 GCC-13 chain). Binary /root/baselines/hybvio/target/main. Smoke: MH_01
