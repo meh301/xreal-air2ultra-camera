@@ -86,6 +86,23 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-18 — znt (transient-gated ZNCC) verdict → v4 uniformity test fired
+znt_ab (.58, n=5, cm): gating RESCUED the ramp case — **MH_05 19.5→17.1**
+(always-on had HURT it; the windowed detector arms 4x/run exactly at the
+events) and **kept V2_03 16.2→6.9**. But slides STILL harmed (slides1
+24→31, slides2 27→55, armed 1-3x/run): a projector slide flip IS a
+photometric transient — just a LOCAL one, and the v3 detector can't
+tell. znf1k (valid 16-bit floor): V2_03 kept (6.6) but slides/MOO still
+harmed → floor path CLOSED (contrast flattening itself is the harm, not
+sigma amplification). V1_03/MOO02 mild harm via spurious armings.
+**v4 (committed, znu round fired)**: 4x4-cell uniformity test — arm only
+when the median cell |delta| exceeds threshold AND >=13/16 cells agree
+in sign (global exposure/flicker passes; slide flips and moving lights
+fail the sign-agreement). Ctrl = znt round's cells (adjacent round,
+identical flag-off binary).
+
+---
+
 ### 2026-07-18 — v2 rounds: both REJECTED, both informative → v3s fired
 **radv v2 (radv2_ab)**: the dev>=0.10m + confirmed-site gates KILLED the
 mechanism — mag2/slides2 fired ZERO rebuilds (their apparent deltas =
