@@ -132,6 +132,10 @@ int main(int argc, char** argv) {
     if (best5 <= 5.0) r5_5++;
     printf("PROBE frame=%ld top1_d=%.2f best5_d=%.2f top1_score=%.4f\n",
            pi, d1, best5, sc[0].first);
+    printf("CAND frame=%ld", pi);
+    for (int j = 0; j < 5 && j < (int)sc.size(); j++)
+      printf(" %.9f", kfs[sc[j].second].t);
+    printf("\n");
   }
   printf("DBOW2-SUMMARY n=%d r1@3m=%.3f r5@3m=%.3f r1@5m=%.3f r5@5m=%.3f\n",
          n, n?(double)r1_3/n:0, n?(double)r5_3/n:0, n?(double)r1_5/n:0,
