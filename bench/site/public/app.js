@@ -22,6 +22,7 @@ const ARM_LABEL = {
   "fzbase-vio": "VIO only", "fz18-vio": "VIO (factor-coupled)",
   okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
   orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
+  dmviolc0: "DM-VIO",
   rl18: "wake-up, single frame", rb18: "wake-up, burst-15",
   clip1: "wake-up probe, 1 frame", clip15: "wake-up probe, 15 frames",
 };
@@ -36,10 +37,10 @@ function armColor(a) {
 /* every plot key the trajectory panel may offer, in display order */
 const TRAJ_KEYS = ["vio", "bc", "bc-vio", "absorb",
   "fz19", "fzbase-vio", "fz18-vio", "fz18", "fzbase", "fz17d",
-  "okvis2lc0", "okvis2lc1", "openvinslc0"];
+  "okvis2lc0", "okvis2lc1", "openvinslc0", "dmviolc0"];
 const TRAJ_COLOR = {
   vio: "vio", "bc-vio": "vio", "fzbase-vio": "vio", "fz18-vio": "vio",
-  okvis2lc0: "base", okvis2lc1: "base", openvinslc0: "pub",
+  okvis2lc0: "base", okvis2lc1: "base", openvinslc0: "pub", dmviolc0: "pub",
 };
 const GROUPS = [
   ["overview", "Overview"], ["systems", "vs. Systems"], ["trajectories", "Trajectories"],
@@ -484,9 +485,11 @@ function trajPanel({ group, seq, compact } = {}) {
 
 /* ---------- views ---------- */
 const BASE_COLORS = { "okvis2_lc0": "#d83b3b", "okvis2_lc1": "#a01f1f",
-  "orb3_lc0": "#e0930a", "orb3_lc1": "#a86a00", "openvins_lc0": "#8a897f" };
+  "orb3_lc0": "#e0930a", "orb3_lc1": "#a86a00", "openvins_lc0": "#8a897f",
+  "dmvio_lc0": "#7a5cff" };
 const BASE_LABEL = { "okvis2_lc0": "OKVIS2", "okvis2_lc1": "OKVIS2+LC",
-  "orb3_lc0": "ORB-SLAM3", "orb3_lc1": "ORB-SLAM3+LC", "openvins_lc0": "OpenVINS" };
+  "orb3_lc0": "ORB-SLAM3", "orb3_lc1": "ORB-SLAM3+LC", "openvins_lc0": "OpenVINS",
+  "dmvio_lc0": "DM-VIO" };
 
 function datasetBar(group, view) {
   const seqs = seqsIn(group);

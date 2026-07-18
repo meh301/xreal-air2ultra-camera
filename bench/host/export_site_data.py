@@ -318,7 +318,7 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
                              ARM_ALIAS.get(m.group(2), m.group(2)) + "-vio"))
     for d in baseline_dirs:
         for f in sorted(Path(d).glob("*.tum")):
-            m = re.match(r"(.+)_(okvis2|orb3|openvins)_lc([01])$", f.stem)
+            m = re.match(r"(.+)_(okvis2|orb3|openvins|dmvio)_lc([01])$", f.stem)
             if m:
                 jobs.append((f, m.group(1), f"{m.group(2)}lc{m.group(3)}"))
     for f, seq, arm in jobs:
@@ -400,7 +400,7 @@ def main():
         r"(?P<arm>fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)"
         r"_r(?P<run>\d+)_(?P<track>vio|map)\.tum$")
     base_re = re.compile(
-        r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins)_lc(?P<lc>[01])\.tum$")
+        r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins|dmvio)_lc(?P<lc>[01])\.tum$")
 
     cache_f = out / ".score_cache.json"
     cache = json.loads(cache_f.read_text()) if cache_f.exists() else {}
