@@ -22,12 +22,20 @@
 
 #include <stdint.h>
 
-/* Session keyframe cap. Build-time tunable (-DXR_MAP_MAX_KF=...): 200 is
- * the headset budget; drive-scale maps need 2000+ (drive1 pushed 1839
- * keyframes through a 200-slot map — every probe location evicted before
- * probing = 0 percent reloc recall from capacity alone). */
+/* Session keyframe cap. Build-time tunable (-DXR_MAP_MAX_KF=...).
+ * 2026-07-19: raised 400 -> 3333 after the forensic review found the cap
+ * was the primary magistrale reloc-collapse cause (400 slots x 0.30 m =
+ * ~120 m coverage vs 460-920 m sequences; the closure target was evicted
+ * before the revisit — engine-independent, which is why swapping DBoW2 for
+ * MegaLoc showed no gain). Cost at 3333: ~180 MB .bss, dominated by the
+ * 33 KB max-dim (XR_VPR_MAX_DIM=8448) embedding slot per keyframe.
+ * ON-DEVICE TODO: right-size emb[] to the active model's dim (EigenPlaces
+ * 512-D) to bring this to ~74 MB before shipping 3333 to the headset;
+ * offline replay containers have RAM to spare. Recall cost is a linear
+ * cosine prerank (sub-ms SIMD) + a fixed-size shortlist verify, so the cap
+ * scales coverage without scaling per-probe compute. */
 #ifndef XR_MAP_MAX_KF
-#define XR_MAP_MAX_KF 400
+#define XR_MAP_MAX_KF 3333
 #endif
 #ifndef XR_MAP_KP_PER_KF
 #define XR_MAP_KP_PER_KF 200       /* keypoints/descriptors per keyframe */
