@@ -1521,3 +1521,16 @@ Site refreshed with corrected cells. vs okvis2+lc: euroc 5.17 vs 3.82,
 MSD gaps narrow substantially (MOO02 5.5x from 10.5x).
 FZ19 VALIDATION FIRED: .58 euroc+msd fz19 wave; .15 TUM held-out
 (corr4/5, mag1, slides1) fz18-vs-fz19.
+
+### x FZ19 VALIDATION: TUM PASSES, EUROC SPLITS — decomposition fired
+- TUM held-out (.15, n=5): fz19 > fz18 (corr5 27.2->21.4, mag1 102->89
+  n2->n3, corr4/slides1 tie; agg 25.8->23.2). PASS.
+- euroc/MSD (.58, n=3): agg 5.17->5.49; V2_03 16.6->22.6 (the
+  TRACK-class seq — fast motion; hypothesis: 8px covis matcher attaches
+  stale-3D observations under blur, or sigma-1.0 overweights factors
+  vs a blurred frontend), V1_03 6.0->6.8, MOO15 19.5->26 (n=2 noisy),
+  most others tie; MSD strong cells unchanged.
+- NO FREEZE CALL until the euroc regression is attributed: injo (LMINJ
+  only) + sgo (SIGMA only) waves fired on .58 (150 runs, same frozen
+  binary). Uniform-composition principle holds: fz19 ships only if the
+  regression is fixed or attributed to a gateable condition.
