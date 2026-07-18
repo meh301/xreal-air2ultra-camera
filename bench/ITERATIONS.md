@@ -86,6 +86,33 @@ corridors at large drift.
 
 ## In flight
 
+### 🎛️ 2026-07-19 — VIO SWEEP VERDICT: vio_obs_std_dev 0.5 -> 0.3 wins everywhere
+Disciplined single-param sweep (564 runs, _vio track, n=3). The ONE change
+that wins on all 3 datasets: **config.vio_obs_std_dev 0.5 -> 0.3** (trust
+vision more):
+- EuRoC 7.21 -> 6.34 mean (-12%): MH_05 18.8->16.2 (the flagged target),
+  V1_02 5.4->3.4, V1_03 6.8->5.5.
+- TUM floor 31.7 -> 28.5 mean (-10%): slides2 35.7->22.4, corridor1
+  30.1->25.2, corridor4 18.2->16.5.
+- MSD median 4.24 -> 3.97.
+REFUTED (confirms my earlier refutation): MSD IMU density x0.5/x0.7
+neutral-to-worse; EuRoC IMU x0.7 worse (MH_05 18.8->22.1). Plumbing note:
+IMU noise rides pack calib.txt, scaled by the XR_IMU_NOISE_SCALE env knob
+(xr_replay_main.c:416) — no calib edits needed.
+MIXED (not global defaults): huber05 best MSD mean but MOO08 regress;
+optical_flow_max_recovered_dist2 volatile (per-seq wins+regressions —
+adaptive candidate). Nuance: MSD hard tail (MOO01/02) prefers huber05 —
+obs03+huber05 combo untested.
+CONFIRMATION A/B FIRING: best-config (obs 0.5) vs +obs03 (0.3) on the MAP
+track (obs_std interacts with map factor weighting, must verify full-system
+gain before shipping) — .15 euroc+rooms+corridors, .58 msd+slides. If it
+holds -> ship obs_std=0.3 in the device asset + re-freeze.
+
+STREAMS: .15/.58 final-config A/B; .181 DM-VIO fleet (CPU). Site now shows
+corrected bars + trajectory PLOTS (bc/vio/absorb/bc-vio arms).
+
+---
+
 ### ✅ 2026-07-19 — XR_ABSORB VERDICT: the corridor fix WORKS (site updated)
 absorb_ab (.15, within-round n=10, ATE cm) ctrl(best-config) vs absorb:
 | seq | ctrl | absorb | |
