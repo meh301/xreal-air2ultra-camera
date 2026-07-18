@@ -86,6 +86,28 @@ corridors at large drift.
 
 ## In flight
 
+### 🔧 2026-07-19 — STAGE 14 (XR_ABSORB) BUILT: the corridor-gap fix (attack step 3)
+Forensic rank-2 finding implemented + built clean on .15. The map/closure
+factors (pose prior + fixed-3D landmark reprojection) are added to the
+dense H,b in optimize() so `inc` includes their pull, but error_total /
+after_error_total / l_diff all EXCLUDED them — so f_diff saw only vision
+cost rising and the LM step REJECTED exactly the meter-scale corrections
+closures induce (root of 1.0-1.2x absorption vs OKVIS2 1.7-31.9x and the
+corridor1-4 loss). Stage 14 adds xrAbsorbError() (same residuals/weights/
+huber as the H,b block, scale-consistent) to error_total (pre-step, once/
+outer-iter) and after_error_total (post-step, each backtrack). Env-gated
+XR_ABSORB (off = bit-identical). patch_stage14.py committed.
+Smoke: corridor1 ABSORB=1 runs clean (kf=516, loops=2), ATE 30.8 (ctrl
+31.6, n=1 noise on the bimodal seq). VERDICT ROUND absorb_ab RUNNING (.15):
+ctrl vs absorb on corridors 1-5 + mag n=10, rooms n=5 (must not hurt the
+room wins). This is THE test of whether the corridor gap closes.
+
+STREAMS: .15 absorb A/B (corridor fix); .58 VIO sweep (162 runs so far);
+.181 DM-VIO baseline build (in progress). Best-config rebench DONE (see
+corrected numbers above).
+
+---
+
 ### 🎯 2026-07-19 — CORRECTED BEST-CONFIG NUMBERS (cap 3333) — THE MAP HELPS
 Best-config map ATE (cm, n=5, n=10 corr/mag) vs VIO floor vs OKVIS2+LC:
 | seq | BC-map | VIO-floor | okvis2+lc | verdict |
