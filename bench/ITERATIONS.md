@@ -86,6 +86,41 @@ corridors at large drift.
 
 ## In flight
 
+### 🏗️ 2026-07-19 — STAGE 13 BUILT: XRV P4 NATIVE REVIVAL, END-TO-END
+The structural piece the rebuild exists for (user directive: build it
+100%). Three mechanisms, one patch (patch_stage13.py, committed):
+1. **Retired store** (XR_REVIVE): dead landmarks' full observation
+   histories banked under their bridge id (4096-cap FIFO) at every marg
+   — host-death AND flow-lost channels. Retirement replaces oblivion.
+2. **Native revival**: when a closure's injected landmark matches a
+   retired id, its historical observations on still-alive keyframes are
+   GRAFTED on — the revived landmark constrains the OLD kf poses and
+   the new track simultaneously (OKVIS2 edge<->observation duality).
+3. **Closure-scoped re-advance** (XR_REVIVE_RADV): revival arms the
+   stage-11 rebuild ONLY when a retained event still references the
+   revived id, starting AT that event. No recoverable info -> no
+   rebuild (the corr3-protecting property, by construction).
+corr1 smoke: 807 retired, 17+6 revived at the two closures, scoped
+rebuilds fired, clean run. VERDICT ROUND s13_ab RUNNING (.15): ctrl/rev/
+revr on corr1 n=10 (THE target), corr3 n=10 (radv-harm canary),
+room2+mag2 n=5.
+
+### 2026-07-19 — FULL dbw19 GRID DONE (site refreshed, all 17 seqs)
+Ours 86.5% vs DBoW2-fed 88.8% mean (single-frame); DBoW2 slightly ahead
+corr3/4/5+mag1+slides, ours ahead corr1/2; magistrales collapse
+identically for both (matcher/coverage-level); burst rb19 dominates
+either everywhere. Landing errors comparable (4-15 cm).
+
+### 2026-07-19 — ZNCC v5 verdict: binding alone doesn't restore the win
+znb (v4 uniformity detector + per-patch binding): MH_05 kept (15.4),
+V2_03 win GONE (15.3 — the uniformity test arms intermittently; patches
+created in off-windows track unprotected through the flicker), slides
+still harmed (slide flips on a wall-dominated view PASS uniformity).
+Next pairing when a box frees: v3 long-hold single-mean detector + v5
+binding (v3's single continuous arming is what covered every patch).
+
+---
+
 ### 2026-07-18 — FULL dbw19 GRID + ZNCC v5 (per-patch binding) fired
 - User: reloc grid incomplete (dbw19 on only 6/17 seqs) — the full grid
   is in flight: rooms/slides/mag1 rl19 refs shipped to .58 (has ALL
