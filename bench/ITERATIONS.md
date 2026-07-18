@@ -86,6 +86,35 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — USER PER-SEQ INSIGHTS (pre-obs03) + PLOT BUG FIXED
+PLOT BUG FIXED: trajectory export used r1, but r1 can be a divergent
+outlier (MH_01 bc r1=0.86m showing 250cm drift vs the 5.25cm median bar).
+gen_traj now picks the MEDIAN-REPRESENTATIVE run. bench/host/
+gen_traj_representative.py. MOO15 dropped (invalid all measurements).
+USER GROUND TRUTH (validates direction):
+- VIO-driven DISADVANTAGES (obs03 sweep targets these): MH_05 (-5.4cm),
+  V2_03 (-13.1cm), room1, room5. obs03 helps MH_05 18.8->16.2, V1_03
+  6.8->5.5 — right direction; V2_03/room5 need the confirmation.
+- room2 = VIO advantage but still loses to OKVIS2+LC (their micro-LC).
+- ALL EuRoC + rooms are "VIO track = full system" (map inert there — as
+  designed; map only fires on revisits).
+- CORRIDORS: LC fires on all but corr4 (corr4 didn't need it, result
+  good); clear gains corr2/3/5; corr1 fires but ~no gain (matches
+  XR_ABSORB: corr1 helped by absorb -31%, corr3 -56%). "Precision getting
+  there vs OKVIS2+LC."
+- MAGISTRALE/SLIDES: we're CLEARLY WINNING overall (outlier: OKVIS2-noLC
+  wins slides1). Matches bc numbers (mag1 26 vs their 180).
+- MOO13: RELOC IS SANE — it activated near the end and SNAPPED THE TRACK
+  BACK from VIO error accumulation. The bad score is VIO drift, not a
+  reloc failure. Good validation of the reloc/closure path.
+- MOO15: invalid (plot fucked ours, OKVIS2 no score) -> dropped.
+Takeaway: the reloc/closure machinery is SANE (MOO13 proof), the wins are
+real (magistrale/slides/mag1), and the remaining losses are VIO-driven
+(MH_05/V2_03/room1/5) — exactly what obs03 targets. Confirmation A/B
+running.
+
+---
+
 ### 🎛️ 2026-07-19 — VIO SWEEP VERDICT: vio_obs_std_dev 0.5 -> 0.3 wins everywhere
 Disciplined single-param sweep (564 runs, _vio track, n=3). The ONE change
 that wins on all 3 datasets: **config.vio_obs_std_dev 0.5 -> 0.3** (trust
