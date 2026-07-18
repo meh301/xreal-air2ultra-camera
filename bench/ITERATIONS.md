@@ -86,6 +86,33 @@ corridors at large drift.
 
 ## In flight
 
+### 🏗️ 2026-07-19 — VIO ARCHITECTURE PROGRAM (workflow roadmap + implementation started)
+Rigorous VIO-only (not map) architectural analysis (5-agent workflow, code
++ literature + benchmark). KEY REFRAME: the corridors (50cm pure-VIO, the
+WORST numbers) are a KEYFRAME-OBSERVABILITY failure, NOT photometric/
+precision — stock's only KF trigger is connectivity-ratio, so pure forward
+motion keeps points tracked -> no KFs -> window baseline collapses ->
+optical-axis depth unobservable. Two failure FAMILIES: (1) corridor
+forward-drift = geometry; (2) MH_05/V2_03/MSD = residual-reliability.
+HIGH tier (6): 1.Parallax KF trigger [BUILT stage 16, A/B firing];
+2.IMU-rotation-prior 2-pt RANSAC epipolar gate; 3.Regularized affine
+gain+bias residual [WRITTEN stage 15]; 4.Activate DEAD main-path residual
+gate (out_error discarded at ~line 505!); 5.Chi2 outlier rejection before
+marg (backend has Huber-only, live TODO); 6.Baseline-preserving marg
+criterion. PROMISING: feature-recall [A/B firing], global affine exposure
+state, consume dataset photometric cal, DM-VIO VIO-side delayed marg.
+SPECULATIVE: ZUPT, robust-init. DO NOT: online IMU intrinsics; FEJ is
+CORRECT (don't touch); FB-check + adaptive-window are tuning not arch.
+COMPOSITION (critical): #1 parallax + #6 baseline-preserving-marg are a
+UNIT (parallax makes baseline KFs, marg-criterion stops them being
+immediately evicted — parallax ALONE may be incomplete). Reliable residuals
+(#3+#4) justify pushing obs_std below 0.3 -> compounds the -12% EuRoC gain.
+IN FLIGHT: kfpar_ab (.58, XR_KFPAR {off,8,12,18px} pure-VIO on corridors
++guards) — THE corridor-fix test; recall_ab (.181). stage 15 anchor needs
+retarget for the v5-bound patch.h. Full roadmap in task wpvkvi8z5 output.
+
+---
+
 ### 2026-07-19 — DM-VIO on MSD (missed) + UNLIMITED-map 4Seasons drives (user requests)
 1. **DM-VIO MSD run**: launcher only did EuRoC+TUM-VI. DM-VIO agent resumed
    to add the MOO sequences (mono, mode=1, needs MSD calib->DSO camera.txt
