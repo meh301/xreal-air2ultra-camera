@@ -59,7 +59,7 @@ DATASET_FPS = {"euroc": 20.0, "tumvi": 20.0, "msd": 30.0, "drives": 15.0}
 ATE_DIVERGE_M = {"euroc": 10.0, "tumvi": 10.0, "msd": 1.0, "drives": 1000.0}
 # s5off / g99fl envs are flag-identical to fzbase / fz18 — relabel so the
 # site carries one pair of ours arms across every dataset group.
-ARM_ALIAS = {"s5off": "fzbase", "g99fl": "fz18"}
+ARM_ALIAS = {"s5off": "fzbase", "g99fl": "fz18", "inj": "fz19"}
 RTE_DIVERGE_CM = 10.0
 RTE_DELTA = 6
 T_MAX_DIFF = 0.01
@@ -298,7 +298,7 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
     jobs = []
     for d in results_dirs:
         for f in sorted(Path(d).glob("*_r1_map.tum")):
-            m = re.match(r"(.+?)_{1,2}(fz18|fzbase|fz17d|s5off|g99fl)_r1_map",
+            m = re.match(r"(.+?)_{1,2}(fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)_r1_map",
                          f.stem)
             if m:
                 jobs.append((f, m.group(1).rstrip("_"),
@@ -306,7 +306,7 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
         # VIO track: fzbase's vio IS the raw-VIO reference; fz18's vio shows
         # the factor stack's effect inside the estimator.
         for f in sorted(Path(d).glob("*_r1_vio.tum")):
-            m = re.match(r"(.+?)_{1,2}(fz18|fzbase|fz17d|s5off|g99fl)_r1_vio",
+            m = re.match(r"(.+?)_{1,2}(fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)_r1_vio",
                          f.stem)
             if m:
                 jobs.append((f, m.group(1).rstrip("_"),
@@ -392,7 +392,7 @@ def main():
     # Only stage-7-era result dirs may be passed to --results.
     ours_re = re.compile(
         r"(?P<seq>.+?)_{1,2}"
-        r"(?P<arm>fz18|fzbase|fz17d|s5off|g99fl)"
+        r"(?P<arm>fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)"
         r"_r(?P<run>\d+)_(?P<track>vio|map)\.tum$")
     base_re = re.compile(
         r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins)_lc(?P<lc>[01])\.tum$")
