@@ -57,6 +57,10 @@ f.write_text(t, encoding="utf-8")
 # ---- frame_to_frame_optical_flow.h: the detector ------------------------
 f = W / "include/basalt/optical_flow/frame_to_frame_optical_flow.h"
 t = f.read_text(encoding="utf-8")
+if "#include <algorithm>" not in t:
+    t = t.replace("#pragma once", "#pragma once
+#include <algorithm>
+#include <cstring>", 1)
 old = """  void processFrame(int64_t curr_t_ns, OpticalFlowInput::Ptr& new_img_vec) {
     for (const auto& v : new_img_vec->img_data) {
       if (!v.img.get()) return;
@@ -81,36 +85,59 @@ new = """  void processFrame(int64_t curr_t_ns, OpticalFlowInput::Ptr& new_img_v
         return (int64_t)((e && *e ? atof(e) : 2000.0) * 1e6);
       }();
       const auto& xr_im = *new_img_vec->img_data[0].img;
-      double xr_sum = 0;
-      int xr_n = 0;
-      for (size_t y = 0; y < xr_im.h; y += 16)
-        for (size_t x = 0; x < xr_im.w; x += 16) {
-          xr_sum += xr_im(x, y);
-          xr_n++;
-        }
-      const float xr_mean =
-          xr_n ? (float)(xr_sum / xr_n) * (1.0f / 256.0f) : 0.f;
-      static float xr_ring[10];
+      /* v4 UNIFORMITY TEST: 4x4 cell means — a GLOBAL photometric event
+       * (exposure ramp, flicker) shifts every cell together; a scene
+       * change (projector slide flip, moving light) shifts a region.
+       * Arm only on uniform shifts: median cell |delta| above threshold
+       * AND >=13/16 cells agreeing in sign. */
+      float xr_cm[16];
+      {
+        const size_t cw = xr_im.w / 4, ch = xr_im.h / 4;
+        for (int cy = 0; cy < 4; cy++)
+          for (int cx = 0; cx < 4; cx++) {
+            double s = 0;
+            int n = 0;
+            for (size_t y = cy * ch; y < (size_t)(cy + 1) * ch; y += 8)
+              for (size_t x = cx * cw; x < (size_t)(cx + 1) * cw; x += 8) {
+                s += xr_im(x, y);
+                n++;
+              }
+            xr_cm[cy * 4 + cx] = n ? (float)(s / n) * (1.0f / 256.0f) : 0.f;
+          }
+      }
+      static float xr_ring[10][16];
       static int xr_ri = 0, xr_rn = 0;
       static int64_t xr_active_until = 0;
-      float xr_dmax = 0;
+      float xr_best_med = 0;
+      int xr_best_pos = 0, xr_best_neg = 0;
       for (int i = 0; i < xr_rn; i++) {
-        const float d = xr_mean - xr_ring[i];
-        if (d > xr_dmax) xr_dmax = d;
-        if (-d > xr_dmax) xr_dmax = -d;
+        float ad[16];
+        int pos = 0, neg = 0;
+        for (int c = 0; c < 16; c++) {
+          const float d = xr_cm[c] - xr_ring[i][c];
+          ad[c] = d < 0 ? -d : d;
+          if (d > 0) pos++; else neg++;
+        }
+        std::nth_element(ad, ad + 8, ad + 16);
+        if (ad[8] > xr_best_med) {
+          xr_best_med = ad[8];
+          xr_best_pos = pos;
+          xr_best_neg = neg;
+        }
       }
-      xr_ring[xr_ri] = xr_mean;
+      memcpy(xr_ring[xr_ri], xr_cm, sizeof xr_cm);
       xr_ri = (xr_ri + 1) % 10;
       if (xr_rn < 10) xr_rn++;
-      if (xr_rn >= 5 && xr_dmax > xr_dthr)
+      if (xr_rn >= 5 && xr_best_med > xr_dthr &&
+          (xr_best_pos >= 13 || xr_best_neg >= 13))
         xr_active_until = curr_t_ns + xr_hold_ns;
       const int xr_on = curr_t_ns < xr_active_until ? 1 : 0;
       static int xr_logn = 0;
       if (xr_on && !PatchT::xr_zncc_gate().load(std::memory_order_relaxed) &&
           xr_logn < 20) {
         xr_logn++;
-        std::cout << "[xr] ZNCC transient armed: dmean=" << xr_dmax
-                  << std::endl;
+        std::cout << "[xr] ZNCC transient armed: dmed=" << xr_best_med
+                  << " pos=" << xr_best_pos << std::endl;
       }
       PatchT::xr_zncc_gate().store(xr_on, std::memory_order_relaxed);
     }"""
