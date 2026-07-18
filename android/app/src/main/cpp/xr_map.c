@@ -1262,6 +1262,45 @@ static int lminj_on(void) {
  * an anti-escalation rule (a bigger deform shortly after a previous one
  * needs stronger evidence). Rejected deforms downgrade to TIGHT-prior
  * posting (soft absorption) instead of moving the map. */
+/* XR_MICROCORR — the missing middle between inert and snap. Measured
+ * (ledger): OKVIS2+LC applies 4-15 m of CUMULATIVE micro-adjustment per
+ * run spread over thousands of frames (>1mm each, no steps); our map
+ * track is bit-identical to VIO outside rare deforms — sub-gate
+ * verifications measure a deviation and then let it sit as ATE. The
+ * servo: every VERIFIED healthy sub-gate closure nudges CORR a small
+ * capped fraction toward the alignment. Each nudge is <=2 cm —
+ * low-stakes, recoverable, invisible; at search cadence this tracks
+ * cm-level drift continuously like their LC does. */
+#define MC_CAP_M 0.02f                 /* max translation nudge per event */
+#define MC_FRAC 0.15f                  /* max fraction of dev per event */
+static int microcorr_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_MICROCORR");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: MICRO-CORRECTION servo ON");
+    }
+    return v;
+}
+static void microcorr_nudge(const float Dq[4], const float Dp[3],
+                            float dev) {
+    float w = dev > 1e-4f ? MC_CAP_M / dev : 0.0f;
+    if (w > MC_FRAC) w = MC_FRAC;
+    if (w <= 0.0f) return;
+    float dot = CORR.q[0]*Dq[0] + CORR.q[1]*Dq[1] + CORR.q[2]*Dq[2] +
+                CORR.q[3]*Dq[3];
+    float sgn = dot < 0 ? -1.0f : 1.0f, n2 = 0;
+    for (int c = 0; c < 4; c++) {
+        CORR.q[c] = (1.0f - w) * CORR.q[c] * sgn + w * Dq[c];
+        n2 += CORR.q[c] * CORR.q[c];
+    }
+    n2 = 1.0f / sqrtf(n2);
+    for (int c = 0; c < 4; c++) CORR.q[c] *= n2;
+    for (int c = 0; c < 3; c++)
+        CORR.p[c] = (1.0f - w) * CORR.p[c] + w * Dp[c];
+    CORR.gen++;
+}
+
 static int defguard_on(void) {
     static int v = -1;
     if (v < 0) {
@@ -4998,6 +5037,14 @@ static void process_keyframe(void) {
                     memcpy(PENDING_D.p, Dp, sizeof PENDING_D.p);
                     mhyp_push(Dq, Dp, work.ts);
                 }
+                /* XR_MICROCORR: verified healthy sub-gate closure — servo
+                 * the output correction a capped step toward the measured
+                 * alignment (the continuous absorption OKVIS2+LC has and
+                 * we measured ourselves to lack; see ledger). */
+                if (microcorr_on() && !lost && !xseg &&
+                    nin >= 12 && covis >= 6 &&
+                    vpr_alias_margin > LMMARG_ALIAS_MARGIN)
+                    microcorr_nudge(Dq, Dp, dev);
                 VER_LAST.outcome = VOUT_GATED;
             } else if (!confirmed) {
                 /* one good frame is not enough — wait for a 2nd that agrees */
