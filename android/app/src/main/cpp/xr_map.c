@@ -5328,15 +5328,18 @@ static void process_keyframe(void) {
 
 static void thread_start(void);        /* fwd: used by xr_map_probe below */
 
+static int MAP_WORKING;                /* guarded by MAP_LOCK */
 static void *map_thread(void *arg) {
     (void)arg;
     setpriority(PRIO_PROCESS, (id_t)gettid(), 19);   /* never outrank VIO */
     pthread_mutex_lock(&MAP_LOCK);
     for (;;) {
         while (!MBOX.full) pthread_cond_wait(&MAP_COND, &MAP_LOCK);
+        MAP_WORKING = 1;
         pthread_mutex_unlock(&MAP_LOCK);
         process_keyframe();
         pthread_mutex_lock(&MAP_LOCK);
+        MAP_WORKING = 0;
         if (PROBE_REQ) {               /* finalize probe on EVERY exit path */
             PROBE_REQ = 0;
             PROBE_RES.done = 1;        /* .ok filled by verify, else 0 */
@@ -5484,4 +5487,15 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
                   const float (*lm_uv)[2], int n_lm) {
     xr_map_offer2(q, p, ts_ns, img, NULL, lm_id, lm_xyz, lm_uv, n_lm);
 
+}
+
+/* XR_LOCKSTEP support: 1 while an offer is queued or being processed.
+ * Deterministic replay drains the map layer after every frame so offer
+ * acceptance (single-mailbox drop-when-busy) stops depending on thread
+ * timing — the prime suspect for corridor run-to-run bimodality. */
+int xr_map_busy(void) {
+    pthread_mutex_lock(&MAP_LOCK);
+    int b = MBOX.full || MAP_WORKING;
+    pthread_mutex_unlock(&MAP_LOCK);
+    return b;
 }

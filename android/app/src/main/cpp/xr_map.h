@@ -99,6 +99,10 @@ void xr_map_offer(const float q[4], const float p[3], uint64_t ts_ns,
                   const int32_t *lm_id, const float (*lm_xyz)[3],
                   const float (*lm_uv)[2], int n_lm);
 
+/* 1 while an offer is queued or the map thread is processing one.
+ * Deterministic-replay (XR_LOCKSTEP) drains on this after every frame. */
+int xr_map_busy(void);
+
 /* XR_DEPTHFILL variant: also carries the RIGHT eye of a RECTIFIED stereo
  * pair. At keyframe-store time, keypoints without a VIO landmark get 3D
  * from per-keypoint epipolar ZNCC (fx/baseline registered via

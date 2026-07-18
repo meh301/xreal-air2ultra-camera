@@ -400,7 +400,13 @@ int main(int argc, char **argv) {
     /* v9 detector unification: XFeat maxima seed Basalt corner detection
      * (needs --xfeat for the model AND XR_SEED=1; extension is dlsym'd so
      * stock basalt libs simply ignore the seeds) */
+    int lockstep = 0;
     {
+        const char *ls = getenv("XR_LOCKSTEP");
+        if (ls && *ls && *ls != '0') {
+            lockstep = 1;
+            fprintf(stderr, "xr_replay: LOCKSTEP deterministic replay ON\n");
+        }
         const char *se = getenv("XR_SEED");
         if (se && *se && *se != '0' && xfeat) {
             seed_frontend = 1;
@@ -499,6 +505,21 @@ int main(int argc, char **argv) {
                 usleep(2000);
                 xr_slam_poll_each(on_pose, &ctx, &scratch);
             }
+        }
+        /* XR_LOCKSTEP: deterministic replay — drain the map layer after
+         * every frame so single-mailbox offer acceptance stops depending
+         * on thread timing (the corridor bimodality suspect). Also drain
+         * the VIO pipeline for this frame first so the offer itself has
+         * been made before we wait on it. */
+        if (lockstep) {
+            int spins = 0;
+            while (frames_pushed - ctx.n_poses > 0 && spins++ < 5000) {
+                usleep(500);
+                xr_slam_poll_each(on_pose, &ctx, &scratch);
+            }
+            spins = 0;
+            while (xr_map_busy() && spins++ < 20000)
+                usleep(200);
         }
         line++;
     }
