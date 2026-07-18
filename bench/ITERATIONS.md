@@ -1635,3 +1635,10 @@ escalation shape). DEFGUARD ships FLAG-OFF: valuable against the
 fix for both remains recoverable in-estimator absorption (R1 arc:
 injection deepening + delayed-marg) + continuous map self-consistency.
 FREEZE UNCHANGED: fz19 = fz18 + XR_LMINJ.
+
+### x FZ19 RELOC GRID (15/17 seqs in; mag pending): INJECTION IMPROVES WAKE-UP
+Burst-15 mean 98.2% (fz18-era grid 95.1): corridors 93-100 ALL, rooms
+100 x6, MH_01/MOO07 100, slides 83/97. Single-frame 92.9 (was 87.5).
+Verdict: injection's persistent landmarks IMPROVE recall (better map
+metric quality at revisit). slides single-frame dipped (67 vs 87) —
+burst covers it; noted. Lockstep retry (6h timeout) grinding on .181.
