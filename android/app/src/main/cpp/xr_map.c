@@ -1318,10 +1318,19 @@ static int DEF_GROW_STREAK;            /* consecutive growing deforms */
  * as the loop closes (then shrinks); a wrong-place cascade grows
  * monotonically (MH_01: 1.28->1.43->1.80->2.94). Only the SECOND
  * consecutive growth within the window demands 75% evidence. */
-static int defguard_ok(float dev, int nin, int n3, int covis, uint64_t ts) {
+static int defguard_ok(float dev, int nin, int n3, int covis,
+                       float alias_margin, uint64_t ts) {
     if (!defguard_on()) return 1;
     if (n3 > 0 && nin * 100 < 55 * n3) return 0;       /* evidence floor */
-    if (covis < 8) return 0;
+    /* scene-conditional covis: corridors have THIN covisibility (their
+     * productive returns run covis 5-7 — measured, ledger) while the
+     * poison class is aliased-hall; halls demand much more. */
+    if (lmmarg_scene_ok()) {
+        if (covis < 5) return 0;
+    } else {
+        if (covis < 10 || (n3 > 0 && nin * 100 < 70 * n3)) return 0;
+    }
+    if (alias_margin <= LMMARG_ALIAS_MARGIN) return 0; /* distinct place */
     float ext = map_extent_diag();
     float cap = 1.5f > 0.6f * ext ? 1.5f : 0.6f * ext; /* extent-relative */
     if (dev > cap) return 0;
@@ -5212,7 +5221,8 @@ static void process_keyframe(void) {
                          "(%d/%d inliers, %d covis) — posted to VIO", best_i,
                          (double)dev, (double)(sang * 57.3f), nin, n3, covis);
                 } else if (defguard_on() &&
-                           !defguard_ok(dev, nin, n3, covis, work.ts)) {
+                           !defguard_ok(dev, nin, n3, covis,
+                                         vpr_alias_margin, work.ts)) {
                     /* XR_DEFGUARD: closure verified but not deform-grade —
                      * absorb softly (TIGHT prior + factor channel) instead
                      * of moving the map. The estimator arbitrates; a true
