@@ -399,13 +399,11 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
                 << " |Hi|=" << Hi.norm() << " r_eff_i=" << ri
                 << " r_eff_n=" << rn << " r_fold0=" << r0
                 << " |b0|=" << ev0.prior_before.b.norm()
-                << "
-  Hdiag_i=" << di.transpose() << "
-  Hdiag_n="
-                << dn.transpose() << "
-  b_i=" << si.transpose()
-                << "
-  b_n=" << sn.transpose() << std::endl;
+                << std::endl;
+      std::cerr << "  Hdiag_i=" << di.transpose() << std::endl;
+      std::cerr << "  Hdiag_n=" << dn.transpose() << std::endl;
+      std::cerr << "  b_i=" << si.transpose() << std::endl;
+      std::cerr << "  b_n=" << sn.transpose() << std::endl;
     } else {
       std::cerr << "[xr] READVANCE diff: ORDER MISMATCH inc="
                 << marg_data.order.total_size << " new="
