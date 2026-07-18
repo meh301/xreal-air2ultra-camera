@@ -9,12 +9,12 @@
  * and the raw result dirs, not on the site. */
 const ARMS = ["vio", "bc", "obs03", "absorb", "fz19", "fz18", "fzbase", "fz17d"];
 // Older 400-cap arms default OFF so the page opens on the corrected 3333 set.
-const AB_ARMS = new Set(["fz18", "fzbase", "fz17d"]);
+const AB_ARMS = new Set(["fz18", "fzbase", "fz17d", "absorb"]);
 const ARM_LABEL = {
   vio: "VIO only (Basalt floor, no map)",
   bc: "OURS best-config (cap 3333)",
   obs03: "OURS tuned (obs_std 0.3, EuRoC/TUM)",
-  absorb: "OURS + closure-absorb (corridor fix)",
+  absorb: "OURS +closure-absorb (PARKED: conflicts w/ obs_std tuning)",
   "bc-vio": "VIO track under best-config",
   fzbase: "OURS base 400-cap (reloc stack, no factors)",
   fz18: "OURS fz18 400-cap (factor stack)",
