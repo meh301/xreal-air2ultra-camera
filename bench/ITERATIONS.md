@@ -86,6 +86,33 @@ corridors at large drift.
 
 ## In flight
 
+### ✅ 2026-07-19 — XR_ABSORB VERDICT: the corridor fix WORKS (site updated)
+absorb_ab (.15, within-round n=10, ATE cm) ctrl(best-config) vs absorb:
+| seq | ctrl | absorb | |
+|---|---|---|---|
+| corridor1 | 17.1 | **11.8** | -31% |
+| corridor3 | 31.2 | **13.8** | -56% |
+| corridor2 | 17.7 | 17.5 | flat |
+| corridor4 | 18.2 | 17.7 | flat |
+| corridor5 | 18.6 | 20.4 | +10% (variance?) |
+| magistrale1 | 27.2 | 24.4 | -10% |
+| magistrale2 | 87.9 | 109.2 | regress (mag2 highly variable) |
+| room1/2/5 | 6.6/2.8/10.2 | 6.3/3.0/10.8 | unharmed (wins hold) |
+The forensic rank-2 fix is VALIDATED on its targets: crediting closure
+factors in the LM accept/reject test lets corridor corrections through
+(corridor1 -31%, corridor3 -56% toward OKVIS2+LC's 2.8/4.9). Rooms
+unharmed. Follow-up: corridor5 + magistrale2 regressions — likely a
+too-aggressive absorb on already-good/big-alias spaces; next step is to
+gate absorb by the same scene/covis discriminator or verify it's mag2
+variance (n=10 mag2 has swung 55-205 across rounds).
+SITE UPDATED: results.json now carries bc (best-config @3333), vio (Basalt
+floor), absorb (corridor fix) arms; old 400-cap arms default-off. Corridor
+tab shows corridor1 bc 31.8 -> absorb 12.7. reloc tab already at 3333.
+NEXT: (1) refine/gate XR_ABSORB then re-bench; (2) VIO sweep verdict ->
+apply winning config; (3) DM-VIO fleet -> pull into baselines.
+
+---
+
 ### 2026-07-19 — DM-VIO BASELINE ADDED (ROS-free, built + running)
 New baseline padding the fleet beyond OKVIS2/OpenVINS (orb3 dead). Built
 on .181 (Pangolin v0.6 + GTSAM 4.2a6 pinned, GCC13 cstdint fix, private
