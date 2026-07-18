@@ -20,7 +20,8 @@ f = W / "include/basalt/optical_flow/patch.h"
 t = f.read_text(encoding="utf-8")
 
 # 0. env flag helper (file-local, read once)
-anchor = "  static void setData(const ImgT &img,"
+anchor = "  template <typename ImgT>
+  static void setData(const ImgT &img,"
 assert t.count(anchor) == 1
 t = t.replace(anchor, """  static inline bool xr_zncc() {
     static const bool v = [] {
@@ -30,7 +31,7 @@ t = t.replace(anchor, """  static inline bool xr_zncc() {
     return v;
   }
 
-""" + anchor, 1)
+""" + anchor, 1)  # helper placed BEFORE the template line
 
 # 1. setData: optional ZNCC second pass
 old = """    mean = sum / num_valid_points;
