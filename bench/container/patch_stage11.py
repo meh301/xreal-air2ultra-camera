@@ -170,19 +170,30 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
 
   ImuLinData<Scalar> ild = {g, gyro_bias_sqrt_weight,
                             accel_bias_sqrt_weight, {}};
+  /* ImuBlock::linearizeImu requires BOTH endpoints as 15-dof
+   * frame_states (it .at()s the states map) — include a factor only
+   * when that holds; pose-demoted endpoints' inertial info remains in
+   * the base prior (v1 approximation). */
+  auto xr_imu_ok = [&](int64_t a, int64_t b) {
+    auto ia = aom.abs_order_map.find(a);
+    auto ib = aom.abs_order_map.find(b);
+    return ia != aom.abs_order_map.end() &&
+           ib != aom.abs_order_map.end() &&
+           ia->second.second == POSE_VEL_BIAS_SIZE &&
+           ib->second.second == POSE_VEL_BIAS_SIZE &&
+           frame_states.count(a) > 0 && frame_states.count(b) > 0;
+  };
   for (const auto& kv : imu_meas) {
     int64_t s0 = kv.second.get_start_t_ns();
     int64_t s1 = s0 + kv.second.get_dt_ns();
-    if (aom.abs_order_map.count(s0) && aom.abs_order_map.count(s1))
-      ild.imu_meas[kv.first] = &kv.second;
+    if (xr_imu_ok(s0, s1)) ild.imu_meas[kv.first] = &kv.second;
   }
   for (const auto& ev : xrv_marg_events)
     for (const auto& im : ev.imu) {
       int64_t s0 = im.second.get_start_t_ns();
       int64_t s1 = s0 + im.second.get_dt_ns();
       if (ild.imu_meas.count(im.first)) continue;
-      if (aom.abs_order_map.count(s0) && aom.abs_order_map.count(s1))
-        ild.imu_meas[im.first] = &im.second;
+      if (xr_imu_ok(s0, s1)) ild.imu_meas[im.first] = &im.second;
     }
 
   std::set<int64_t> dead_kfs;
