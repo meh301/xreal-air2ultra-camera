@@ -1322,15 +1322,11 @@ static int defguard_ok(float dev, int nin, int n3, int covis,
                        float alias_margin, uint64_t ts) {
     if (!defguard_on()) return 1;
     if (n3 > 0 && nin * 100 < 55 * n3) return 0;       /* evidence floor */
-    /* scene-conditional covis: corridors have THIN covisibility (their
-     * productive returns run covis 5-7 — measured, ledger) while the
-     * poison class is aliased-hall; halls demand much more. */
-    if (lmmarg_scene_ok()) {
-        if (covis < 5) return 0;
-    } else {
-        if (covis < 10 || (n3 > 0 && nin * 100 < 70 * n3)) return 0;
-    }
-    if (alias_margin <= LMMARG_ALIAS_MARGIN) return 0; /* distinct place */
+    /* v4 minimal guard: covis/alias gates see-sawed corr3-vs-mag2 (three
+     * rounds, ledger) — every FORENSIC cascade dies by ratio, extent, or
+     * two-strikes alone, and corridor returns pass all three. */
+    (void)covis;
+    (void)alias_margin;
     float ext = map_extent_diag();
     float cap = 1.5f > 0.6f * ext ? 1.5f : 0.6f * ext; /* extent-relative */
     if (dev > cap) return 0;
