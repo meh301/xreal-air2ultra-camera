@@ -430,6 +430,26 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
       std::cerr << "  Hdiag_n=" << dn.transpose() << std::endl;
       std::cerr << "  b_i=" << si.transpose() << std::endl;
       std::cerr << "  b_n=" << sn.transpose() << std::endl;
+      /* localize the disagreement: per-var norms of the gradient
+       * g = H^T (H delta + b) in squared form for both priors */
+      VecX gi_v, gn_v;
+      if (marg_data.is_sqrt) {
+        gi_v = marg_data.H.transpose() *
+               (marg_data.H * cur_delta + marg_data.b);
+        gn_v = marg_H_new.transpose() * (marg_H_new * cur_delta + marg_b_new);
+      } else {
+        gi_v = marg_data.H * cur_delta + marg_data.b;
+        gn_v = marg_H_new * cur_delta + marg_b_new;
+      }
+      VecX qi = VecX::Zero(new_order.items), qn = VecX::Zero(new_order.items);
+      vi = 0;
+      for (const auto& kv : new_order.abs_order_map) {
+        qi[vi] = gi_v.segment(kv.second.first, kv.second.second).norm();
+        qn[vi] = gn_v.segment(kv.second.first, kv.second.second).norm();
+        vi++;
+      }
+      std::cerr << "  g_i=" << qi.transpose() << std::endl;
+      std::cerr << "  g_n=" << qn.transpose() << std::endl;
     } else {
       std::cerr << "[xr] READVANCE diff: ORDER MISMATCH inc="
                 << marg_data.order.total_size << " new="
@@ -443,6 +463,14 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
   marg_data.H = marg_H_new;
   marg_data.b = marg_b_new;
   marg_data.order = new_order;
+  {
+    /* recover the delta-independent residual (stock does this after
+     * every marg install): rnew = res - Jnew*delta, so later
+     * evaluations H*delta_future + b measure only NEW deviation */
+    VecX xr_delta;
+    computeDelta(marg_data.order, xr_delta);
+    marg_data.b -= marg_data.H * xr_delta;
+  }
   xrv_marg_events.clear();
   static int xr_ra_log = 0;
   if (xr_ra_log < 12) {
