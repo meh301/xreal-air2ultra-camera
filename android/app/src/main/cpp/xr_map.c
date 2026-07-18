@@ -1344,17 +1344,41 @@ static int defguard_ok(float dev, int nin, int n3, int covis,
  * re-advance in the estimator (stage 11/12) — the retained window
  * re-linearizes with the closure's factors live. Debounced: rebuilds
  * are O(window) and closures can burst. Map thread only. */
-static void radv_trigger(uint64_t ts) {
+/* level 1 = v1 (any verified closure, both sites); level 2 = v2:
+ * CONFIRMED-applied site only + closure-quality gates — the held-out
+ * round showed v1 amplifies weak closures (mag1 99->134 tail 438,
+ * corr5/slides2 harmed) while strong-closure spaces transform
+ * (mag2 205->50, corr3 28->10). Re-linearizing the window consistent
+ * with a marginal closure is poison; only high-evidence corrections
+ * earn a rebuild. */
+static int radv_level(void) {
     static int on = -1;
-    static uint64_t last_ns;
     if (on < 0) {
         const char *e = getenv("XR_RADV");
-        on = (e && *e && *e != '0') ? 1 : 0;
-        if (on) LOGI("session map: CLOSURE->READVANCE ON");
+        on = e && *e ? atoi(e) : 0;
+        if (on) LOGI("session map: CLOSURE->READVANCE ON (v%d)", on);
     }
-    if (!on) return;
+    return on;
+}
+static void radv_trigger(uint64_t ts) {
+    static uint64_t last_ns;
+    if (radv_level() < 1) return;
     if (last_ns && ts - last_ns < 2000000000ull) return;   /* 2 s */
     if (xr_slam_readvance() > 0) last_ns = ts;
+}
+/* v2 gate: called from the confirmed-applied site with the closure's
+ * evidence; v1 ignores the gates. dev = |correction| in metres. */
+static void radv_trigger2(uint64_t ts, int nin, int n3, int covis,
+                          float dev) {
+    int lv = radv_level();
+    if (lv < 1) return;
+    if (lv >= 2) {
+        if (covis < 6) return;
+        if (nin < LMMARG_MIN_NIN) return;
+        if (n3 > 0 && nin * 100 < 60 * n3) return;   /* evidence ratio */
+        if (dev < 0.10f) return;   /* micro-corrections need no rebuild */
+    }
+    radv_trigger(ts);
 }
 
 /* session-frame inliers -> odom frame -> basalt injection (same CORR
@@ -5065,7 +5089,7 @@ static void process_keyframe(void) {
                 if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
                 }
-                radv_trigger(work.ts);
+                if (radv_level() == 1) radv_trigger(work.ts);
                 /* (EDGEGRAPH v1 admitted sub-gate closures here at 1 Hz —
                  * self-drift-correlated edges compounded and the corridor
                  * A/B REGRESSED; edges now come only from APPLIED
@@ -5255,7 +5279,11 @@ static void process_keyframe(void) {
                     LAST_SNAP_NS = work.ts;
                     PENDING_D.have = 0;
                     LOOP_STATS.count++;
-                    radv_trigger(work.ts);
+                    {
+                        float rdv = sqrtf(Dp[0] * Dp[0] + Dp[1] * Dp[1] +
+                                          Dp[2] * Dp[2]);
+                        radv_trigger2(work.ts, nin, n3, covis, rdv);
+                    }
                     LOOP_STATS.matches = best_m;
                     VER_LAST.outcome = VOUT_APPLIED;
                     LOGI("session map: LOOP kf#%d TIGHT-PRIOR %.2fm %.0fdeg "

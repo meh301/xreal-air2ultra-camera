@@ -30,6 +30,17 @@ t = t.replace(anchor, """  static inline bool xr_zncc() {
     }();
     return v;
   }
+  /* v2: sigma floor in INTENSITY units — low-texture patches (dark
+   * projector rooms, blur) otherwise divide by tiny sigma and amplify
+   * noise (slides2 +43%, MOO02 +23% in the events A/B). At the floor
+   * the branch degrades gracefully toward plain mean-removal. */
+  static inline float xr_zncc_floor() {
+    static const float v = [] {
+      const char* e = getenv("XR_ZNCC_FLOOR");
+      return e && *e ? (float)atof(e) : 1e-3f;
+    }();
+    return v;
+  }
 
 """ + anchor, 1)  # helper placed BEFORE the template line
 
@@ -45,7 +56,7 @@ new = """    mean = sum / num_valid_points;
       for (int i = 0; i < PATTERN_SIZE; i++)
         if (data[i] >= 0) { const Scalar d = data[i] - mean; var += d * d; nv++; }
       Scalar sigma = nv > 1 ? std::sqrt(var / nv) : Scalar(0);
-      if (sigma < Scalar(1e-3)) sigma = Scalar(1e-3);
+      if (sigma < Scalar(xr_zncc_floor())) sigma = Scalar(xr_zncc_floor());
       for (int i = 0; i < PATTERN_SIZE; i++)
         if (data[i] >= 0)
           data[i] = (data[i] - mean) / sigma + Scalar(10); /* +10: keep
@@ -72,7 +83,7 @@ t = t.replace(old, """    mean = sum / num_valid_points;
       for (int i = 0; i < PATTERN_SIZE; i++)
         if (data[i] >= 0) { const Scalar d = data[i] - mean; var += d * d; nv++; }
       Scalar sigma = nv > 1 ? std::sqrt(var / nv) : Scalar(0);
-      if (sigma < Scalar(1e-3)) sigma = Scalar(1e-3);
+      if (sigma < Scalar(xr_zncc_floor())) sigma = Scalar(xr_zncc_floor());
       const Scalar sig_inv = Scalar(1) / sigma;
       for (int i = 0; i < PATTERN_SIZE; i++)
         if (data[i] >= 0)
@@ -118,7 +129,7 @@ new = """    int num_residuals = 0;
           tvar += d * d;
         }
       Scalar tsig = std::sqrt(tvar / tn);
-      if (tsig < Scalar(1e-3)) tsig = Scalar(1e-3);
+      if (tsig < Scalar(xr_zncc_floor())) tsig = Scalar(xr_zncc_floor());
       for (int i = 0; i < PATTERN_SIZE; i++) {
         if (residual[i] >= 0 && data[i] >= 0) {
           residual[i] = ((residual[i] - tmean) / tsig + Scalar(10)) - data[i];
