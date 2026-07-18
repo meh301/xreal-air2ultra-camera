@@ -196,3 +196,18 @@ Scoreboard at freeze (within-round map medians, stage-7 stack):
 - Wake-up: burst-15 corridors 100%% recall (med err 3-5 cm, ~55 ms);
   mag2 80%%. OKVIS2: DNF (reference harness deadlocks at the camera
   gap, all 6 arms). rl18/rb18 re-measure at fz18 in flight.
+
+### 2026-07-18 FREEZE v17 "fz19" (supersedes v16-final)
+
+fz19 = fz18 + **XR_LMINJ=1** (stage-8 closure-landmark injection:
+verified closure inliers become real basalt lmdb landmarks with
+per-frame covisibility observations inside the estimator — patches
+8..8e; requires the stage-8 basalt build). Sigma stays 2.0 (the 1.0
+variant poisons blur sequences — TRACK-class attribution in ledger).
+Evidence: rooms all improve (2x2 n=5), corr3 24.8->12.5, corr5/mag1/
+mag2/slides2 better (held-out n=5), euroc/MSD neutral-to-positive
+(V2_03 15.4, MOO01 13.6, n=3). Uniform-safe: no regression beyond
+noise anywhere; corridors n=10 re-validation in flight (corr10-v2).
+NOTE: the .58 contamination episode (stage-4 alive-check missing)
+invalidated the earlier corr10/euroc fleet cells — corrected numbers
+are on the site; euroc aggregate is 5.17 (fzbase 6.78), MSD MOO02 12.6.
