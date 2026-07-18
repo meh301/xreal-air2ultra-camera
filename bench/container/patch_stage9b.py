@@ -115,19 +115,31 @@ new = """  void processFrame(int64_t curr_t_ns, OpticalFlowInput::Ptr& new_img_v
             xr_cm[cy * 4 + cx] = n ? (float)(s / n) * (1.0f / 256.0f) : 0.f;
           }
       }
+      /* XR_ZNCC_UNIFORM=1 (default): arm only on uniform shifts
+       * (median cell delta + sign agreement). =0: v3 semantics — global
+       * mean delta, no uniformity requirement (single long armings;
+       * the variant that held V2_03's -60%). */
+      static const int xr_uni = [] {
+        const char* e = getenv("XR_ZNCC_UNIFORM");
+        return e && *e ? atoi(e) : 1;
+      }();
       static float xr_ring[10][16];
       static int xr_ri = 0, xr_rn = 0;
       static int64_t xr_active_until = 0;
-      float xr_best_med = 0;
+      float xr_best_med = 0, xr_best_glob = 0;
       int xr_best_pos = 0, xr_best_neg = 0;
       for (int i = 0; i < xr_rn; i++) {
         float ad[16];
         int pos = 0, neg = 0;
+        float gsum = 0;
         for (int c = 0; c < 16; c++) {
           const float d = xr_cm[c] - xr_ring[i][c];
           ad[c] = d < 0 ? -d : d;
+          gsum += d;
           if (d > 0) pos++; else neg++;
         }
+        const float g = gsum < 0 ? -gsum / 16.f : gsum / 16.f;
+        if (g > xr_best_glob) xr_best_glob = g;
         std::nth_element(ad, ad + 8, ad + 16);
         if (ad[8] > xr_best_med) {
           xr_best_med = ad[8];
@@ -138,8 +150,11 @@ new = """  void processFrame(int64_t curr_t_ns, OpticalFlowInput::Ptr& new_img_v
       memcpy(xr_ring[xr_ri], xr_cm, sizeof xr_cm);
       xr_ri = (xr_ri + 1) % 10;
       if (xr_rn < 10) xr_rn++;
-      if (xr_rn >= 5 && xr_best_med > xr_dthr &&
-          (xr_best_pos >= 13 || xr_best_neg >= 13))
+      const bool xr_fire =
+          xr_uni ? (xr_best_med > xr_dthr &&
+                    (xr_best_pos >= 13 || xr_best_neg >= 13))
+                 : (xr_best_glob > xr_dthr);
+      if (xr_rn >= 5 && xr_fire)
         xr_active_until = curr_t_ns + xr_hold_ns;
       const int xr_on = curr_t_ns < xr_active_until ? 1 : 0;
       static int xr_logn = 0;
