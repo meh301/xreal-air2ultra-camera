@@ -75,6 +75,41 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
   if (xrv_marg_events.empty()) return;
   const auto& ev0 = xrv_marg_events.front();
 
+  /* ---- 0. PROMOTE: alive kf poses that were vel-bias-marged during
+   *         the window come back up to 15-dof states (pose part at the
+   *         pose's own FEJ lin point, vel/bias at captured values) so
+   *         the oldest prior's 15-dof columns and the captured IMU
+   *         chain line up; vel/bias re-marged, pose kept, object
+   *         demoted back after the rebuild. */
+  Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>> promoted_saved;
+  for (const auto& ev : xrv_marg_events) {
+    for (const auto& s : ev.states) {
+      if (!s.had_vel_bias) continue;
+      if (frame_states.count(s.t_ns)) continue;
+      auto itp = frame_poses.find(s.t_ns);
+      if (itp == frame_poses.end()) continue;
+      if (promoted_saved.count(s.t_ns)) continue;
+      promoted_saved.emplace(s.t_ns, itp->second);
+      PoseVelBiasState<Scalar> st;
+      st.t_ns = s.t_ns;
+      st.T_w_i = itp->second.isLinearized() ? itp->second.getPoseLin()
+                                            : itp->second.getPose();
+      st.vel_w_i = s.vel;
+      st.bias_gyro = s.bg;
+      st.bias_accel = s.ba;
+      PoseVelBiasStateWithLin<Scalar> pvb(st);
+      pvb.setLinTrue();
+      if (itp->second.isLinearized()) {
+        Eigen::Matrix<Scalar, 15, 1> inc;
+        inc.setZero();
+        inc.template head<6>() = itp->second.getDelta();
+        pvb.applyInc(inc);
+      }
+      frame_poses.erase(itp);
+      frame_states[s.t_ns] = pvb;
+    }
+  }
+
   /* ---- 1. RESURRECT: dead states (stored estimates, fresh lin) and
    *         dead landmarks/observations ---- */
   std::set<int64_t> res_poses, res_states;
@@ -153,8 +188,14 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
   }
   for (const auto& kv : frame_poses)
     add_var(kv.first, POSE_SIZE);
-  for (const auto& kv : frame_states)
-    add_var(kv.first, POSE_VEL_BIAS_SIZE);
+  /* alive states: only the prior-connectivity state — stock keeps the
+   * young sliding states OUT of the marg prior (their FEJ flag is not
+   * set); plus resurrected and promoted vars */
+  for (const auto& kv : frame_states) {
+    if (res_states.count(kv.first) || promoted_saved.count(kv.first) ||
+        marg_data.order.abs_order_map.count(kv.first))
+      add_var(kv.first, POSE_VEL_BIAS_SIZE);
+  }
   if (!aom_ok) {
     /* a prior var neither alive nor captured: bail out cleanly */
     for (const int64_t id : res_poses) frame_poses.erase(id);
@@ -164,6 +205,10 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
         lmdb.removeObservations(ro.first, {ro.second});
     for (const int id : res_lm_ids)
       if (lmdb.landmarkExists(id)) lmdb.removeLandmark(id);
+    for (auto& pr : promoted_saved) {
+      frame_states.erase(pr.first);
+      frame_poses.emplace(pr.first, pr.second);
+    }
     std::cerr << "[xr] READVANCE bail: prior var unresolvable" << std::endl;
     return;
   }
@@ -190,11 +235,8 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
            ib->second.second == POSE_VEL_BIAS_SIZE &&
            frame_states.count(a) > 0 && frame_states.count(b) > 0;
   };
-  for (const auto& kv : imu_meas) {
-    int64_t s0 = kv.second.get_start_t_ns();
-    int64_t s1 = s0 + kv.second.get_dt_ns();
-    if (xr_imu_ok(s0, s1)) ild.imu_meas[kv.first] = &kv.second;
-  }
+  /* captured (dead) factors ONLY — live imu factors stay live in
+   * optimize(); folding them into the prior would double-count */
   for (const auto& ev : xrv_marg_events)
     for (const auto& im : ev.imu) {
       int64_t s0 = im.second.get_start_t_ns();
@@ -230,8 +272,11 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
     const int start = kv.second.first;
     const int size = kv.second.second;
     const bool dead = dead_kfs.count(kv.first) > 0;
-    for (int i = 0; i < size; i++)
-      (dead ? idx_to_marg : idx_to_keep).emplace(start + i);
+    const bool prom = promoted_saved.count(kv.first) > 0;
+    for (int i = 0; i < size; i++) {
+      const bool m = dead || (prom && i >= (int)POSE_SIZE);
+      (m ? idx_to_marg : idx_to_keep).emplace(start + i);
+    }
   }
   MatX marg_H_new;
   VecX marg_b_new;
@@ -252,15 +297,21 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
     if (lmdb.landmarkExists(id)) lmdb.removeLandmark(id);
   for (const int64_t id : res_poses) frame_poses.erase(id);
   for (const int64_t id : res_states) frame_states.erase(id);
+  for (auto& pr : promoted_saved) {
+    frame_states.erase(pr.first);
+    frame_poses.emplace(pr.first, pr.second);
+  }
 
   /* ---- 6. install the re-advanced prior over the survivors, in the
    *         kept-column order (aom order restricted to survivors) ---- */
   AbsOrderMap new_order;
   for (const auto& kv : aom.abs_order_map) {
     if (dead_kfs.count(kv.first)) continue;
+    const int keep_sz = promoted_saved.count(kv.first)
+                            ? (int)POSE_SIZE : kv.second.second;
     new_order.abs_order_map[kv.first] =
-        std::make_pair(new_order.total_size, kv.second.second);
-    new_order.total_size += kv.second.second;
+        std::make_pair(new_order.total_size, keep_sz);
+    new_order.total_size += keep_sz;
     new_order.items++;
   }
   if (marg_H_new.cols() != new_order.total_size) {
@@ -277,7 +328,8 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
     xr_ra_log++;
     std::cerr << "[xr] READVANCE ok: prior rebuilt over "
               << new_order.items << " vars (" << new_order.total_size
-              << " dof), " << dead_kfs.size() << " re-marged" << std::endl;
+              << " dof), " << dead_kfs.size() << " re-marged, "
+              << promoted_saved.size() << " promoted" << std::endl;
   }
 }
 
