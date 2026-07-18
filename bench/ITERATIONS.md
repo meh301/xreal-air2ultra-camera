@@ -1642,3 +1642,11 @@ Burst-15 mean 98.2% (fz18-era grid 95.1): corridors 93-100 ALL, rooms
 Verdict: injection's persistent landmarks IMPROVE recall (better map
 metric quality at revisit). slides single-frame dipped (67 vs 87) —
 burst covers it; noted. Lockstep retry (6h timeout) grinding on .181.
+
+### ✓ FZ19 RELOC GRID COMPLETE (17 seqs): burst 95.7% mean, single 86.5%
+mag1 26.7/66.7 (dipped vs fz18-era 40/70), mag2 50.0/86.7 (improved) —
+hall noise; corridors/rooms/slides/MH/MOO as ledgered (93-100 burst).
+Wake-up at the frozen composition CONFIRMED; site reloc tab = fz19.
+Both open verdicts from the state report now closed except lockstep
+(grinding, 6h budget). NEXT ARC ON DECK: continuous map
+self-consistency (background micro-PGO, old-keyframe edges only).
