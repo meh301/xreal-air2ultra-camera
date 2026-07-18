@@ -86,6 +86,33 @@ corridors at large drift.
 
 ## In flight
 
+### ⚠️🔬 2026-07-19 — VIO<->MAP INTERACTION CONFIRMED (user methodology point)
+User flagged: single-param A/B is insufficient — "if VIO gets better but
+map gets worse, other factors are at play." PROVEN via the map-vs-coupled-
+VIO decomposition (map gain = coupled_vio - map_output):
+| seq | VIO@.5 | map@.5 | VIO@.3 | map@.3 |
+|---|---|---|---|---|
+| corridor3 | 66.5 | **17.1** | 48.1 | **21.1** |
+| corridor5 | 46.8 | 19.2 | 33.6 | 18.9 |
+| corridor1 | 31.8 | 31.6 | 29.8 | 17.8 |
+**corridor3 is the smoking gun**: VIO IMPROVED at obs03 (66->48) but the
+MAP OUTPUT REGRESSED (17.1->21.1). The map layer (LMF_SIGMA, SCENE_M,
+TIGHT gates) was tuned against the 0.5 VIO; with a better VIO it
+over-corrects. My aggregate-median "obs03 wins" MASKED this per-seq map
+regression. EuRoC/rooms show gain~0 at both configs (map correctly inert
+there) — the interaction is specific to the closure-firing corridors.
+METHODOLOGY CORRECTION: for a coupled VIO+map system, do NOT assume
+one-param A/B transfers. After changing the VIO, RE-TUNE the top map params
+(coordinate descent), and read the map-vs-VIO decomposition PER SEQUENCE,
+not just the aggregate median. (This is the same class as the XR_ABSORB
+sign-flip across obs_std configs.)
+FIX RUNNING: sigma_retune (.58) — under obs03, sweep XR_LMF_SIGMA
+{2,3,4,6} (larger = weaker map pull) on corridors+mag n=10, to recover
+corridor3's map performance against the better VIO. Also vio03_floor (.15)
+for the true pure-VIO@0.3 map-gain reference.
+
+---
+
 ### ⚖️ 2026-07-19 — XR_ABSORB does NOT stack with obs03 — PARKED (honest walk-back)
 The combine-the-wins A/B (tuned obs03 base, n=10) settles it: XR_ABSORB
 and obs_std=0.3 CONFLICT because both push "trust the visual correction
