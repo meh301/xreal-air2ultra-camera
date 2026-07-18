@@ -1431,3 +1431,12 @@ diverged; aggregate ours 1.88 < okvis2+lc 2.24), okvis2 baseline rows
 (.final.tum, generous to them), full trajectories (fz17d + okvis2 lc0/
 lc1 + GT). export_site_data: drives GT root/fps 15/diverge 1000m/
 path_m rows; app.js: drives group + %%path conversion + fz17d arm.
+
+### x FULL fz18 RELOC GRID (17 seqs, 34 cells) — ON SITE with spatial plots
+Mean recall: burst-15 95.1%, single-frame 87.5% (17 seqs). Per-seq
+burst: rooms 100% all six, corridors 96.7-100%, MH_01 100%, MOO07
+100%, slides 86.7/90.0, mag1 70.0/mag2 73.3 (r@25 53.3 both — the
+aliased-hall wall as always). Reloc tab: DNF-baseline card + recall/
+r@25/med-err grids + "where relocalization landed" spatial panel with
+session-trajectory outlines (parse_reloc map.tum siblings) and
+expected->landed vectors, all 17 seqs. Site deliverable COMPLETE.
