@@ -86,6 +86,21 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — HybVIO baseline ADDED (5th system, stereo VIO)
+Built on .58 (VIO-only/lc0; USE_SLAM off to dodge the SuiteSparse/g2o
+GCC-13 chain). Binary /root/baselines/hybvio/target/main. Smoke: MH_01
+0.165m, room1 0.075m (both in HybVIO's published range). TUM-VI calib
+reused from OpenVINS's kalibr chain (cross-baseline consistency). Launcher
+run_hybvio_benchmark.sh FLEET FIRING NOW (11 euroc + 15 tumvi x5 ->
+baselines_out/<seq>_hybvio_lc0.tum). Now 4 live baselines: OKVIS2,
+OpenVINS, DM-VIO, HybVIO (orb3 quarantined).
+
+STREAMS: .15 lockstep corridor confirmation (deterministic, multi-hour);
+.58 HybVIO fleet; .181 DM-VIO fleet (16/26). Both baseline fleets ->
+add to site (bars+plots, median iteration) in one pass when done.
+
+---
+
 ### 2026-07-19 — INTERACTION RE-TUNE: map NOT mis-tuned; the real issue is VARIANCE
 Followed up the corridor3 interaction with (a) pure-VIO@0.3 floor and (b)
 an XR_LMF_SIGMA re-tune sweep under obs03. Findings:
