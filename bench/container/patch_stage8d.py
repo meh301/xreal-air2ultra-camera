@@ -116,7 +116,7 @@ new_body = """      /* drain posts -> anchor registry (the app tells us WHICH ma
               e.nm++;
             }
             const int s0 = (e.nm - 1) & 1, s1 = e.nm & 1;
-            if (take_kf && e.nm >= 2 && e.m_ns[s0] == xr_now &&
+            if (kf_ids.count(xr_now) > 0 && e.nm >= 2 && e.m_ns[s0] == xr_now &&
                 (frame_states.count(e.m_ns[s1]) ||
                  frame_poses.count(e.m_ns[s1]))) {
               Vec4 xr_p4;
