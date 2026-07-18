@@ -86,6 +86,45 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — REBENCHMARK EXECUTING (4 parallel streams, prep workflow landed)
+BEST CONFIG (measured-grounded, prep workflow): fz19 + reloc keepers =
+`XR_COVKEEP XR_PGO XR_LMDESC XR_TIGHT XR_TIGHTSUB XR_SEQVOTE XR_TRUSTVPR
+XR_LMFACT XR_LMTRACK XR_LMTRACK_PERSIST XR_LMMARG XR_LMMARG_AUTO
+XR_LMMARG_SCENE_M=6 XR_LMMARG_FOLD_PX=999 XR_LMINJ XR_BURSTPNP XR_MULTIHYP`.
+The forensic "enable all dormant" was TEMPERED by measurement: FARBEAR
+measured-HARMFUL indoors (OFF), Cauchy/switchable-kernel REJECTED (OFF),
+PGO4DOF + landmark-recall UNMEASURED (need own A/B, not blanket-on).
+Landmark-recall = config.optical_flow_recall_enable (JSON field, not env;
+tumvi_512_recall_config.json exists) — zero measured A/B, deferred.
+
+VIO FLOOR (stock config, flags off, pure basalt _vio, n=5, cm) — the
+tuning baseline:
+  EuRoC: MH_01 6.6 MH_02 6.6 MH_03 5.2 MH_04 8.2 **MH_05 19.2** V1_01 4.4
+    V1_02 5.6 V1_03 6.8 V2_01 3.7 V2_02 5.9
+  rooms: r1 **13.1** r2 4.9 r3 5.6 r4 5.0 r5 **17.9** r6 2.0
+  (MSD floor pending scoring on .58)
+MH_05, room1, room5 are the VIO-tuning targets (user: MH_05 VIO would be
+near OKVIS2 without LC).
+
+VIO first-fix (prep, CONFIRMS my refutation): MSD noise DENSITY x0.5
+(0.008/0.000141), keep rate=1000 — the density is the physically-correct
+knob (calibration.hpp:196 discrete=density*sqrt(rate); vit_tracker.cpp:319
+ASSERTs data-rate==calib-rate so rate can't change). A tuning arm, not a
+bug fix.
+
+BASELINE ADD ORDER (ROS-free only, per inventory): 1. stock Basalt VIO
+(our fork flags-off = the honest 'does the map help' A/B, ~free);
+2. DM-VIO (ROS-free, mono-VIO, GTSAM 4.2a6 + Pangolin 0.6 pinned) —
+BUILDING NOW on .181 CPU; 3. HybVIO (stereo, medium); 4. VINS-Fusion
+(ROS, high effort, last).
+
+STREAMS RUNNING: .15 best-config full rebench (135 runs, corrected map
+numbers); .58 VIO sweep agent (density/obs_std/huber/dist2 on VIO-only,
+vs floor); .181 GPU reloc grid 3333 (30) + CPU DM-VIO build. Shared 4x
+RTX6000 Ada across all 3 boxes.
+
+---
+
 ### 2026-07-19 — REBENCHMARK PUSH (cap 3333, best-config, VIO tuning, more baselines)
 User directive after forensic review: set 3333 KF cap, ship best config,
 redo all benchmarks (old values were 400-cap artifacts), isolate & tune
