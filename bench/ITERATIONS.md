@@ -86,6 +86,38 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — REBENCHMARK PUSH (cap 3333, best-config, VIO tuning, more baselines)
+User directive after forensic review: set 3333 KF cap, ship best config,
+redo all benchmarks (old values were 400-cap artifacts), isolate & tune
+the VIO part, add baselines beyond OKVIS2/OpenVINS (orb3 dead), saturate
+all compute + many parallel agents.
+- **Cap 400->3333 SET + committed** (xr_map.h). RAM: ~180MB .bss offline
+  (52.6KB/KF, dominated by 33KB max-dim emb slot); ~74MB if emb right-sized
+  to EigenPlaces 512-D (on-device TODO). Recall cost: linear cosine prerank
+  (sub-ms SIMD) + fixed-shortlist verify — coverage scales, compute doesn't.
+  Verified in binary: xr_bc .bss 204MB vs old 45MB. All 3 replay binaries
+  rebuilt (xr_bc_{tumvi,euroc,msd}).
+- ⚠ **MSD IMU-noise "bug" PARTIALLY REFUTED** (my verification of the
+  forensic config finding): calibration.hpp:190 does
+  `discrete_std = noise_std * sqrt(imu_update_rate)` — basalt treats the
+  calib values as CONTINUOUS densities (correct physics). MSD uses basalt
+  DEFAULT densities (0.016/0.000282) at the genuinely-measured 1005Hz
+  (meta.txt imu_hz=1004.8). The "2.24x vs TUM-VI" is correct scaling for
+  the same density at higher rate, NOT a unit error. Treat as a TUNING
+  axis (sweep MSD accel/gyro density down), not a bug fix.
+- IN FLIGHT: cap-3333 magistrale reloc preview (.181, THE test of finding
+  #1 vs historical 400-cap 44-47%); stock-VIO floor (.15 euroc+rooms, .58
+  msd+slides+corr; map flags OFF -> pure basalt _vio track = VIO tuning
+  baseline). Prep workflow running (best-config + DM-VIO/basalt baseline
+  build plans + VIO param sweep). Container inventory DONE: 4x RTX6000 Ada
+  SHARED across the 3 boxes, 64 vCPU each, NO ROS (new baselines must be
+  ROS-free -> DM-VIO + stock-Basalt-VIO the realistic adds); baseline
+  invocation contract = bench_run.sh <mav0> <out.tum> <lc>.
+- HOLDING the full best-config rebenchmark until the workflow's best-config
+  lands (avoid running a guessed config on the biggest job).
+
+---
+
 ### 🔬 2026-07-19 — FULL ARCHITECTURE FORENSIC REVIEW (8-dim, 48 agents, 30 confirmed)
 User: "we have no advantage anywhere, go through the architecture line by
 line vs literature." Done. Report: bench/site/public/forensic.html
