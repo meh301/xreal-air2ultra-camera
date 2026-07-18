@@ -1312,7 +1312,12 @@ static int defguard_on(void) {
 }
 static uint64_t DEF_LAST_NS;           /* map thread only */
 static float DEF_LAST_DEV;
-/* 1 = deform allowed; 0 = downgrade to soft absorption */
+static int DEF_GROW_STREAK;            /* consecutive growing deforms */
+/* 1 = deform allowed; 0 = downgrade to soft absorption.
+ * Escalation is TWO-STRIKES: a corridor return legitimately grows once
+ * as the loop closes (then shrinks); a wrong-place cascade grows
+ * monotonically (MH_01: 1.28->1.43->1.80->2.94). Only the SECOND
+ * consecutive growth within the window demands 75% evidence. */
 static int defguard_ok(float dev, int nin, int n3, int covis, uint64_t ts) {
     if (!defguard_on()) return 1;
     if (n3 > 0 && nin * 100 < 55 * n3) return 0;       /* evidence floor */
@@ -1320,9 +1325,11 @@ static int defguard_ok(float dev, int nin, int n3, int covis, uint64_t ts) {
     float ext = map_extent_diag();
     float cap = 1.5f > 0.6f * ext ? 1.5f : 0.6f * ext; /* extent-relative */
     if (dev > cap) return 0;
-    if (DEF_LAST_NS && ts - DEF_LAST_NS < 45000000000ull &&
-        dev > 1.2f * DEF_LAST_DEV && (n3 <= 0 || nin * 100 < 75 * n3))
-        return 0;                                      /* anti-escalation */
+    int recent = DEF_LAST_NS && ts - DEF_LAST_NS < 45000000000ull;
+    int growing = recent && dev > 1.2f * DEF_LAST_DEV;
+    if (growing && DEF_GROW_STREAK >= 1 &&
+        (n3 <= 0 || nin * 100 < 75 * n3))
+        return 0;                                      /* two-strikes */
     return 1;
 }
 
@@ -5229,6 +5236,11 @@ static void process_keyframe(void) {
                     float qsp[3];
                     qrotv(CORR.q, work.p, qsp);
                     qsp[0] += CORR.p[0]; qsp[1] += CORR.p[1]; qsp[2] += CORR.p[2];
+                    DEF_GROW_STREAK =
+                        (DEF_LAST_NS &&
+                         work.ts - DEF_LAST_NS < 45000000000ull &&
+                         dev > 1.2f * DEF_LAST_DEV)
+                            ? DEF_GROW_STREAK + 1 : 0;
                     DEF_LAST_NS = work.ts;
                     DEF_LAST_DEV = dev;
                     if (pgo_on()) pgo_deform(best_i, work.q, work.p, Dq, Dp);
