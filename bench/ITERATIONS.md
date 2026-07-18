@@ -86,6 +86,38 @@ corridors at large drift.
 
 ## In flight
 
+### 🏆 2026-07-18 (later) — P3b A/B: REVERSIBLE MARG DELIVERS IN BIG SPACES
+s12_ab (.15, within-round, n=5, ATE cm, canonical scorer):
+| seq | ctrl (fz19v2) | radv (+DELAYMARG+RADV) |
+|---|---|---|
+| magistrale2 | 204.7 (84-417) | **49.5 (36-78)** −76%, tail collapsed |
+| corridor3 | 28.0 | **10.4** (best runs 7.6-7.9) |
+| corridor1 | 32.4 | 30.2 (neutral — rigid-return autopsy holds) |
+| rooms 1-6 | — | neutral, consistent ~+0.2 cm micro-cost |
+60 readvances / 5 runs each (2 s debounce). The ABSORB-class mechanism
+works exactly where the decomposition predicted: big aliased spaces
+where folded-wrong info needed recovery. vs okvis2+lc reference bands:
+mag2 49.5 would LEAD (their ~66); corr3 10.4 reaches their 2.8-11.4
+band edge (from 28). corr1 remains the fortress (tracking-level).
+NOT YET A FREEZE: held-out round fired (s12_heldout: mag1, corr2/4/5,
+slides1/2, MH_01/MH_05/V1_02 canary) — must pass EuRoC-no-harm + the
+rooms micro-cost must stay ≤noise.
+
+### 2026-07-18 — ZNCC clean verdict (s910 zn refire, consistent lib, n=5)
+zn (fz19v2+XR_ZNCC) vs fz19v2, ATE cm: **corr3 31.9→15.6 (−51%)**,
+mag2 55.1→50.6, rooms uniformly −0.1..−1.1 (7/10 seqs win), corr1 +1.6,
+**slides1 25.4→28.5 (the one harm — dark projector room)**. Events test
+queued on .58 (zn_em: MH_05/V2_03/V1_03 + MOO01/02/13 + slides1/2 n=5,
+after lib rebuild to stage-12). libcmp flag-off check: stage-11 lib corr1
+7-43 cm bimodal = historical fz18 distribution ✓ no flag-off regression.
+
+### 2026-07-18 — gate2_em wave scored (fz162 = fz19v2 on euroc/MSD, n=3)
+MH_01 6.6 (false-LC jump CURED by covis gate), MH_03 5.4, MH_05 18.4,
+V1_02 5.5, V2_02 6.4; MOO: 01 20.9, 03 15.6, 05 2.0, 07 1.5, 09 0.4,
+13 33.7, 15 27.3. Site cell refresh pending the radv/zn freeze decision.
+
+---
+
 ### 🏆 2026-07-18 — XRV stage 11 VALIDATED: reversible marginalization works inside basalt's sqrt form
 - **P3a re-advance engine** (XR_DELAYMARG capture + XR_READVANCE rebuild):
   after a six-fix debugging arc, the stress smoke (readvance every 8th marg
