@@ -86,6 +86,29 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-18 — DBoW2 APPLES-TO-APPLES VERDICT (user-requested)
+Same probes, same verify/PnP pipeline (LighterGlue+PnP), only retrieval
+swapped (XR_RELOC_CANDS = DBoW2/ORBvoc top-5 vs our EigenPlaces path);
+single-frame rl19 protocol, RELOC-SUMMARY recall:
+| seq | ours | DBoW2-fed | | seq | ours | DBoW2-fed |
+|---|---|---|---|---|---|---|
+| corr1 | 93.3 | 90.0 | | corr4 | 90.0 | 96.7 |
+| corr2 | 86.7 | 80.0 | | corr5 | 96.7 | 100 |
+| corr3 | 90.0 | 100 | | mag2 | 50.0 | 50.0 |
+Mean 84.4 vs 87.8 — retrieval engine largely WASHES OUT after
+verification (top-5 + geometric verify rescues weak top-1s; DBoW2's
+retrieval-only 37-80% r1@3m understated it). med_err similar; corr5
+r@10cm drops 90→77 with DBoW2 (spatially coarser candidates).
+**mag2's 50% is NOT retrieval: 13/15 failed probes IDENTICAL across
+engines** — place-not-in-map / matcher-level; next lever is matching
+(burst rb19 already lifts mag2 to ~85%), not VPR. Practical note:
+DBoW2 is CPU-cheap — viable fallback tier on-device; EigenPlaces keeps
+the corr2-style wins and stays the pick.
+Caveats: n=1 per arm per seq; DB cap 400 + ±3s exclusion matched to our
+kf budget (dbow2_bench.cpp).
+
+---
+
 ### 🏆 2026-07-18 (later) — P3b A/B: REVERSIBLE MARG DELIVERS IN BIG SPACES
 s12_ab (.15, within-round, n=5, ATE cm, canonical scorer):
 | seq | ctrl (fz19v2) | radv (+DELAYMARG+RADV) |
