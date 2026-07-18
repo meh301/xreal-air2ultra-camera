@@ -96,9 +96,16 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
         st.bias_gyro = s.bg;
         st.bias_accel = s.ba;
         frame_states[s.t_ns] = PoseVelBiasStateWithLin<Scalar>(st);
+        /* prior-order vars must satisfy the FEJ contract (computeDelta
+         * asserts isLinearized); the captured estimate IS the lin point
+         * — capture happened right after setLinTrue at marg time */
+        if (it != ev0.prior_before.order.abs_order_map.end())
+          frame_states[s.t_ns].setLinTrue();
         res_states.insert(s.t_ns);
       } else {
         frame_poses[s.t_ns] = PoseStateWithLin<Scalar>(s.t_ns, s.T_w_i);
+        if (it != ev0.prior_before.order.abs_order_map.end())
+          frame_poses[s.t_ns].setLinTrue();
         res_poses.insert(s.t_ns);
       }
     }
