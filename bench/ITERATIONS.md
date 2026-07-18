@@ -1559,3 +1559,33 @@ stands with corridor n=10 backing. SITE PUBLISHED: rooms strip now
 okvis2+lc 1.20 < fz19 3.45 < okvis2(no LC) 3.89 — we beat their
 VIO-only mode on rooms; TUM-long all three ours arms lead their 31.8.
 Outstanding: lockstep determinism verdict (.181, slow by design).
+
+### x USER TRAJECTORY ANALYSIS + EVENT FORENSICS => XR_DEFGUARD (fz20 cand)
+USER (visual, per-seq): fz18 map track FOLLOWS factor-coupled VIO on
+nearly every euroc/rooms/MSD seq — results there are VIO-driven; the
+map layer's rare activations are high-RISK events (MH_01-fz19 ~80cm
+jump; MH_05-fz18 total failure; MH_05-fz19 phantom 90-deg turn at end;
+MOO15-fz19 fails). V2_03-fz18 = the ONE euroc case where reloc helps.
+corridor1: closures only at the return (pathing = VIO elsewhere);
+corridor4: NO system closes (ours or theirs). slides1: okvis2-VIO 8.6
+beats everything incl their own +LC.
+FORENSICS (event<->trajectory correlation, all flagged runs):
+- MH_01-fz19 r2: ESCALATING deform cascade 1.28->1.43->1.80->2.94m,
+  seeded by an early covis-3 closure (13/29 inl) whose inliers the
+  UNGATED injection made persistent landmarks. r3 (no deforms) clean.
+- MH_05-fz18 r1: deform cascade incl a 9/27-inlier (33%) closure.
+- MOO15-fz19 r1: 7.97m deform ADMITTED on a ~10m scan (36/42 inl,
+  aliased strong match) — magnitude absurd vs map extent.
+- V2_03-fz18 (the good case): 94%/67%-ratio closures — the profile a
+  quality floor must PRESERVE.
+- MH_05 t+79.4s and V2_03 t+36.3s: DETERMINISTIC micro-jump showers
+  (~0.12m x 50+, all arms/runs) = discrete VIO-core events (exposure/
+  bias transient?) — named VIO-core investigation items.
+FIXES (9b7231a): XR_DEFGUARD — deform needs inlier-ratio>=55%,
+covis>=8, dev<=max(1.5, 0.6*map_extent), anti-escalation (bigger
+deform within 45s needs ratio>=75%); rejected deforms DOWNGRADE to
+TIGHT-prior soft absorption (never move the map on weak evidence).
++ INJECTION now requires the fold-grade gates (nin>=MIN, alias
+margin) at both closure sites — a weak closure can no longer seed
+persistent poison landmarks. fz20 = fz19 + DEFGUARD; A/B fired on the
+EVENT SET (MH_01/05, V2_03, MOO13/15 + room1/corr3/mag2 sanity, n=5).
