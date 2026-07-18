@@ -113,6 +113,17 @@ all compute + many parallel agents.
   SHARED across the 3 boxes, 64 vCPU each, NO ROS (new baselines must be
   ROS-free -> DM-VIO + stock-Basalt-VIO the realistic adds); baseline
   invocation contract = bench_run.sh <mav0> <out.tum> <lc>.
+- 🎯 **CAP PREVIEW RESULT (finding #1 VALIDATED)**: at cap 3333, single-frame
+  reloc recall (fz19v2 base, --reloc 30):
+  - magistrale1: **27% -> 90.0%** (kf 400 -> 1309; the cap was discarding
+    909 revisit-anchor keyframes). THE headline: magistrale collapse was
+    substantially a capacity artifact.
+  - magistrale2: 50% -> 60.0% (kf 961) — improved but still weakest,
+    consistent with matcher-limited (13/15 engine-identical failures);
+    the cap was NOT the whole story here.
+  - corridor1: 96.7% (kf 522) — was already fine.
+  So the reloc numbers on the site were genuinely fucked by the 400-cap;
+  the whole reloc grid must be re-run at 3333.
 - HOLDING the full best-config rebenchmark until the workflow's best-config
   lands (avoid running a guessed config on the biggest job).
 
