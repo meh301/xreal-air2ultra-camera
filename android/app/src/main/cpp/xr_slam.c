@@ -39,6 +39,8 @@ static struct {
     vit_result_t (*xreal_pose_prior)(vit_tracker_t *, const double[4], const double[3],
                                      double, double, int64_t);
     vit_result_t (*xreal_seed_kps)(vit_tracker_t *, int64_t, int, const float *, int);
+    vit_result_t (*xreal_inject_lms)(vit_tracker_t *, int64_t, int32_t, const float *, const float *,
+                                     const int32_t *, int32_t);
     vit_result_t (*xreal_lm_factors)(vit_tracker_t *, int64_t, int32_t,
                                      const float *, const float *, int32_t, float);
 
@@ -145,6 +147,7 @@ int xr_slam_load(void) {
     /* optional XREAL tight-coupling extensions — absent on stock VIT libs */
     *(void **)&B.xreal_pose_prior = dlsym(B.dl, "vit_tracker_xreal_pose_prior");
     *(void **)&B.xreal_seed_kps = dlsym(B.dl, "vit_tracker_xreal_seed_keypoints");
+    *(void **)&B.xreal_inject_lms = dlsym(B.dl, "vit_tracker_xreal_inject_landmarks");
     *(void **)&B.xreal_lm_factors = dlsym(B.dl, "vit_tracker_xreal_landmark_factors");
     uint32_t maj = 0, min = 0, pat = 0;
     B.get_version(&maj, &min, &pat);
@@ -187,6 +190,21 @@ int xr_slam_landmark_factors(uint64_t ts_ns, int cam, const float *uv,
 /* Detector unification: post external keypoint seeds (u,v interleaved,
  * pixel coords) for frame ts/cam BEFORE pushing that frame. The optical
  * flow merges them with FAST detection. Returns 1 if delivered. */
+/* Stage-8 closure-landmark injection: post verified closure inliers as
+ * REAL basalt lmdb landmarks (odom-frame 3D init + streaming pixel
+ * observations; ids pair rows). Returns 1 if delivered, -1 when the
+ * backend lacks the extension. */
+int xr_slam_landmark_inject(uint64_t ts_ns, int cam, const float *uv,
+                            const float *xyz_odom, const int32_t *ids,
+                            int n) {
+    if (!B.xreal_inject_lms) return -1;
+    if (!B.tracker || !uv || !xyz_odom || !ids || n <= 0 ||
+        !atomic_load_explicit(&B.running, memory_order_acquire))
+        return 0;
+    return B.xreal_inject_lms(B.tracker, (int64_t)ts_ns, cam, uv, xyz_odom,
+                              ids, n) == VIT_SUCCESS;
+}
+
 int xr_slam_seed_keypoints(uint64_t ts_ns, int cam, const float *uv, int n) {
     if (!B.xreal_seed_kps || !B.tracker ||
         !atomic_load_explicit(&B.running, memory_order_acquire))

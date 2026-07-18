@@ -108,6 +108,11 @@ int xr_slam_landmark_factors(uint64_t ts_ns, int cam, const float *uv,
  * Returns 1 if delivered, 0 when unsupported/stopped. */
 int xr_slam_seed_keypoints(uint64_t ts_ns, int cam, const float *uv, int n);
 
+/* Stage-8: closure-landmark injection into the live estimator lmdb. */
+int xr_slam_landmark_inject(uint64_t ts_ns, int cam, const float *uv,
+                            const float *xyz_odom, const int32_t *ids,
+                            int n);
+
 /* Left-camera geometry for the session map's PnP relocalization: unit
  * ray (CAMERA frame) for a pixel, and the camera->IMU extrinsics.
  * Return 0 when available (after xr_slam_start configured the kb4 fit). */

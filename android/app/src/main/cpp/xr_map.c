@@ -1237,6 +1237,51 @@ static void lmfact_post(const float (*uv)[2], const float (*ps)[3], int n,
                              : " (fold-eligible)") : "");
 }
 
+/* XR_LMINJ — closure-landmark INJECTION (stage 8). The dominant gap vs
+ * OKVIS2+LC is closure ABSORPTION (analysis.html): their closures revive
+ * landmarks into live BA; our factors pull toward fixed 3D. Injection
+ * posts each verified inlier as a REAL basalt lmdb landmark (map 3D as
+ * init, streaming observations via LMTRACK re-matches) so structure
+ * participates in the estimator's own BA and marginalization. The
+ * fixed-3D factor channel stays on as the map anchor. */
+static int lminj_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XR_LMINJ");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v) LOGI("session map: LMINJ closure-landmark injection ON");
+    }
+    return v;
+}
+/* session-frame inliers -> odom frame -> basalt injection (same CORR
+ * transform as lmfact_post; ids pair 1:1 with uv/ps rows) */
+static void lminj_post(const float (*uv)[2], const float (*ps)[3],
+                       const int32_t *ids, int n, uint64_t ts) {
+    if (n <= 0 || !ids) return;
+    if (n > LMFACT_MAX) n = LMFACT_MAX;
+    float ci[4];
+    qconj(CORR.q, ci);
+    static float iuv[LMFACT_MAX * 2], ixyz[LMFACT_MAX * 3];   /* map thread */
+    static int32_t iid[LMFACT_MAX];
+    int k = 0;
+    for (int m = 0; m < n; m++) {
+        if (ids[m] < 0) continue;              /* no landmark id: skip */
+        float d[3], po[3];
+        d[0] = ps[m][0] - CORR.p[0];
+        d[1] = ps[m][1] - CORR.p[1];
+        d[2] = ps[m][2] - CORR.p[2];
+        qrotv(ci, d, po);
+        iuv[2 * k] = uv[m][0];
+        iuv[2 * k + 1] = uv[m][1];
+        ixyz[3 * k] = po[0];
+        ixyz[3 * k + 1] = po[1];
+        ixyz[3 * k + 2] = po[2];
+        iid[k] = ids[m];
+        k++;
+    }
+    if (k > 0) xr_slam_landmark_inject(ts, 0, iuv, ixyz, iid, k);
+}
+
 /* XR_LMTRACK — CONTINUOUS landmark-factor coverage. LMFACT alone posts
  * only at closure instants; between them the estimator is back on raw
  * VIO. Hold the last applied closure's inlier landmarks (descriptor +
@@ -1250,6 +1295,7 @@ static struct {
     int n;
     uint64_t until_ns;
     int8_t desc[LMFACT_MAX][64];
+    int32_t id[LMFACT_MAX];            /* map landmark ids (XR_LMINJ) */
     float ps[LMFACT_MAX][3];           /* session frame */
 } LMT;
 /* XR_TRUSTVPR — while relocalizing, HIGH-confidence retrieval earns a
@@ -1466,7 +1512,8 @@ static int lmtrack_on(void) {
 /* capture the applied closure's inlier set (uv values are exact copies of
  * w->kp_uv entries, so equality recovers the keypoint index -> desc) */
 static void lmt_capture(const xr_kf *w, const float (*uv)[2],
-                        const float (*ps)[3], int n, uint64_t ts) {
+                        const float (*ps)[3], const int32_t *ids, int n,
+                        uint64_t ts) {
     if (w->desc_type == DESC_BAD) return;
     LMT.n = 0;
     for (int m = 0; m < n && LMT.n < LMFACT_MAX; m++) {
@@ -1474,6 +1521,7 @@ static void lmt_capture(const xr_kf *w, const float (*uv)[2],
             if (w->kp_uv[i][0] == uv[m][0] && w->kp_uv[i][1] == uv[m][1]) {
                 memcpy(LMT.desc[LMT.n], w->desc.xfeat[i], 64);
                 memcpy(LMT.ps[LMT.n], ps[m], sizeof LMT.ps[0]);
+                LMT.id[LMT.n] = ids ? ids[m] : -1;
                 LMT.n++;
                 break;
             }
@@ -2730,7 +2778,8 @@ static int rc_nb_cmp(const void *a, const void *b) {
  * stage-3 landmark-factor channel. Callers not needing them pass NULL. */
 static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[3],
                      int *out_n3, int *out_nin, int *out_covis,
-                     float (*out_iuv)[2], float (*out_ips)[3], int *out_nl,
+                     float (*out_iuv)[2], float (*out_ips)[3],
+                     int32_t *out_iid, int *out_nl,
                      float (*out_bS)[3], float (*out_bP)[3], int *out_bn) {
     *out_n3 = *out_nin = *out_covis = 0;
     if (out_nl) *out_nl = 0;
@@ -3090,6 +3139,7 @@ static int reloc_pnp(const xr_kf *w, int best_i, int nkf, float Dq[4], float Dp[
             out_iuv[nl][0] = Quv[m][0];
             out_iuv[nl][1] = Quv[m][1];
             memcpy(out_ips[nl], Pw[m], sizeof out_ips[0]);
+            if (out_iid) out_iid[nl] = Pid[m];
             nl++;
         }
     }
@@ -4137,6 +4187,7 @@ static void process_keyframe(void) {
     /* XR_LMFACT: the WINNING candidate's inlier 2D-3D pairs (query pixel +
      * session-frame landmark), kept for the apply branch (map thread only) */
     static float lf_uv[LMFACT_MAX][2], lf_ps[LMFACT_MAX][3];
+    static int32_t lf_id[LMFACT_MAX];
     int lf_n = 0;
     /* XR_LOOPBURST: the WINNING candidate's assigned burst pairs */
     static float lb_S[BURST_EXPORT_MAX][3], lb_P[BURST_EXPORT_MAX][3];
@@ -4373,6 +4424,7 @@ static void process_keyframe(void) {
         int cn3 = 0, cnin = 0, ccov = 0;
         float cDq[4], cDp[3];
         static float cuv[LMFACT_MAX][2], cps[LMFACT_MAX][3]; /* map thread */
+        static int32_t cid[LMFACT_MAX];
         int cnl = 0;
         int want_lf = lmfact_on();
         static float ebS[BURST_EXPORT_MAX][3], ebP[BURST_EXPORT_MAX][3];
@@ -4381,6 +4433,7 @@ static void process_keyframe(void) {
         int want_burst = (PROBE_REQ && burstpnp_on()) || lb_want;
         int ok = reloc_pnp(&work, cand_i[c], kfn, cDq, cDp, &cn3, &cnin, &ccov,
                            want_lf ? cuv : NULL, want_lf ? cps : NULL,
+                           want_lf ? cid : NULL,
                            want_lf ? &cnl : NULL,
                            want_burst ? ebS : NULL, want_burst ? ebP : NULL,
                            want_burst ? &ebn : NULL);
@@ -4399,6 +4452,7 @@ static void process_keyframe(void) {
             if (want_lf) {                 /* keep the winner's pairs */
                 memcpy(lf_uv, cuv, sizeof lf_uv);
                 memcpy(lf_ps, cps, sizeof lf_ps);
+                memcpy(lf_id, cid, sizeof lf_id);
                 lf_n = cnl;
             }
             if (lb_want && ebn > 0) {      /* the WINNER's assigned pairs */
@@ -4875,8 +4929,10 @@ static void process_keyframe(void) {
                                 nin >= LMMARG_MIN_NIN &&
                                 vpr_alias_margin > LMMARG_ALIAS_MARGIN &&
                                 lmmarg_scene_ok());
-                    if (lmtrack_on())
-                        lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
+                    if (lminj_on() && lmmarg_scene_ok())
+                    lminj_post(lf_uv, lf_ps, lf_id, lf_n, work.ts);
+                if (lmtrack_on())
+                        lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
                 }
                 /* (EDGEGRAPH v1 admitted sub-gate closures here at 1 Hz —
                  * self-drift-correlated edges compounded and the corridor
@@ -5047,8 +5103,10 @@ static void process_keyframe(void) {
                                 nin >= LMMARG_MIN_NIN &&
                                 vpr_alias_margin > LMMARG_ALIAS_MARGIN &&
                                 lmmarg_scene_ok());
-                        if (lmtrack_on())
-                            lmt_capture(&work, lf_uv, lf_ps, lf_n, work.ts);
+                        if (lminj_on() && lmmarg_scene_ok())
+                        lminj_post(lf_uv, lf_ps, lf_id, lf_n, work.ts);
+                    if (lmtrack_on())
+                            lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
                     }
                     if (edgegraph_on())
                         eg_admit(best_i, work.q, work.p, Dq, Dp, nin);
@@ -5168,6 +5226,7 @@ static void process_keyframe(void) {
     if (lmtrack_on() && lmfact_on() && LMT.n > 0 && !PROBE_REQ &&
         work.desc_type != DESC_BAD && work.ts < LMT.until_ns) {
         static float tuv[LMFACT_MAX][2], tps[LMFACT_MAX][3]; /* map thread */
+        static int32_t tid[LMFACT_MAX];
         int tn = 0;
         for (int m = 0; m < LMT.n && tn < LMFACT_MAX; m++) {
             int best = -(1 << 30), second = best, bi = -1;
@@ -5181,6 +5240,7 @@ static void process_keyframe(void) {
             tuv[tn][0] = work.kp_uv[bi][0];
             tuv[tn][1] = work.kp_uv[bi][1];
             memcpy(tps[tn], LMT.ps[m], sizeof tps[0]);
+            tid[tn] = LMT.id[m];
             tn++;
         }
         if (tn >= LMT_MIN_MATCH) {
@@ -5190,6 +5250,11 @@ static void process_keyframe(void) {
              * room-class no-arb / corridor-class arb via lmfact_post. */
             lmfact_post(tuv, tps, tn, work.ts,
                         lmtrack_persist_on() && lmmarg_scene_ok());
+            /* XR_LMINJ streaming observations: each re-match extends the
+             * injected landmarks' obs — the constraint that makes them
+             * real structure instead of single-view points */
+            if (lminj_on() && lmmarg_scene_ok())
+                lminj_post(tuv, tps, tid, tn, work.ts);
             LMT.until_ns = work.ts + LMT_WINDOW_NS;   /* still seen: slide */
         } else if (tn * 2 < LMT_MIN_MATCH) {
             LMT.n = 0;                                 /* scene moved on */
