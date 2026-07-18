@@ -7,12 +7,16 @@
  * (fzbase + LMFACT/LMTRACK/LMMARG factor stack, scene-gated folds,
  * LMTRACK_PERSIST). Historical iteration arms live in bench/ITERATIONS.md
  * and the raw result dirs, not on the site. */
-const ARMS = ["fzbase", "fz18", "fz19", "fz17d"];
-const AB_ARMS = new Set([]);
+const ARMS = ["vio", "bc", "absorb", "fz19", "fz18", "fzbase", "fz17d"];
+// Older 400-cap arms default OFF so the page opens on the corrected 3333 set.
+const AB_ARMS = new Set(["fz18", "fzbase", "fz17d"]);
 const ARM_LABEL = {
-  fzbase: "OURS base (reloc stack, no factors)",
-  fz18: "OURS fz18 (factor stack)",
-  fz19: "OURS fz19 (FROZEN: + landmark INJECTION)",
+  vio: "VIO only (Basalt floor, no map)",
+  bc: "OURS best-config (cap 3333)",
+  absorb: "OURS + closure-absorb (corridor fix)",
+  fzbase: "OURS base 400-cap (reloc stack, no factors)",
+  fz18: "OURS fz18 400-cap (factor stack)",
+  fz19: "OURS fz19 400-cap (+ landmark injection)",
   fz17d: "OURS drive config (fz17 stack + reloc sweep)",
   "fzbase-vio": "VIO only", "fz18-vio": "VIO (factor-coupled)",
   okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
