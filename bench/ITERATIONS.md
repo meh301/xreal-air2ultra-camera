@@ -1440,3 +1440,31 @@ aliased-hall wall as always). Reloc tab: DNF-baseline card + recall/
 r@25/med-err grids + "where relocalization landed" spatial panel with
 session-trajectory outlines (parse_reloc map.tum siblings) and
 expected->landed vectors, all 17 seqs. Site deliverable COMPLETE.
+
+### x PER-SEQUENCE ANALYSIS REPORT (analysis.html) — user-directed honesty pass
+Median framing retired. Head-to-head: rooms 0W6L, euroc 2W8L1T, msd
+3W8L3T(+1 DNF-win), long 4W4L1T, drives 2W1L. THREE-WAY DECOMPOSITION
+(oursVIO/oursMAP/okvis-lc0/lc1 per seq) yields four measured classes:
+- ABSORB (22 seqs, dominant): their closure ABSORPTION converts VIO->
+  final at 1.7-31.9x (corr1 31.9x!); ours 1.0-1.2x on most (best 3.8x).
+  Detection is NOT the gap (our recall 95%); absorption is. Root =
+  reversible marginalization: OKVIS2 pose-graph edges cache common
+  observations and revert to landmarks+observations at closure + async
+  loop optimization (Leutenegger 2202.09199); Basalt sqrt prior is a
+  one-way sink and our folds are irreversible by construction.
+- TRACK (9 seqs): RTE outliers 1.3-2.5x (MOO01/02 1.9x, MOO13 2.5x,
+  corridors, room1/5, V2_03) = KLT shear under blur/low texture; we WIN
+  RTE on 24/39 elsewhere (down to 0.39x). KLT vs redetect-redescribe.
+- DETECT (5 seqs): loops=0 on MH_02/MH_05/V1_03/V2_02/V2_03 while
+  their covisibility matching gains up to 2.1x. Event-retrieval vs
+  continuous covisibility detection.
+- ROBUST (8 seqs): their LC self-harms (slides1 0.27x = 8.6->31.8!,
+  V2_01 0.73x); our discipline never <0.91x in ~2000 runs. The moat.
+RETIRED CLAIM: "MSD gap is calibration-level" — falsified by per-seq
+split (5 MSD seqs at parity/win; losses split TRACK/ABSORB cleanly).
+MH_01 92.7cm outlier run = early-map wrong-place closure (gate TODO).
+ROADMAP RANKED: R1 reversible-marg/landmark reactivation (DM-VIO
+delayed-marg or OKVIS2 edge<->obs cache, behind our gates) — 22 seqs;
+R2 XFeat redetect fallback on KLT collapse — 9 seqs; R3 covisibility
+closure path — 5 seqs; R4 deterministic replay infra; R5 early-map
+gate; R6 far-matching for drive3. Report: site /analysis.html.
