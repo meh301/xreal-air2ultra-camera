@@ -20,13 +20,19 @@ PACKS = [Path(r"F:\slam_bench\packs\tumvi"), Path(r"F:\slam_bench\packs\msd"),
 PY = sys.executable
 SCORE = Path(__file__).parent / "score.py"
 
+DRIVES_ROOT = Path("F:/slam_bench/results/drivepull")
+
 def group_of(seq):
     if seq.startswith(("MH_", "V1_", "V2_")): return "euroc"
     if seq.startswith(("MOO", "MIO", "MIP", "MGO")): return "msd"
+    if seq.startswith("drive"): return "drives"
     if "room" in seq: return "rooms"
     return "long"
 
 def gt_for(seq):
+    if group_of(seq) == "drives":
+        p = DRIVES_ROOT / seq / "gt.tum"
+        return (p, "drives") if p.exists() else (None, None)
     for root in PACKS:
         p = root / seq / "gt.tum"
         if p.exists():
@@ -34,12 +40,23 @@ def gt_for(seq):
                        else "euroc" if group_of(seq) == "euroc" else "tumvi")
     return None, None
 
+_PATH_M = {}
+def path_m_for(seq):
+    """GT path length [m] for drives rows (%%-of-path display)."""
+    if seq not in _PATH_M:
+        import numpy as np
+        gt, _ = gt_for(seq)
+        a = np.loadtxt(gt)
+        _PATH_M[seq] = float(np.linalg.norm(np.diff(a[:, 1:4], axis=0),
+                                            axis=1).sum())
+    return _PATH_M[seq]
+
 """In-process scorer replicating score.py's protocol exactly (validated
 against evo on the full matrix; see fast-scorer commit). The old path spawned
 a fresh python+evo subprocess PER trajectory (~12 s of import overhead for
 ~10 ms of math) — scoring took longer than the benchmarks themselves."""
-DATASET_FPS = {"euroc": 20.0, "tumvi": 20.0, "msd": 30.0}
-ATE_DIVERGE_M = {"euroc": 10.0, "tumvi": 10.0, "msd": 1.0}
+DATASET_FPS = {"euroc": 20.0, "tumvi": 20.0, "msd": 30.0, "drives": 15.0}
+ATE_DIVERGE_M = {"euroc": 10.0, "tumvi": 10.0, "msd": 1.0, "drives": 1000.0}
 # s5off / g99fl envs are flag-identical to fzbase / fz18 — relabel so the
 # site carries one pair of ours arms across every dataset group.
 ARM_ALIAS = {"s5off": "fzbase", "g99fl": "fz18"}
@@ -163,6 +180,8 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
             if cache is not None and key in cache:
                 row = dict(cache[key])
                 row["arm"] = ARM_ALIAS.get(row["arm"], row["arm"])
+                if row["group"] == "drives" and "path_m" not in row:
+                    row["path_m"] = round(path_m_for(row["seq"]), 1)
                 rows.append(row)
                 continue
             gd = m.groupdict()
@@ -183,6 +202,8 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
                 "rte_cm": round(rte, 3) if rte is not None else None,
                 "completion": comp,
             }
+            if row["group"] == "drives":
+                row["path_m"] = round(path_m_for(row["seq"]), 1)
             rows.append(row)
             if cache is not None:
                 cache[key] = row
@@ -277,7 +298,7 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
     jobs = []
     for d in results_dirs:
         for f in sorted(Path(d).glob("*_r1_map.tum")):
-            m = re.match(r"(.+?)_{1,2}(fz18|fzbase|s5off|g99fl)_r1_map",
+            m = re.match(r"(.+?)_{1,2}(fz18|fzbase|fz17d|s5off|g99fl)_r1_map",
                          f.stem)
             if m:
                 jobs.append((f, m.group(1).rstrip("_"),
@@ -285,7 +306,7 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
         # VIO track: fzbase's vio IS the raw-VIO reference; fz18's vio shows
         # the factor stack's effect inside the estimator.
         for f in sorted(Path(d).glob("*_r1_vio.tum")):
-            m = re.match(r"(.+?)_{1,2}(fz18|fzbase|s5off|g99fl)_r1_vio",
+            m = re.match(r"(.+?)_{1,2}(fz18|fzbase|fz17d|s5off|g99fl)_r1_vio",
                          f.stem)
             if m:
                 jobs.append((f, m.group(1).rstrip("_"),
@@ -371,7 +392,7 @@ def main():
     # Only stage-7-era result dirs may be passed to --results.
     ours_re = re.compile(
         r"(?P<seq>.+?)_{1,2}"
-        r"(?P<arm>fz18|fzbase|s5off|g99fl)"
+        r"(?P<arm>fz18|fzbase|fz17d|s5off|g99fl)"
         r"_r(?P<run>\d+)_(?P<track>vio|map)\.tum$")
     base_re = re.compile(
         r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins)_lc(?P<lc>[01])\.tum$")

@@ -7,11 +7,12 @@
  * (fzbase + LMFACT/LMTRACK/LMMARG factor stack, scene-gated folds,
  * LMTRACK_PERSIST). Historical iteration arms live in bench/ITERATIONS.md
  * and the raw result dirs, not on the site. */
-const ARMS = ["fzbase", "fz18"];
+const ARMS = ["fzbase", "fz18", "fz17d"];
 const AB_ARMS = new Set([]);
 const ARM_LABEL = {
   fzbase: "OURS base (reloc stack, no factors)",
   fz18: "OURS fz18 (FROZEN: + landmark-factor stack)",
+  fz17d: "OURS drive config (fz17 stack + reloc sweep)",
   "fzbase-vio": "VIO only", "fz18-vio": "VIO (factor-coupled)",
   okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
   orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
@@ -38,7 +39,8 @@ const GROUPS = [
   ["overview", "Overview"], ["systems", "vs. Systems"], ["trajectories", "Trajectories"],
   ["reloc", "Reloc"],
   ["euroc", "EuRoC"], ["rooms", "TUM-VI rooms"], ["long", "TUM-VI long"],
-  ["msd", "MSD (headset)"], ["table", "Full table"], ["method", "Method"],
+  ["msd", "MSD (headset)"], ["drives", "4Seasons drives"],
+  ["table", "Full table"], ["method", "Method"],
 ];
 const GROUP_TITLE = Object.fromEntries(GROUPS);
 
@@ -65,7 +67,8 @@ const col = a => getComputedStyle(document.documentElement).getPropertyValue(`--
 const shortName = s => s.replace("dataset-", "").replace("_512_16", "")
     .replace(/_easy|_medium|_difficult/, "");
 const group_of = s => /^(MH_|V1_|V2_)/.test(s) ? "euroc"
-    : /^(MOO|MIO|MIP|MGO)/.test(s) ? "msd" : /room/.test(s) ? "rooms" : "long";
+    : /^(MOO|MIO|MIP|MGO)/.test(s) ? "msd" : /^drive/.test(s) ? "drives"
+    : /room/.test(s) ? "rooms" : "long";
 
 async function loadJSON(p, fb) {
   try { const r = await fetch(p, { cache: "no-cache" }); if (!r.ok) throw 0; return await r.json(); }
@@ -471,10 +474,16 @@ function datasetBar(group, view) {
   const seqs = seqsIn(group);
   const med = medians(S.runs.filter(r => r.group === group), S.useRte ? "rte" : "ate");
   const armsOn = ARMS.filter(a => S.armOn[a]);
+  /* drives are km-scale: display ATE as % of GT path (the ledger metric) */
+  const drives = group === "drives";
+  const PATH = {};
+  if (drives) for (const r of S.runs) if (r.path_m) PATH[r.seq] = r.path_m;
+  const cv = (s, v) => v == null ? null
+      : drives && !S.useRte ? (v / 100) / (PATH[s] || 1) * 100 : v;
   const series = [
-    { label: "VIO only", color: col("vio"), values: seqs.map(s => med[s]?.fzbase?.vio) },
+    { label: "VIO only", color: col("vio"), values: seqs.map(s => cv(s, med[s]?.fzbase?.vio ?? (drives ? med[s]?.fz17d?.vio : null))) },
     ...armsOn.map(a => ({ label: `+map ${ARM_LABEL[a]}`, color: col(a),
-      values: seqs.map(s => med[s]?.[a]?.map) })),
+      values: seqs.map(s => cv(s, med[s]?.[a]?.map)) })),
   ];
   // baseline systems as REAL bar series (same machine, same causal protocol)
   const base = aggBaselines().filter(b => group_of(b.seq) === group);
@@ -483,12 +492,13 @@ function datasetBar(group, view) {
     label: BASE_LABEL[k] || k.replace("_", " "),
     color: BASE_COLORS[k] || "#888",
     defaultOff: k.startsWith("orb3"),   // causal snaps make ORB3 dominate the scale
-    values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === k); return b ? (S.useRte ? b.rte : b.ate) : null; }),
+    values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === k); return b ? cv(s, S.useRte ? b.rte : b.ate) : null; }),
   });
   let curSeq = seqs[0];
   const panelHost = el("div");
   const chart = barChart({
-    title: `${GROUP_TITLE[group]} — causal ${S.useRte ? "RTE" : "ATE"} medians [cm]`,
+    title: `${GROUP_TITLE[group]} — causal ${S.useRte ? "RTE medians [cm]" : drives ? "ATE medians [% of GT path]" : "ATE medians [cm]"}`,
+    unit: drives && !S.useRte ? "%path" : "cm",
     cats: seqs.map(shortName), series,
     note: "All bars are systems we ran ourselves: same machine, same causal protocol. Click a legend chip to toggle a series, or a bar to load its trajectory below.",
     onBar: i => { curSeq = seqs[i]; panelHost.innerHTML = ""; panelHost.append(trajPanel({ group, seq: curSeq, compact: true })); panelHost.scrollIntoView({ behavior: "smooth", block: "nearest" }); },
@@ -518,16 +528,13 @@ function overviewView() {
    * from bench/ITERATIONS.md (2026-07-18 finale, n=3 / n=90 probes);
    * same machine, same causal protocol as everything else here. */
   view.append(el("div", { class: "card" }, `
-    <h3>4Seasons drives &amp; wake-up relocalization (fz18 frozen)</h3>
+    <h3>Wake-up relocalization (fz18 frozen)</h3>
     <table class="mini"><thead><tr><th></th><th>ours fz18</th><th>OKVIS2+LC</th></tr></thead><tbody>
-      <tr><td>drive1_city (10.6 km), ATE %path, med of 3</td><td class="best">1.44%</td><td>3.32%</td></tr>
-      <tr><td>drive2_city (10.8 km)</td><td class="best">3.35%</td><td>diverged (both LC modes)</td></tr>
-      <tr><td>drive3_country (5.1 km)</td><td>1.88%</td><td class="best">1.22%</td></tr>
-      <tr><td>wake-up burst-15 recall, corridors (90 probes/seq)</td><td class="best">99&ndash;100% (r@10cm 90&ndash;96%, ~55 ms)</td><td>DNF &mdash; reference harness deadlocks at the camera gap</td></tr>
-      <tr><td>wake-up burst-15 recall, magistrale2</td><td class="best">85.6%</td><td>DNF</td></tr>
+      <tr><td>burst-15 recall, corridors (90 probes/seq)</td><td class="best">99&ndash;100% (r@10cm 90&ndash;96%, ~55 ms)</td><td>DNF &mdash; reference harness deadlocks at the camera gap</td></tr>
+      <tr><td>burst-15 recall, magistrale2</td><td class="best">85.6%</td><td>DNF</td></tr>
     </tbody></table>
-    <p class="note">Wake-up protocol: camera frames removed for a window while IMU continues (a real sleep/pocket event); every system must re-anchor to its own map. Full data on the Reloc tab.</p>`));
-  for (const g of ["euroc", "rooms", "long", "msd"]) datasetBar(g, view);
+    <p class="note">Wake-up protocol: camera frames removed for a window while IMU continues (a real sleep/pocket event); every system must re-anchor to its own map. Full grid on the Reloc tab; drives now have their own tab below.</p>`));
+  for (const g of ["euroc", "rooms", "long", "msd", "drives"]) datasetBar(g, view);
 }
 
 function systemsView() {
@@ -587,6 +594,14 @@ async function relocView() {
     series: arms.map(a => ({ label: ARM_LABEL[a] || a, color: armColor(a),
       values: seqs.map(s => { const e = M[`${s}|${a}`]; return e ? get(e) : null; }) })),
   });
+  view.append(el("div", { class: "card" }, `
+    <h3>Baselines under the same protocol</h3>
+    <p class="note">OKVIS2 (both LC modes): <b>DNF</b> — the reference synchronous
+    harness deadlocks at the camera gap on every blackout sequence tried
+    (MH_01, corridor1, room1; 0% CPU at the gap frame, no trajectory
+    written), so it never reaches the re-anchor test. OpenVINS has no
+    relocalization path (diverges by design). ORB-SLAM3's DBoW2 reloc was
+    not benchmarked (no headless harness) — noted, not claimed.</p>`));
   view.append(mk("Relocalization recall [%]", e => e.recall * 100, "%", true,
     "Cold probes (seeded-random frames, no VIO context) against the run's own finished map. Click a legend chip to toggle an arm."));
   view.append(mk("Recall @25 cm [%]", e => e.r25 * 100, "%", true, ""));
