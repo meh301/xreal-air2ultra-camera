@@ -1468,3 +1468,34 @@ delayed-marg or OKVIS2 edge<->obs cache, behind our gates) — 22 seqs;
 R2 XFeat redetect fallback on KLT collapse — 9 seqs; R3 covisibility
 closure path — 5 seqs; R4 deterministic replay infra; R5 early-map
 gate; R6 far-matching for drive3. Report: site /analysis.html.
+
+### x QUICK-LEVER VERDICTS + STAGE-8 BUILT + .58 CONTAMINATION FOUND
+- SIGMA (post-stage-7 redo of the invalidated sweep, .15 n=5): REAL
+  absorption lever. ALL SIX rooms improve at XR_LMF_SIGMA=1.0 (room1
+  7.02->5.09, room6 1.72->1.52, agg 5.44->4.36); corr1 28.8->18.6-21.1.
+  sg10 = fz19 candidate; in the s8 2x2 for confirmation.
+- XR_SEED (dormant v9 detector unification, .58 n=5): mild TRACK-class
+  gains (MOO13 35->31.6, MOO01 22->20, V2_02 6.6->5.7), neutral rest.
+  Minor candidate; seeds still KLT-shear — not the blur answer.
+- STAGE-8 XR_LMINJ ALIVE after a five-bug odyssey (patches 8..8e):
+  (1) 1-obs landmark segfaults QR (needs >=2 rows) -> buffered creation;
+  (2) newest-kf host not guaranteed in AbsOrderMap -> host like flow
+  landmarks (current frame on kf measures); (3) take_kf is a member
+  CONSUMED by its own branch -> kf_ids.count(now); (4) app re-match
+  stream (1-2Hz) vs 150ms frame lifetime -> PER-FRAME COVISIBILITY
+  MATCHER inside the estimator (project anchors, match flow kps 8px,
+  sub-pixel agreement measured: 0.12-0.23px!); (5) lost-landmark test
+  is flow connectivity -> injected ids exempt, retire with host kf.
+  Smoke: 23 landmarks created, +23 obs streaming EVERY frame, clean
+  full run. The OKVIS2 absorption mechanism now runs inside Basalt.
+  2x2 A/B FIRED (.15, 220 runs): fz18/sg10/inj/injsg.
+- .58 BASALT CONTAMINATION: header at stage-7 but xr_alive MISSING
+  (stage-4 keyframe-anchored survival lost at some point) -> folds
+  never fired on .58. CONTAMINATED: corr10 corridor-neutrality verdict,
+  lbv2 round-2, fleet18 euroc/msd fz18 wave (understates factor stack;
+  MH01 4.65 was achieved WITHOUT folds), cauchy (pre-7 anyway), seed
+  round (within-round delta still valid). CLEAN: all .15 rounds, all
+  .181 rounds (tree-synced; xr_alive=2 verified). FIX: full tree-sync
+  .15->.58 (stage-8 level), rebuilt, euroc fz18 wave RE-FIRED. corr10
+  re-run queued post-s8. All three containers now at identical
+  stage-8 trees.
