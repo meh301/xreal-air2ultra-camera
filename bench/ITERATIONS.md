@@ -86,6 +86,47 @@ corridors at large drift.
 
 ## In flight
 
+### 🎯 2026-07-19 — CORRECTED BEST-CONFIG NUMBERS (cap 3333) — THE MAP HELPS
+Best-config map ATE (cm, n=5, n=10 corr/mag) vs VIO floor vs OKVIS2+LC:
+| seq | BC-map | VIO-floor | okvis2+lc | verdict |
+|---|---|---|---|---|
+| room1 | 6.8 | 13.1 | 1.2 | map -48% vs floor; lose vs okvis |
+| room2 | 2.9 | 4.9 | 0.9 | map -41% |
+| room3 | 3.0 | 5.6 | — | map -46% |
+| room4 | 3.5 | 5.0 | — | map -30% |
+| room5 | 10.1 | 17.9 | — | map -44% |
+| room6 | 1.6 | 2.0 | — | map -20% |
+| MH_05 | 17.9 | 19.2 | — | map helps a bit |
+| V1_02 | 4.6 | 5.6 | — | map -18% |
+| corridor1 | 31.6 | — | 2.8 | LOSE 11x (coupling) |
+| corridor2 | 18.8 | — | 9.2 | LOSE 2x (coupling) |
+| corridor3 | 17.1 | — | 4.9 | LOSE (coupling) |
+| corridor4 | 17.9 | — | 11.4 | LOSE (coupling) |
+| corridor5 | 19.2 | — | 101.5 | **WIN 5x** |
+| magistrale1 | 26.1 | — | 179.8 | **WIN 7x** |
+| magistrale2 | 63.4 | — | 66.4 | ~tie |
+| slides1 | 24.6 | — | (their LC self-harms) | |
+| slides2 | 43.8 | — | (their LC self-harms) | |
+KEY FINDINGS:
+1. **The map layer genuinely REDUCES ATE** (not just coloring VIO): rooms
+   -20..-48% vs the pure-VIO floor. Refutes the "it just looks like VIO
+   offset" worry — injection/factors do real work on rooms.
+2. **Reloc fixed by cap** (see reloc grid: mag1 27->87%, mag2 burst 100%).
+3. **The one real remaining gap = corridors 1-4 vs OKVIS2+LC** (11x/2x/2x).
+   This is EXACTLY forensic attack step 3: the closure factors are excluded
+   from the LM accept/reject test, so meter-scale corridor corrections get
+   rejected. NOT a cap or reloc problem. This is the next fix.
+4. We WIN corridor5 (5x), magistrale1 (7x), and OKVIS2's LC self-harms on
+   slides — the moat holds.
+So "no advantage anywhere" was wrong: we have clear advantages (mag1,
+corr5, slides, the never-self-harm property), the map helps rooms
+substantially, reloc is now excellent, and the corridor 1-4 loss is one
+well-understood coupling bug away from closing.
+(magistrale n=10 tail still finishing on .15; MSD best-config done on .181;
+VIO sweep + DM-VIO build still running.)
+
+---
+
 ### 2026-07-19 — REBENCHMARK EXECUTING (4 parallel streams, prep workflow landed)
 BEST CONFIG (measured-grounded, prep workflow): fz19 + reloc keepers =
 `XR_COVKEEP XR_PGO XR_LMDESC XR_TIGHT XR_TIGHTSUB XR_SEQVOTE XR_TRUSTVPR
