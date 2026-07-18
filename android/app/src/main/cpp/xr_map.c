@@ -1362,8 +1362,15 @@ static int radv_level(void) {
 }
 static void radv_trigger(uint64_t ts) {
     static uint64_t last_ns;
+    static uint64_t gap_ns;
     if (radv_level() < 1) return;
-    if (last_ns && ts - last_ns < 2000000000ull) return;   /* 2 s */
+    if (!gap_ns) {
+        const char *e = getenv("XR_RADV_GAP_S");
+        double g = e && *e ? atof(e) : 2.0;
+        gap_ns = (uint64_t)(g * 1e9);
+        if (gap_ns < 500000000ull) gap_ns = 500000000ull;
+    }
+    if (last_ns && ts - last_ns < gap_ns) return;
     if (xr_slam_readvance() > 0) last_ns = ts;
 }
 /* v2 gate: called from the confirmed-applied site with the closure's
