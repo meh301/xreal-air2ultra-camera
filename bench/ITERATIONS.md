@@ -1607,3 +1607,19 @@ self-consistency — rate-limited background micro-PGO using sub-gate
 verifications as edges to OLD keyframes (the valid edge class; NOT
 EDGEGRAPH's self-drift-correlated edges). fz20-v2 (two-strikes
 escalation) subset re-test fired (.58: corr3/MH_01/mag2/MOO15).
+
+### x DEFGUARD ITERATIONS v2-v4 (event-set A/B, .58, n=5 each round)
+- v2 (two-strikes): MH_01 4.71 (BETTER than unguarded 5.23 — cascade
+  killed), mag2 42.9 5/5 kept, V2_03/MH_05/MOO13 preserved; corr3
+  STILL 35 (blocked by covis>=8: its productive returns run covis 5-7).
+- v3 (scene-conditional covis + alias-margin): corr3 STILL blocked
+  (alias margin — corridor ends look alike) AND mag2 win LOST (relaxed
+  corridor-class floor readmitted hall poison during scene_ok
+  stretches). The covis/alias dimensions SEE-SAW corr3-vs-mag2 —
+  static per-closure gates cannot separate them.
+- v4 (minimal: ratio-55 + extent-cap + two-strikes only): every
+  forensic cascade dies by one of the three; corr3's 58-80%-ratio
+  non-escalating returns pass all. FINAL TIMEBOXED ROUND — if not
+  uniform-safe, fz19 remains the freeze and DEFGUARD ships flag-off
+  (tail-risk tool: the cascades are 1-2-in-10-run events that medians
+  barely see; MH_01-fz19 scored 5.23 unguarded this round).
