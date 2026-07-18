@@ -602,12 +602,14 @@ async function relocView() {
     (MH_01, corridor1, room1; 0% CPU at the gap frame, no trajectory
     written), so it never reaches the re-anchor test. OpenVINS has no
     relocalization path (diverges by design). DBoW2 (ORB-SLAM3's retrieval
-    engine, ORBvoc + ORB-1000) IS benchmarked apples-to-apples: the
-    <b>dbw19</b> arm feeds DBoW2's top-5 keyframes through OUR unchanged
-    verify/PnP pipeline on the same probes (corridors mean 87.8% vs our
-    retrieval 84.4% — retrieval choice largely washes out after geometric
-    verification; magistrale2's 50% ceiling is engine-independent:
-    13/15 failed probes identical across engines).</p>`));
+    engine, ORBvoc + ORB-1000) IS benchmarked apples-to-apples on ALL 17
+    sequences: the <b>dbw19</b> arm feeds DBoW2's top-5 keyframes through
+    OUR unchanged verify/PnP pipeline on the same probes. Full-grid means:
+    ours 86.5% vs DBoW2-fed 88.8% (single-frame) — retrieval choice
+    largely washes out after geometric verification. Both engines collapse
+    identically on the magistrales (27-50%; 13/15 failed mag2 probes are
+    engine-identical → matcher/coverage-level, not retrieval), and burst
+    mode (rb19) dominates either single-frame arm everywhere.</p>`));
   view.append(mk("Relocalization recall [%]", e => e.recall * 100, "%", true,
     "Cold probes (seeded-random frames, no VIO context) against the run's own finished map. Click a legend chip to toggle an arm."));
   view.append(mk("Recall @25 cm [%]", e => e.r25 * 100, "%", true, ""));
