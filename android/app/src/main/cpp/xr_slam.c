@@ -43,6 +43,7 @@ static struct {
                                      const int32_t *, int32_t);
     vit_result_t (*xreal_lm_factors)(vit_tracker_t *, int64_t, int32_t,
                                      const float *, const float *, int32_t, float);
+    vit_result_t (*xreal_radv)(vit_tracker_t *);
 
     vit_tracker_t *tracker;
     atomic_int running;
@@ -148,6 +149,7 @@ int xr_slam_load(void) {
     *(void **)&B.xreal_pose_prior = dlsym(B.dl, "vit_tracker_xreal_pose_prior");
     *(void **)&B.xreal_seed_kps = dlsym(B.dl, "vit_tracker_xreal_seed_keypoints");
     *(void **)&B.xreal_inject_lms = dlsym(B.dl, "vit_tracker_xreal_inject_landmarks");
+    *(void **)&B.xreal_radv = dlsym(B.dl, "vit_tracker_xreal_readvance");
     *(void **)&B.xreal_lm_factors = dlsym(B.dl, "vit_tracker_xreal_landmark_factors");
     uint32_t maj = 0, min = 0, pat = 0;
     B.get_version(&maj, &min, &pat);
@@ -203,6 +205,17 @@ int xr_slam_landmark_inject(uint64_t ts_ns, int cam, const float *uv,
         return 0;
     return B.xreal_inject_lms(B.tracker, (int64_t)ts_ns, cam, uv, xyz_odom,
                               ids, n) == VIT_SUCCESS;
+}
+
+/* Stage-12 (XRV P3b): arm a delayed-marg re-advance in the estimator —
+ * called when a verified closure is APPLIED so the retained window
+ * re-linearizes with the closure factors live. Returns 1 if delivered,
+ * -1 when the backend lacks the extension. */
+int xr_slam_readvance(void) {
+    if (!B.xreal_radv) return -1;
+    if (!B.tracker || !atomic_load_explicit(&B.running, memory_order_acquire))
+        return 0;
+    return B.xreal_radv(B.tracker) == VIT_SUCCESS;
 }
 
 int xr_slam_seed_keypoints(uint64_t ts_ns, int cam, const float *uv, int n) {

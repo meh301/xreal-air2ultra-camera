@@ -1340,6 +1340,23 @@ static int defguard_ok(float dev, int nin, int n3, int covis,
     return 1;
 }
 
+/* XR_RADV (XRV P3b): on an APPLIED verified closure, arm a delayed-marg
+ * re-advance in the estimator (stage 11/12) — the retained window
+ * re-linearizes with the closure's factors live. Debounced: rebuilds
+ * are O(window) and closures can burst. Map thread only. */
+static void radv_trigger(uint64_t ts) {
+    static int on = -1;
+    static uint64_t last_ns;
+    if (on < 0) {
+        const char *e = getenv("XR_RADV");
+        on = (e && *e && *e != '0') ? 1 : 0;
+        if (on) LOGI("session map: CLOSURE->READVANCE ON");
+    }
+    if (!on) return;
+    if (last_ns && ts - last_ns < 2000000000ull) return;   /* 2 s */
+    if (xr_slam_readvance() > 0) last_ns = ts;
+}
+
 /* session-frame inliers -> odom frame -> basalt injection (same CORR
  * transform as lmfact_post; ids pair 1:1 with uv/ps rows) */
 static void lminj_post(const float (*uv)[2], const float (*ps)[3],
@@ -5048,6 +5065,7 @@ static void process_keyframe(void) {
                 if (lmtrack_on())
                         lmt_capture(&work, lf_uv, lf_ps, lf_id, lf_n, work.ts);
                 }
+                radv_trigger(work.ts);
                 /* (EDGEGRAPH v1 admitted sub-gate closures here at 1 Hz —
                  * self-drift-correlated edges compounded and the corridor
                  * A/B REGRESSED; edges now come only from APPLIED
@@ -5237,6 +5255,7 @@ static void process_keyframe(void) {
                     LAST_SNAP_NS = work.ts;
                     PENDING_D.have = 0;
                     LOOP_STATS.count++;
+                    radv_trigger(work.ts);
                     LOOP_STATS.matches = best_m;
                     VER_LAST.outcome = VOUT_APPLIED;
                     LOGI("session map: LOOP kf#%d TIGHT-PRIOR %.2fm %.0fdeg "

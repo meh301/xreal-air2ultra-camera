@@ -107,6 +107,7 @@ int xr_slam_landmark_factors(uint64_t ts_ns, int cam, const float *uv,
  * frame; the VIO's optical flow merges them with FAST detection.
  * Returns 1 if delivered, 0 when unsupported/stopped. */
 int xr_slam_seed_keypoints(uint64_t ts_ns, int cam, const float *uv, int n);
+int xr_slam_readvance(void);
 
 /* Stage-8: closure-landmark injection into the live estimator lmdb. */
 int xr_slam_landmark_inject(uint64_t ts_ns, int cam, const float *uv,
