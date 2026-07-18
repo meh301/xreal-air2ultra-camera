@@ -1413,3 +1413,21 @@ depth on the matched points before solving), (b) full lmdb-injection
 (c) infra: corridor A/B sharpness is capped by run stochasticity
 (fz18 corr1 17/29/32 across rounds at n=10) — deterministic replay
 scheduling would multiply every future corridor A/B's power.
+
+### x SITE REGRESSION FIXES (user-flagged) + DRIVES TAB + FULL RELOC GRID
+User caught 5 regressions/gaps from the curation pass: (1) baseline
+traj overlays dropped (my re-export omitted --baselines) — RESTORED
+(195 baseline rows, okvis2/orb3/openvins overlays back); (2) reloc GT
+outlines missing (parse_reloc needs <seq>__<arm>_map.tum siblings; my
+staging had bare concatenated logs — also WRONG: 3 runs' session
+frames mixed) — fixed via grid output naming; (3) only 4 reloc seqs
+(old grid had 17) — FULL fz18 reloc grid fired on all 3 boxes (rl18+
+rb18 x rooms1-6, slides1/2, corridors1-5, mag1/2, MH_01, MOO07);
+(4) baseline relocs — OKVIS2 DNF note card added to Reloc tab
+(deadlock evidence; OpenVINS no-reloc-by-design; ORB3 not benchmarked,
+noted not claimed); (5) drives absent — now a REAL dataset group:
+%%-of-path bars (drive1 1.44 vs 3.32; drive2 okvis2 bar absent =
+diverged; aggregate ours 1.88 < okvis2+lc 2.24), okvis2 baseline rows
+(.final.tum, generous to them), full trajectories (fz17d + okvis2 lc0/
+lc1 + GT). export_site_data: drives GT root/fps 15/diverge 1000m/
+path_m rows; app.js: drives group + %%path conversion + fz17d arm.
