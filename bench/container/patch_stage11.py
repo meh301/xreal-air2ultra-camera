@@ -328,6 +328,16 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
         Q2Jp_or_H, Q2r_or_b, idx_to_keep, idx_to_marg, marg_H_new,
         marg_b_new);
 
+  /* diagnostic: captured-prior fold residual (needs resurrected vars
+   * still alive) */
+  Scalar xr_r0 = Scalar(0), xr_b0 = Scalar(0);
+  {
+    VecX d0;
+    computeDelta(ev0.prior_before.order, d0);
+    xr_r0 = (ev0.prior_before.H * d0 + ev0.prior_before.b).norm();
+    xr_b0 = ev0.prior_before.b.norm();
+  }
+
   /* ---- 5. BURY the resurrected objects ---- */
   for (const auto& ro : res_obs)
     if (lmdb.landmarkExists(ro.first))
@@ -390,16 +400,10 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
       computeDelta(new_order, cur_delta);
       const Scalar ri = (marg_data.H * cur_delta + marg_data.b).norm();
       const Scalar rn = (marg_H_new * cur_delta + marg_b_new).norm();
-      /* captured-prior fold input */
-      VecX d0;
-      computeDelta(ev0.prior_before.order, d0);
-      const Scalar r0 =
-          (ev0.prior_before.H * d0 + ev0.prior_before.b).norm();
       std::cerr << "[xr] READVANCE diff: |Hi-Hn|=" << (Hi - Hn).norm()
                 << " |Hi|=" << Hi.norm() << " r_eff_i=" << ri
-                << " r_eff_n=" << rn << " r_fold0=" << r0
-                << " |b0|=" << ev0.prior_before.b.norm()
-                << std::endl;
+                << " r_eff_n=" << rn << " r_fold0=" << xr_r0
+                << " |b0|=" << xr_b0 << std::endl;
       std::cerr << "  Hdiag_i=" << di.transpose() << std::endl;
       std::cerr << "  Hdiag_n=" << dn.transpose() << std::endl;
       std::cerr << "  b_i=" << si.transpose() << std::endl;
