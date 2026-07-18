@@ -86,6 +86,22 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — DM-VIO BASELINE ADDED (ROS-free, built + running)
+New baseline padding the fleet beyond OKVIS2/OpenVINS (orb3 dead). Built
+on .181 (Pangolin v0.6 + GTSAM 4.2a6 pinned, GCC13 cstdint fix, private
+prefix /mnt/processing/dmvio_build/install). Binary /root/baselines/dm-vio/
+bin/dmvio_dataset. CRITICAL: score resultScaled.txt (metric), NOT
+result.txt (up-to-scale — 0.84 vs 0.066 on MH_01). Mono-VIO, no LC (lc0
+only). Smoke: MH_01 6.56cm (=published, ~OKVIS2), room1 9.1cm (mode=1).
+mode=1 (no photometric) is the apples-to-apples arm since OUR system also
+does no photometric cal. TUM-VI mode=0 needs vignette.png (missing on
+container) — deferred. FLEET RUN FIRING NOW (.181 CPU, 11 euroc + 15
+tumvi x5 -> /mnt/processing/baselines_out/<seq>_dmvio_lc0.tum). Launcher:
+run_dmvio_benchmark.sh. Next baselines queued: stock-Basalt (flags-off
+A/B), HybVIO (stereo), VINS-Fusion (ROS, last).
+
+---
+
 ### 🔧 2026-07-19 — STAGE 14 (XR_ABSORB) BUILT: the corridor-gap fix (attack step 3)
 Forensic rank-2 finding implemented + built clean on .15. The map/closure
 factors (pose prior + fixed-3D landmark reprojection) are added to the
