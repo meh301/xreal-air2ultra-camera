@@ -14,6 +14,7 @@ const ARM_LABEL = {
   vio: "VIO only (Basalt floor, no map)",
   bc: "OURS best-config (cap 3333)",
   absorb: "OURS + closure-absorb (corridor fix)",
+  "bc-vio": "VIO track under best-config",
   fzbase: "OURS base 400-cap (reloc stack, no factors)",
   fz18: "OURS fz18 400-cap (factor stack)",
   fz19: "OURS fz19 400-cap (+ landmark injection)",
@@ -33,12 +34,12 @@ function armColor(a) {
   return `hsl(${h % 360},62%,50%)`;
 }
 /* every plot key the trajectory panel may offer, in display order */
-const TRAJ_KEYS = ["fzbase-vio", "fz18-vio", ...ARMS,
-  "okvis2lc0", "okvis2lc1", "orb3lc0", "orb3lc1", "openvinslc0"];
+const TRAJ_KEYS = ["vio", "bc", "bc-vio", "absorb",
+  "fz19", "fzbase-vio", "fz18-vio", "fz18", "fzbase", "fz17d",
+  "okvis2lc0", "okvis2lc1", "openvinslc0"];
 const TRAJ_COLOR = {
-  "fzbase-vio": "vio", "fz18-vio": "vio",
-  okvis2lc0: "base", okvis2lc1: "base", orb3lc0: "xvpr", orb3lc1: "xvpr",
-  openvinslc0: "pub",
+  vio: "vio", "bc-vio": "vio", "fzbase-vio": "vio", "fz18-vio": "vio",
+  okvis2lc0: "base", okvis2lc1: "base", openvinslc0: "pub",
 };
 const GROUPS = [
   ["overview", "Overview"], ["systems", "vs. Systems"], ["trajectories", "Trajectories"],
