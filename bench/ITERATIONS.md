@@ -86,6 +86,31 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-18 — v2 rounds: both REJECTED, both informative → v3s fired
+**radv v2 (radv2_ab)**: the dev>=0.10m + confirmed-site gates KILLED the
+mechanism — mag2/slides2 fired ZERO rebuilds (their apparent deltas =
+round variance: mag2 ctrl has swung 55→205→96 across three rounds!);
+corr3 fired 0-1/run. v1's active ingredient was FREQUENCY (~12
+rebuilds/run via the sub-gate stream) — TIGHT absorbs continuously so
+per-closure corrections are tiny and a dev gate can never pass.
+**radv v3** (committed): v1 sites+frequency, SPACE selection via the
+fold discriminator (covis>=6 && vpr_alias_margin > LMMARG_ALIAS_MARGIN)
+— mag1's aliased space has structurally low margins -> auto-disable.
+radv3_ab fired (.15): n=10 on mag1/mag2/corr3 (the variance-heavy
+verdict seqs), n=5 corr5/slides2.
+**ZNCC floor (znf_ab): INVALID — units.** Basalt images are 16-bit;
+floors 3/6 (8-bit thinking) never engaged; znf3-vs-znf6 deltas were
+noise. Valid floor probe (1000, 16-bit) runs in the new round.
+**ZNCC v3 = stage 9b transient gating (committed)**: XR_ZNCC=2 arms the
+ZNCC branch only while a windowed frame-mean delta (>3.0 8-bit units
+over 10 frames, 2s hold) detects a photometric transient — catches
+V2_03 flicker AND MH_05's slow ramp, leaves dark/low-texture scenes on
+stock normalization. Smoke: detector armed on V2_03 (dmean 3.66).
+znt_ab fired (.58): ctrl/znt/znf1k on V2_03, MH_05, V1_03, slides1/2,
+MOO02, n=5.
+
+---
+
 ### 2026-07-18 — P3b held-out: NOT freeze-able as-is → radv v2 (quality-gated)
 s12_heldout (.15, within-round, n=5, cm): the mag2/corr3 transformation
 did NOT generalize — **mag1 99.2→134.4 (tail 438!)**, corr5 18.0→22.8,
