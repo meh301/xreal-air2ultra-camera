@@ -375,16 +375,37 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
       VecX bn = marg_data.is_sqrt ? VecX(marg_H_new.transpose() * marg_b_new)
                                   : marg_b_new;
       VecX si = VecX::Zero(new_order.items), sn = VecX::Zero(new_order.items);
+      VecX di = VecX::Zero(new_order.items), dn = VecX::Zero(new_order.items);
       int vi = 0;
       for (const auto& kv : new_order.abs_order_map) {
-        si[vi] = bi.segment(kv.second.first, kv.second.second).norm();
-        sn[vi] = bn.segment(kv.second.first, kv.second.second).norm();
+        const int o = kv.second.first, sz = kv.second.second;
+        si[vi] = bi.segment(o, sz).norm();
+        sn[vi] = bn.segment(o, sz).norm();
+        di[vi] = Hi.block(o, o, sz, sz).norm();
+        dn[vi] = Hn.block(o, o, sz, sz).norm();
         vi++;
       }
-      std::cerr << "[xr] READVANCE diff: |Hi|=" << Hi.norm()
-                << " |Hn|=" << Hn.norm() << " |bi|=" << bi.norm()
-                << " |bn|=" << bn.norm() << " bi_seg=" << si.transpose()
-                << " bn_seg=" << sn.transpose() << std::endl;
+      /* effective residual at the current deltas: what optimize() sees */
+      VecX cur_delta;
+      computeDelta(new_order, cur_delta);
+      const Scalar ri = (marg_data.H * cur_delta + marg_data.b).norm();
+      const Scalar rn = (marg_H_new * cur_delta + marg_b_new).norm();
+      /* captured-prior fold input */
+      VecX d0;
+      computeDelta(ev0.prior_before.order, d0);
+      const Scalar r0 =
+          (ev0.prior_before.H * d0 + ev0.prior_before.b).norm();
+      std::cerr << "[xr] READVANCE diff: |Hi-Hn|=" << (Hi - Hn).norm()
+                << " |Hi|=" << Hi.norm() << " r_eff_i=" << ri
+                << " r_eff_n=" << rn << " r_fold0=" << r0
+                << " |b0|=" << ev0.prior_before.b.norm()
+                << "
+  Hdiag_i=" << di.transpose() << "
+  Hdiag_n="
+                << dn.transpose() << "
+  b_i=" << si.transpose()
+                << "
+  b_n=" << sn.transpose() << std::endl;
     } else {
       std::cerr << "[xr] READVANCE diff: ORDER MISMATCH inc="
                 << marg_data.order.total_size << " new="
