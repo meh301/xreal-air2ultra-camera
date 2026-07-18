@@ -1623,3 +1623,15 @@ escalation) subset re-test fired (.58: corr3/MH_01/mag2/MOO15).
   uniform-safe, fz19 remains the freeze and DEFGUARD ships flag-off
   (tail-risk tool: the cascades are 1-2-in-10-run events that medians
   barely see; MH_01-fz19 scored 5.23 unguarded this round).
+
+### ✓ DEFGUARD FINAL: flag-off tail-risk tool; fz19 REMAINS THE FREEZE
+v4 (minimal): MH_05 16.6 (best yet), mag2/MOO13/MOO15/V2_03 fine,
+corr3 26.4 (still pays vs 17.1), MH_01 n=3. Four rounds establish:
+static output-layer deform gates cannot separate corridor CONVERGENCE
+from hall CASCADES without collateral — the phenomena overlap in every
+per-closure observable we have (ratio, covis, alias, magnitude,
+escalation shape). DEFGUARD ships FLAG-OFF: valuable against the
+1-2-in-10 cascade tail (MH_01-class), not as default. The structural
+fix for both remains recoverable in-estimator absorption (R1 arc:
+injection deepening + delayed-marg) + continuous map self-consistency.
+FREEZE UNCHANGED: fz19 = fz18 + XR_LMINJ.
