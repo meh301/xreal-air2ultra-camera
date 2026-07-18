@@ -49,7 +49,8 @@ old = """    mean = sum / num_valid_points;
     data /= mean;
   }"""
 new = """    mean = sum / num_valid_points;
-    if (xr_zncc()) {
+    xr_zncc_bound = xr_zncc();
+    if (xr_zncc_bound) {
       /* zero-mean / unit-variance: gain AND bias invariant */
       Scalar var = 0;
       int nv = 0;
@@ -77,7 +78,8 @@ old = """    mean = sum / num_valid_points;
 assert t.count(old) == 1, "jac anchor A"
 t = t.replace(old, """    mean = sum / num_valid_points;
 
-    if (xr_zncc()) {
+    xr_zncc_bound = xr_zncc();
+    if (xr_zncc_bound) {
       Scalar var = 0;
       int nv = 0;
       for (int i = 0; i < PATTERN_SIZE; i++)
@@ -113,7 +115,7 @@ old = """    int num_residuals = 0;
 assert t.count(old) == 1, "residual block anchor"
 new = """    int num_residuals = 0;
 
-    if (xr_zncc()) {
+    if (xr_zncc_bound) {
       /* ZNCC: zero-mean/unit-variance over the mutually-valid samples —
        * gain AND bias invariant (exposure ramps, flicker, black level) */
       Scalar tsum = 0;

@@ -28,7 +28,12 @@ old = """  static inline bool xr_zncc() {
     }();
     return v;
   }"""
-new = """  static inline int xr_zncc_level() {
+new = """  /* v5: normalization mode BOUND AT PATCH CREATION — gate flapping
+   * otherwise corrupts live tracks (template under one normalization,
+   * target under the other). */
+  bool xr_zncc_bound = false;
+
+  static inline int xr_zncc_level() {
     static const int v = [] {
       const char* e = getenv("XR_ZNCC");
       return e && *e ? atoi(e) : 0;
