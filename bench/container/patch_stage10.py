@@ -28,8 +28,11 @@ new = """  std::map<int, XrInjLm> xr_inj_lms;
    * later be re-derived with fresh linearization (P2b/P3). */
   struct XrvMargState {
     int64_t t_ns;
-    SE3 T_w_i;
+    SE3 T_w_i;                       /* current estimate at capture */
     Vec3 vel, bg, ba;
+    SE3 T_w_i_lin;                   /* FEJ lin point at capture */
+    Eigen::Matrix<Scalar, 15, 1> delta;
+    bool was_linearized;
     bool had_vel_bias;
   };
   struct XrvMargObs {
@@ -92,17 +95,28 @@ new = """    {
         XrvMargState s;
         s.t_ns = id;
         if (frame_states.count(id)) {
-          const auto& st = frame_states.at(id).getState();
+          const auto& sw = frame_states.at(id);
+          const auto& st = sw.getState();
           s.T_w_i = st.T_w_i;
           s.vel = st.vel_w_i;
           s.bg = st.bias_gyro;
           s.ba = st.bias_accel;
+          s.T_w_i_lin = sw.getStateLin().T_w_i;
+          s.delta = sw.isLinearized() ? sw.getDelta()
+                                      : Eigen::Matrix<Scalar, 15, 1>::Zero();
+          s.was_linearized = sw.isLinearized();
           s.had_vel_bias = true;
         } else if (frame_poses.count(id)) {
-          s.T_w_i = frame_poses.at(id).getPose();
+          const auto& pw = frame_poses.at(id);
+          s.T_w_i = pw.getPose();
           s.vel.setZero();
           s.bg.setZero();
           s.ba.setZero();
+          s.T_w_i_lin = pw.isLinearized() ? pw.getPoseLin() : pw.getPose();
+          s.delta.setZero();
+          if (pw.isLinearized())
+            s.delta.template head<6>() = pw.getDelta();
+          s.was_linearized = pw.isLinearized();
           s.had_vel_bias = false;
         } else {
           return;

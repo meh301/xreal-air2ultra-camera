@@ -123,24 +123,40 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
            it->second.second == POSE_VEL_BIAS_SIZE) ||
           (it == ev0.prior_before.order.abs_order_map.end() &&
            s.had_vel_bias);
+      /* prior-order vars must satisfy the FEJ contract: resurrect at
+       * the CAPTURED LIN POINT and replay the captured delta, so the
+       * old prior's columns stay valid AND estimate = lin (+) delta
+       * reproduces the captured estimate. Vars outside the old prior
+       * get a fresh linearization at the captured estimate. */
+      const bool in_prior =
+          it != ev0.prior_before.order.abs_order_map.end();
+      const bool lin_replay = in_prior && s.was_linearized;
       if (as_state) {
         PoseVelBiasState<Scalar> st;
         st.t_ns = s.t_ns;
-        st.T_w_i = s.T_w_i;
+        st.T_w_i = lin_replay ? s.T_w_i_lin : s.T_w_i;
         st.vel_w_i = s.vel;
         st.bias_gyro = s.bg;
         st.bias_accel = s.ba;
+        if (lin_replay) {
+          st.vel_w_i -= s.delta.template segment<3>(6);
+          st.bias_gyro -= s.delta.template segment<3>(9);
+          st.bias_accel -= s.delta.template segment<3>(12);
+        }
         frame_states[s.t_ns] = PoseVelBiasStateWithLin<Scalar>(st);
-        /* prior-order vars must satisfy the FEJ contract (computeDelta
-         * asserts isLinearized); the captured estimate IS the lin point
-         * — capture happened right after setLinTrue at marg time */
-        if (it != ev0.prior_before.order.abs_order_map.end())
+        if (in_prior) {
           frame_states[s.t_ns].setLinTrue();
+          if (lin_replay) frame_states[s.t_ns].applyInc(s.delta);
+        }
         res_states.insert(s.t_ns);
       } else {
-        frame_poses[s.t_ns] = PoseStateWithLin<Scalar>(s.t_ns, s.T_w_i);
-        if (it != ev0.prior_before.order.abs_order_map.end())
+        frame_poses[s.t_ns] = PoseStateWithLin<Scalar>(
+            s.t_ns, lin_replay ? s.T_w_i_lin : s.T_w_i);
+        if (in_prior) {
           frame_poses[s.t_ns].setLinTrue();
+          if (lin_replay)
+            frame_poses[s.t_ns].applyInc(s.delta.template head<6>());
+        }
         res_poses.insert(s.t_ns);
       }
     }
@@ -341,6 +357,43 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
     std::cerr << "[xr] READVANCE bail: size mismatch " << marg_H_new.cols()
               << " vs " << new_order.total_size << std::endl;
     return;
+  }
+  {
+    static const bool dry = [] {
+      const char* e = getenv("XR_READVANCE_DRY");
+      return e && *e && *e != '0';
+    }();
+    if (new_order.total_size == marg_data.order.total_size) {
+      MatX Hi = marg_data.is_sqrt
+                    ? MatX(marg_data.H.transpose() * marg_data.H)
+                    : marg_data.H;
+      VecX bi = marg_data.is_sqrt
+                    ? VecX(marg_data.H.transpose() * marg_data.b)
+                    : marg_data.b;
+      MatX Hn = marg_data.is_sqrt ? MatX(marg_H_new.transpose() * marg_H_new)
+                                  : marg_H_new;
+      VecX bn = marg_data.is_sqrt ? VecX(marg_H_new.transpose() * marg_b_new)
+                                  : marg_b_new;
+      VecX si = VecX::Zero(new_order.items), sn = VecX::Zero(new_order.items);
+      int vi = 0;
+      for (const auto& kv : new_order.abs_order_map) {
+        si[vi] = bi.segment(kv.second.first, kv.second.second).norm();
+        sn[vi] = bn.segment(kv.second.first, kv.second.second).norm();
+        vi++;
+      }
+      std::cerr << "[xr] READVANCE diff: |Hi|=" << Hi.norm()
+                << " |Hn|=" << Hn.norm() << " |bi|=" << bi.norm()
+                << " |bn|=" << bn.norm() << " bi_seg=" << si.transpose()
+                << " bn_seg=" << sn.transpose() << std::endl;
+    } else {
+      std::cerr << "[xr] READVANCE diff: ORDER MISMATCH inc="
+                << marg_data.order.total_size << " new="
+                << new_order.total_size << std::endl;
+    }
+    if (dry) {
+      xrv_marg_events.clear();
+      return;
+    }
   }
   marg_data.H = marg_H_new;
   marg_data.b = marg_b_new;
