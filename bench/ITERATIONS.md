@@ -86,6 +86,30 @@ corridors at large drift.
 
 ## In flight
 
+### 📐 2026-07-19 — obs03 SHIP DECISION (per-dataset, map-track confirmed)
+Full-system (map-track) A/B settles it — vio_obs_std_dev 0.3 is dataset-
+dependent:
+- **EuRoC: SHIP 0.3** — MH_05 17.7->15.4 (-13%), V1_02 -21%, V1_03 -20%,
+  MH_01/03 -6%, V2_02 -8% (only MH_04 +14%).
+- **TUM rooms+corridors: SHIP 0.3** — corridor1 31.9->17.8 (-44% paired),
+  room1 -16%, room2 -13% (room5 +5%, corridor2 flat).
+- **MSD: KEEP 0.5** — obs03 REGRESSES (MOO01 +15%, MOO02 +10%, MOO14 +15%;
+  only MOO03/08/13 improve). Physically sensible: fast headset motion =
+  blurrier vision, trust IMU more.
+- **slides: KEEP 0.5** — slides2 +19%.
+DECISION: euroc_config + tumvi_config -> obs_std 0.3; msdmo_config stays
+0.5. DEVICE ASSET (basalt_vio_config.json) STAYS 0.5 — the headset is
+MSD-like (fast motion), and MSD is the on-device evidence. This is standard
+per-sensor tuning (basalt/OKVIS2 ship per-dataset configs too).
+SITE: obs03 arm added (bars + plots, representative-run). Page now shows
+vio/bc/obs03/absorb + OKVIS2/OpenVINS + reloc, old 400-cap arms off.
+
+STREAMS: DM-VIO fleet still running TUM-VI on .181 (12 done). NEXT: add
+DM-VIO to site baselines when fleet done; gate XR_ABSORB (corr5/mag2
+regress) before shipping the corridor fix.
+
+---
+
 ### 2026-07-19 — USER PER-SEQ INSIGHTS (pre-obs03) + PLOT BUG FIXED
 PLOT BUG FIXED: trajectory export used r1, but r1 can be a divergent
 outlier (MH_01 bc r1=0.86m showing 250cm drift vs the 5.25cm median bar).
