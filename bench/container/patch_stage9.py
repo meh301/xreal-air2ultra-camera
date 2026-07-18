@@ -79,46 +79,65 @@ t = t.replace(old, """    mean = sum / num_valid_points;
 
     const Scalar mean_inv = num_valid_points / sum;""")
 
-# 3. residual(): ZNCC on the target samples
-old = """      if (residual[i] >= 0 && data[i] >= 0) {
-        const Scalar val = residual[i];
-        residual[i] = num_valid_points * val / sum - data[i];"""
-assert t.count(old) == 1, "residual anchor"
-t = t.replace(old, """      if (residual[i] >= 0 && data[i] >= 0) {
-        const Scalar val = residual[i];
-        if (xr_zncc()) {
-          residual[i] = val;   /* normalized in the second pass below */
-        } else
-        residual[i] = num_valid_points * val / sum - data[i];""")
+# 3. residual(): ZNCC branch replacing the whole normalization loop
+old = """    int num_residuals = 0;
 
-# 3b. add the ZNCC second pass after the residual loop. Anchor: the loop
-# closes and num_residuals is returned/used — find the tail.
-old2 = """        num_residuals++;
-      } else {
-        residual[i] = 0;
-      }
-    }"""
-assert t.count(old2) == 1, "residual tail anchor"
-t = t.replace(old2, """        num_residuals++;
+    for (int i = 0; i < PATTERN_SIZE; i++) {
+      if (residual[i] >= 0 && data[i] >= 0) {
+        const Scalar val = residual[i];
+        residual[i] = num_valid_points * val / sum - data[i];
+        num_residuals++;
+
       } else {
         residual[i] = 0;
       }
     }
-    if (xr_zncc() && num_residuals > 1) {
-      /* second pass: zero-mean/unit-var the target samples, then diff */
-      const Scalar tmean = sum / num_residuals;
+
+    return num_residuals > PATTERN_SIZE / 2;"""
+assert t.count(old) == 1, "residual block anchor"
+new = """    int num_residuals = 0;
+
+    if (xr_zncc()) {
+      /* ZNCC: zero-mean/unit-variance over the mutually-valid samples —
+       * gain AND bias invariant (exposure ramps, flicker, black level) */
+      Scalar tsum = 0;
+      int tn = 0;
+      for (int i = 0; i < PATTERN_SIZE; i++)
+        if (residual[i] >= 0 && data[i] >= 0) { tsum += residual[i]; tn++; }
+      if (tn <= PATTERN_SIZE / 2) { residual.setZero(); return false; }
+      const Scalar tmean = tsum / tn;
       Scalar tvar = 0;
       for (int i = 0; i < PATTERN_SIZE; i++)
-        if (residual[i] != 0 && data[i] >= 0) {
+        if (residual[i] >= 0 && data[i] >= 0) {
           const Scalar d = residual[i] - tmean;
           tvar += d * d;
         }
-      Scalar tsig = std::sqrt(tvar / num_residuals);
+      Scalar tsig = std::sqrt(tvar / tn);
       if (tsig < Scalar(1e-3)) tsig = Scalar(1e-3);
-      for (int i = 0; i < PATTERN_SIZE; i++)
-        if (residual[i] != 0 && data[i] >= 0)
+      for (int i = 0; i < PATTERN_SIZE; i++) {
+        if (residual[i] >= 0 && data[i] >= 0) {
           residual[i] = (residual[i] - tmean) / tsig - data[i];
-    }""")
+          num_residuals++;
+        } else {
+          residual[i] = 0;
+        }
+      }
+      return num_residuals > PATTERN_SIZE / 2;
+    }
+
+    for (int i = 0; i < PATTERN_SIZE; i++) {
+      if (residual[i] >= 0 && data[i] >= 0) {
+        const Scalar val = residual[i];
+        residual[i] = num_valid_points * val / sum - data[i];
+        num_residuals++;
+
+      } else {
+        residual[i] = 0;
+      }
+    }
+
+    return num_residuals > PATTERN_SIZE / 2;"""
+t = t.replace(old, new)
 
 if "#include <cstdlib>" not in t:
     t = t.replace("#pragma once", "#pragma once\n#include <cstdlib>\n#include <cmath>", 1)
