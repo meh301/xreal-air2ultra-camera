@@ -86,6 +86,34 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-18 — P3b held-out: NOT freeze-able as-is → radv v2 (quality-gated)
+s12_heldout (.15, within-round, n=5, cm): the mag2/corr3 transformation
+did NOT generalize — **mag1 99.2→134.4 (tail 438!)**, corr5 18.0→22.8,
+slides2 33.9→39.0 harmed; corr2 18.0→16.9 small win; corr4 neutral;
+EuRoC canary passes (MH_01/MH_05/V1_02 medians within noise; radv MH_01
+tail 7.4 vs ctrl 68.4 outlier — actually TIGHTER). Mechanism read:
+re-linearizing the window consistent with a MARGINAL closure amplifies
+it — v1 triggered on any verified closure incl. the sub-gate site.
+**radv v2** (committed): trigger only at the CONFIRMED-applied site,
+gated covis>=6 && nin>=LMMARG_MIN && evidence-ratio>=60% && |corr|>=0.10m.
+XR_RADV=2 selects v2 (1 = old). radv2_ab fired (.15: mag1/mag2/corr2/
+corr3/corr5/slides2, ctrl vs radv2, n=5) — mag2/corr3 must keep their
+wins, mag1/corr5/slides2 must go neutral.
+
+### 2026-07-18 — ZNCC events A/B: V2_03 flicker TRANSFORMED, low-texture harm → floor v2
+zn_em (.58, n=5, cm): **V2_03 17.2→6.8 (−60%, spread 6.7-7.1)** — the
+designed-for flicker case delivers. MH_05 (exposure ramp) 18.3→19.2
+(+61.5 outlier): ramps are gain-like, mean-norm already handles them.
+Harm class confirmed low-texture: slides2 37.9→54.3, slides1 +2, MOO02
+12.2→15.0, V1_03 5.7→6.7; MOO13 neutral, MOO01 noisy-neutral.
+**ZNCC v2** (committed): XR_ZNCC_FLOOR sigma floor (intensity units) —
+at the floor the normalization degrades toward plain mean-removal, so
+weak-texture patches stop amplifying noise. znf_ab fired (.58: bracket
+floor 3.0 vs 6.0 vs ctrl on slides1/2, MOO01/02, V1_03 + keep-case
+V2_03, n=5).
+
+---
+
 ### 2026-07-18 — DBoW2 APPLES-TO-APPLES VERDICT (user-requested)
 Same probes, same verify/PnP pipeline (LighterGlue+PnP), only retrieval
 swapped (XR_RELOC_CANDS = DBoW2/ORBvoc top-5 vs our EigenPlaces path);
