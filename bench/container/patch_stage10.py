@@ -49,6 +49,8 @@ new = """  std::map<int, XrInjLm> xr_inj_lms;
     Eigen::aligned_vector<std::pair<int, Landmark<Scalar>>>
         host_lms;                              /* host-marged, full copy */
     std::vector<XrvMargObs> dropped_obs;       /* survivors' lost obs */
+    Eigen::aligned_vector<std::pair<int, Landmark<Scalar>>>
+        lost_lms;                              /* flow-lost, folded at marg */
     MargLinData<Scalar> prior_before;          /* pre-event sqrt prior */
   };
   std::deque<XrvMargEvent> xrv_marg_events;
@@ -154,6 +156,13 @@ new = """    {
           }
         }
       }
+      /* flow-lost landmarks: stock FOLDS them into the prior at this
+       * event then removes them — most of the event's vision info.
+       * Snapshot in full so the re-advance can replay the fold. */
+      if (config.vio_marg_lost_landmarks)
+        for (const auto& xr_lmid : lost_landmaks)
+          if (lmdb.landmarkExists(xr_lmid))
+            ev.lost_lms.push_back({(int)xr_lmid, lmdb.getLandmark(xr_lmid)});
       ev.prior_before = marg_data;
       xrv_marg_events.push_back(std::move(ev));
       while ((int)xrv_marg_events.size() > xrv_d) xrv_marg_events.pop_front();
@@ -163,7 +172,7 @@ new = """    {
         const auto& e2 = xrv_marg_events.back();
         std::cerr << "[xr] DELAYMARG capture #" << e2.seq << ": states="
                   << e2.states.size() << " imu=" << e2.imu.size()
-                  << " host_lms=" << e2.host_lms.size() << " dropped_obs="
+                  << " host_lms=" << e2.host_lms.size() << " lost_lms=" << e2.lost_lms.size() << " dropped_obs="
                   << e2.dropped_obs.size() << " (deque "
                   << xrv_marg_events.size() << ")" << std::endl;
       }

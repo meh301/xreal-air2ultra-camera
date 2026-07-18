@@ -162,6 +162,7 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
     }
   }
   std::vector<int> res_lm_ids;
+  std::unordered_set<KeypointId> res_lost;
   std::vector<std::pair<int, TimeCamId>> res_obs;
   for (const auto& ev : xrv_marg_events) {
     /* aom membership rule (the aom itself is built in step 2): all
@@ -193,6 +194,28 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
         lmdb.addObservation(ob.first, ko);
       }
       res_lm_ids.push_back(hl.first);
+    }
+    /* flow-lost landmarks: replay the fold stock performed — same
+     * resurrection path, but flagged as lost so the linearization
+     * selects them despite their alive hosts */
+    for (const auto& ll : ev.lost_lms) {
+      if (lmdb.landmarkExists(ll.first)) continue;
+      const int64_t host = ll.second.host_kf_id.frame_id;
+      if (!frame_poses.count(host) && !frame_states.count(host)) continue;
+      int n_ok = 0;
+      for (const auto& ob : ll.second.obs)
+        if (xr_aom_frame(ob.first.frame_id)) n_ok++;
+      if (n_ok < 2) continue;
+      lmdb.addLandmark(ll.first, ll.second);
+      for (const auto& ob : ll.second.obs) {
+        if (!xr_aom_frame(ob.first.frame_id)) continue;
+        KeypointObservation<Scalar> ko;
+        ko.kpt_id = ll.first;
+        ko.pos = ob.second;
+        lmdb.addObservation(ob.first, ko);
+      }
+      res_lm_ids.push_back(ll.first);
+      res_lost.insert((KeypointId)ll.first);
     }
     for (const auto& ob : ev.dropped_obs) {
       if (!lmdb.landmarkExists(ob.lm_id)) continue;
@@ -289,12 +312,11 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
   for (const int64_t id : res_states) dead_kfs.insert(id);
   int64_t xr_last = dead_kfs.empty() ? 0 : *dead_kfs.rbegin();
 
-  std::unordered_set<KeypointId> no_lost;
   std::set<FrameId> no_fixed;
   auto lqr = LinearizationBase<Scalar, POSE_SIZE>::create(
       this, aom, lqr_options,
       const_cast<MargLinData<Scalar>*>(&ev0.prior_before), &ild, &dead_kfs,
-      &no_lost, xr_last, &no_fixed);
+      &res_lost, xr_last, &no_fixed);
   lqr->linearizeProblem();
   lqr->performQR();
 
@@ -428,7 +450,8 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
     std::cerr << "[xr] READVANCE ok: prior rebuilt over "
               << new_order.items << " vars (" << new_order.total_size
               << " dof), " << dead_kfs.size() << " re-marged, "
-              << promoted_saved.size() << " promoted" << std::endl;
+              << promoted_saved.size() << " promoted, "
+              << res_lost.size() << " lost-replayed" << std::endl;
   }
 }
 
