@@ -148,11 +148,34 @@ void SqrtKeypointVioEstimator<Scalar_>::xrvReadvance() {
   std::vector<int> res_lm_ids;
   std::vector<std::pair<int, TimeCamId>> res_obs;
   for (const auto& ev : xrv_marg_events) {
+    /* aom membership rule (the aom itself is built in step 2): all
+     * poses; states only if resurrected, promoted, or the current
+     * prior-connectivity state */
+    auto xr_aom_frame = [&](int64_t f) {
+      if (frame_poses.count(f)) return true;
+      if (!frame_states.count(f)) return false;
+      return res_states.count(f) > 0 || promoted_saved.count(f) > 0 ||
+             marg_data.order.abs_order_map.count(f) > 0;
+    };
     for (const auto& hl : ev.host_lms) {
       if (lmdb.landmarkExists(hl.first)) continue;
       const int64_t host = hl.second.host_kf_id.frame_id;
       if (!frame_poses.count(host) && !frame_states.count(host)) continue;
+      /* addLandmark copies neither obs nor the host->target index —
+       * every observation must go through addObservation; >=2 in-aom
+       * obs required (1-obs landmark QR is degenerate). */
+      int n_ok = 0;
+      for (const auto& ob : hl.second.obs)
+        if (xr_aom_frame(ob.first.frame_id)) n_ok++;
+      if (n_ok < 2) continue;
       lmdb.addLandmark(hl.first, hl.second);
+      for (const auto& ob : hl.second.obs) {
+        if (!xr_aom_frame(ob.first.frame_id)) continue;
+        KeypointObservation<Scalar> ko;
+        ko.kpt_id = hl.first;
+        ko.pos = ob.second;
+        lmdb.addObservation(ob.first, ko);
+      }
       res_lm_ids.push_back(hl.first);
     }
     for (const auto& ob : ev.dropped_obs) {
