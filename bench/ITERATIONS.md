@@ -86,6 +86,21 @@ corridors at large drift.
 
 ## In flight
 
+### ⚠️ 2026-07-19 — GLOBAL-TRIGGER RADV: NOT VALIDATED (rfreq verdict)
+The frequency-response round flipped the story a third time: mag2 ctrl
+drew well (med 65.5, max 171) and BOTH gapped arms were worse (g8 84.7,
+g20 97.8 with 506/544 tails); corr3 harmed again. Across three rounds,
+mag2's ctrl-vs-radv delta = +155/-6/-32 — sign flips with round
+conditions. **Conclusion: the time-debounced global trigger at ANY
+frequency is a variance coin-flip, not a mechanism. The P3b "mag2
+transformation" claim is retracted.** What survives: stage-11's engine
+correctness (parity smoke) and the structural insight that rebuilds
+help only when scoped to actual closure evidence — which is exactly
+stage-13's design (s13_ab verdict round running). XR_RADV=1/2/3 stays
+env-gated for archaeology, recommended OFF.
+
+---
+
 ### 🏗️ 2026-07-19 — STAGE 13 BUILT: XRV P4 NATIVE REVIVAL, END-TO-END
 The structural piece the rebuild exists for (user directive: build it
 100%). Three mechanisms, one patch (patch_stage13.py, committed):
