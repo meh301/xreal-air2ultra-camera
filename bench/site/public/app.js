@@ -7,12 +7,13 @@
  * (fzbase + LMFACT/LMTRACK/LMMARG factor stack, scene-gated folds,
  * LMTRACK_PERSIST). Historical iteration arms live in bench/ITERATIONS.md
  * and the raw result dirs, not on the site. */
-const ARMS = ["vio", "bc", "absorb", "fz19", "fz18", "fzbase", "fz17d"];
+const ARMS = ["vio", "bc", "obs03", "absorb", "fz19", "fz18", "fzbase", "fz17d"];
 // Older 400-cap arms default OFF so the page opens on the corrected 3333 set.
 const AB_ARMS = new Set(["fz18", "fzbase", "fz17d"]);
 const ARM_LABEL = {
   vio: "VIO only (Basalt floor, no map)",
   bc: "OURS best-config (cap 3333)",
+  obs03: "OURS tuned (obs_std 0.3, EuRoC/TUM)",
   absorb: "OURS + closure-absorb (corridor fix)",
   "bc-vio": "VIO track under best-config",
   fzbase: "OURS base 400-cap (reloc stack, no factors)",
@@ -35,7 +36,7 @@ function armColor(a) {
   return `hsl(${h % 360},62%,50%)`;
 }
 /* every plot key the trajectory panel may offer, in display order */
-const TRAJ_KEYS = ["vio", "bc", "bc-vio", "absorb",
+const TRAJ_KEYS = ["vio", "bc", "obs03", "bc-vio", "absorb",
   "fz19", "fzbase-vio", "fz18-vio", "fz18", "fzbase", "fz17d",
   "okvis2lc0", "okvis2lc1", "openvinslc0", "dmviolc0"];
 const TRAJ_COLOR = {
