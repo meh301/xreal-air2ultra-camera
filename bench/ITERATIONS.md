@@ -1549,3 +1549,13 @@ n=3 noise-level). UNIFORM-SAFE => FREEZE fz19 := fz18 + XR_LMINJ=1.
 the injection-only composition; the sigma composite is retired.)
 corr10-v2 fired on fixed .58 (fz18 vs fz19, corridors n=10) — the
 re-validation owed since the contamination find.
+
+### ✓ CORR10-V2 (fixed .58, n=10): fz19 CONFIRMED — corr3 30.9->11.9
+Independent-box n=10 replication of the injection corr3 win (2x2 had
+24.8->12.5). First corridor decisively moved in the program: corr3 now
+2.5x behind okvis2+lc (was 6.4x). corr1 fortress stands (32.5~33.6,
+bimodal). corr2/4/5 neutral-to-better; agg 19.8->17.8. fz19 freeze
+stands with corridor n=10 backing. SITE PUBLISHED: rooms strip now
+okvis2+lc 1.20 < fz19 3.45 < okvis2(no LC) 3.89 — we beat their
+VIO-only mode on rooms; TUM-long all three ours arms lead their 31.8.
+Outstanding: lockstep determinism verdict (.181, slow by design).
