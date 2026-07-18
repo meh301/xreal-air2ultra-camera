@@ -86,6 +86,32 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-18 — FULL dbw19 GRID + ZNCC v5 (per-patch binding) fired
+- User: reloc grid incomplete (dbw19 on only 6/17 seqs) — the full grid
+  is in flight: rooms/slides/mag1 rl19 refs shipped to .58 (has ALL
+  packs), dbow2_bench CAND dumps running for the 11 missing seqs;
+  .58 then runs dbw19 replays for MH_01/MOO07/mag1; rooms+slides
+  replays dispatch to .15 the moment cands land. Site reloc.json
+  refresh follows.
+- radv3 n=10 verdict (scored): fires 12/run EVERYWHERE (alias-margin
+  gate does not discriminate — margins pass even in mag1). Net effect =
+  BIG-SPACE TAIL-TAMER: mag1 worst 629→378 (best runs 28-37!), mag2
+  worst 434→104 (med 63→57, mean 134→63), corr5 25→15.5, slides2
+  neutral. COST: corr3 med 17.6→31.2 — rebuilds push corr3's bimodal
+  bad mode. ALSO: the s12_ab corr3 "28→10 win" was n=5 variance (n=10
+  flipped it). Corr3×readvance interaction = open autopsy.
+- znu (v4 uniformity) verdict: MH_05 19.5→14.1 (best yet) BUT V2_03's
+  win VANISHED (16.7) and slides worse — gate FLAPPING (10-15
+  armings/run) corrupts live tracks: template built under one
+  normalization, target evaluated under the other. v3's single long
+  arming had masked this structurally.
+- **ZNCC v5 (committed, znb round fired on .15)**: normalization mode
+  BOUND PER PATCH at creation (setFromImage; setData/JacSe2 are static
+  — first attempt failed on that). Flapping can no longer corrupt
+  tracks; detector quality now separable from switching artifacts.
+
+---
+
 ### 2026-07-18 — znt (transient-gated ZNCC) verdict → v4 uniformity test fired
 znt_ab (.58, n=5, cm): gating RESCUED the ramp case — **MH_05 19.5→17.1**
 (always-on had HURT it; the windowed detector arms 4x/run exactly at the
