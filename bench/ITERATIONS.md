@@ -86,6 +86,34 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — INTERACTION RE-TUNE: map NOT mis-tuned; the real issue is VARIANCE
+Followed up the corridor3 interaction with (a) pure-VIO@0.3 floor and (b)
+an XR_LMF_SIGMA re-tune sweep under obs03. Findings:
+1. **The map STILL earns its place at obs_std=0.3** (true map-gain, pure
+   VIO vs map): corridors +11..+35cm (corridor2 pure-VIO 50.6 -> map 15.6),
+   rooms +1.5..+5.7. The map's absolute gain shrank (better VIO leaves less
+   to correct) but it is far from broken.
+2. **LMF_SIGMA re-tune: NO clean win.** Default sigma=2 is near-optimal/best
+   (corridor1 12.0 @sig2 vs 18-26 higher; corridor3 13.0-13.4 @sig2/4).
+   Weaker pull hurt corridor1/5/mag2. So the map is NOT mis-tuned for the
+   better VIO — the coordinate-descent step found the default is already
+   the joint optimum here.
+3. **The corridor3 'regression' (17.1->21.1) was largely VARIANCE.** A fresh
+   n=10 gives corridor3 obs03 = 13.4 (BETTER than 17.1@0.5). Corridors are
+   bimodal; two n=10 medians disagree by 8cm. magistrale2 swings 60-188 in
+   ONE sweep.
+META-CONCLUSION (the deeper insufficiency): **corridor/magistrale A/Bs are
+variance-dominated at n=10** — no single corridor A/B verdict (absorb,
+obs03, sigma) is statistically solid. EuRoC+rooms have LOW variance so
+those obs03 wins are real (MH_05 19->15, room1 pure-VIO 13->10 solid). But
+corridor conclusions need either (a) much higher n, or (b) the deterministic
+LOCKSTEP replay (XR_LOCKSTEP, explored earlier — collapses corridor variance
+to 5/5 identical). The right way to finalize the coupled corridor config is
+lockstep-on, not n=10 stochastic. SHIP: obs03 CONFIRMED for EuRoC/rooms;
+corridors pending a lockstep or high-n confirmation.
+
+---
+
 ### ⚠️🔬 2026-07-19 — VIO<->MAP INTERACTION CONFIRMED (user methodology point)
 User flagged: single-param A/B is insufficient — "if VIO gets better but
 map gets worse, other factors are at play." PROVEN via the map-vs-coupled-
