@@ -86,6 +86,38 @@ corridors at large drift.
 
 ## In flight
 
+### ⚖️ 2026-07-19 — XR_ABSORB does NOT stack with obs03 — PARKED (honest walk-back)
+The combine-the-wins A/B (tuned obs03 base, n=10) settles it: XR_ABSORB
+and obs_std=0.3 CONFLICT because both push "trust the visual correction
+more," so together they OVER-correct.
+| seq | tuned(obs03) | tuned+absorb | |
+|---|---|---|---|
+| corridor1 | 16.7 | 29.5 | +77% (absorb HURTS on tuned) |
+| corridor3 | 16.0 | 10.4 | -35% (still helps) |
+| corridor5 | 19.6 | 15.7 | -20% (helps) |
+| corridor2/4 | 14.5/16.7 | 15.8/16.7 | ~flat |
+| magistrale1 | 30.8 | 34.1 | +11% |
+| magistrale2 | 56.4 | 89.9 | +59% (hurts) |
+| rooms | flat | flat | |
+The earlier absorb win (corr1 -31%, corr3 -56%) was on the OLD 0.5 config;
+on the tuned config it's MIXED-to-NEGATIVE. **obs03 ALONE is the corridor
+lever** (corridor1 31.9->16.7 without absorb) — the corridor gap was
+substantially VIO-side (under-trusting vision), not purely the coupling.
+DECISION: **XR_ABSORB PARKED** (stays env-gated OFF; real mechanism, real
+bug it fixes, but empirically a wash-to-negative and conflicts with the VIO
+tuning). Claim-discipline note: I over-claimed absorb as a win on one
+config before the cross-config A/B — the benchmark corrected it.
+SHIPPING CONFIG (final): best-config + obs_std=0.3 (euroc/tumvi) / 0.5
+(msd/device). NO XR_ABSORB. vs OKVIS2+LC: corridor1 16.7 vs 2.8 (still
+behind but 2x closer than bc 31.9), corridor3 16.0 vs 4.9, and we still
+WIN corr5 (15.7 vs 101.5), mag1 (30.8 vs 179.8). The corridor 1-4 residual
+is the honest remaining gap — a tracking-precision problem, not closure.
+
+STREAMS: tuneables-reference workflow running; DM-VIO fleet (.181, ~13/26);
+HybVIO build (.58).
+
+---
+
 ### 📐 2026-07-19 — obs03 SHIP DECISION (per-dataset, map-track confirmed)
 Full-system (map-track) A/B settles it — vio_obs_std_dev 0.3 is dataset-
 dependent:
