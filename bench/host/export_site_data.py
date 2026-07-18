@@ -27,6 +27,11 @@ def group_of(seq):
     if seq.startswith(("MOO", "MIO", "MIP", "MGO")): return "msd"
     if seq.startswith("drive"): return "drives"
     if "room" in seq: return "rooms"
+    # Forensic review 2026-07-19: corridor is the loop-closure benchmark and
+    # must stand alone — a pooled 'long' median hid a 2x corridor loss to
+    # OKVIS2+LC (18.0 vs 9.2 cm) by cancelling it against magistrale/slides.
+    if "corridor" in seq: return "corridor"
+    if "magistrale" in seq or "slides" in seq: return "hall"
     return "long"
 
 def gt_for(seq):

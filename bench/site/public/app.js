@@ -39,7 +39,8 @@ const TRAJ_COLOR = {
 const GROUPS = [
   ["overview", "Overview"], ["systems", "vs. Systems"], ["trajectories", "Trajectories"],
   ["reloc", "Reloc"],
-  ["euroc", "EuRoC"], ["rooms", "TUM-VI rooms"], ["long", "TUM-VI long"],
+  ["euroc", "EuRoC"], ["rooms", "TUM-VI rooms"],
+  ["corridor", "TUM-VI corridors"], ["hall", "TUM-VI magistrale/slides"],
   ["msd", "MSD (headset)"], ["drives", "4Seasons drives"],
   ["table", "Full table"], ["method", "Method"],
 ];
@@ -69,7 +70,8 @@ const shortName = s => s.replace("dataset-", "").replace("_512_16", "")
     .replace(/_easy|_medium|_difficult/, "");
 const group_of = s => /^(MH_|V1_|V2_)/.test(s) ? "euroc"
     : /^(MOO|MIO|MIP|MGO)/.test(s) ? "msd" : /^drive/.test(s) ? "drives"
-    : /room/.test(s) ? "rooms" : "long";
+    : /room/.test(s) ? "rooms" : /corridor/.test(s) ? "corridor"
+    : /magistrale|slides/.test(s) ? "hall" : "long";
 
 async function loadJSON(p, fb) {
   try { const r = await fetch(p, { cache: "no-cache" }); if (!r.ok) throw 0; return await r.json(); }
@@ -94,9 +96,19 @@ function medians(runs, metric) {
 }
 const seqsIn = g => [...new Set(S.runs.filter(r => r.group === g).map(r => r.seq))].sort();
 function armsFor(seq) { return ARMS.filter(a => S.runs.some(r => r.seq === seq && r.arm === a)); }
+/* ORB-SLAM3 baseline is QUARANTINED (forensic review 2026-07-19): its runs
+ * are non-functional — MH_01 870 cm (~230x published), lc0/lc1 byte-identical
+ * on TUM-VI so the LC toggle is a no-op, V1_01 LC makes it 15x WORSE. A dead
+ * baseline pollutes any fleet-complete or "we beat X" claim, so it is dropped
+ * from all comparisons until the orb3 harness (IMU init / extrinsics / scale)
+ * is fixed. Re-enable by removing this filter once the numbers are sane. */
+const BASELINE_QUARANTINE = new Set(["orb3"]);
 function aggBaselines() {
   const acc = {};
-  for (const r of S.baselines) (acc[`${r.seq}|${r.arm}|${r.track}`] ??= []).push(r);
+  for (const r of S.baselines) {
+    if (BASELINE_QUARANTINE.has(r.arm)) continue;
+    (acc[`${r.seq}|${r.arm}|${r.track}`] ??= []).push(r);
+  }
   return Object.entries(acc).map(([k, rr]) => {
     const [seq, sys, lc] = k.split("|");
     return { seq, sys, lc: lc.replace("lc", ""),
@@ -535,7 +547,7 @@ function overviewView() {
       <tr><td>burst-15 recall, magistrale2</td><td class="best">85.6%</td><td>DNF</td></tr>
     </tbody></table>
     <p class="note">Wake-up protocol: camera frames removed for a window while IMU continues (a real sleep/pocket event); every system must re-anchor to its own map. Full grid on the Reloc tab; drives now have their own tab below.</p>`));
-  for (const g of ["euroc", "rooms", "long", "msd", "drives"]) datasetBar(g, view);
+  for (const g of ["euroc", "rooms", "corridor", "hall", "msd", "drives"]) datasetBar(g, view);
 }
 
 function systemsView() {
@@ -810,6 +822,9 @@ async function refresh(first) {
   const changed = (res.generated !== lastGen) || (S.baselines.length !== (base.runs || []).length);
   lastGen = res.generated;
   S.runs = res.runs; S.baselines = base.runs || []; S.ledger = led; S.meta = meta;
+  // Re-derive group client-side so the 2026-07-19 corridor/hall split takes
+  // effect without a full re-export (results.json bakes the old 'long' group).
+  for (const r of S.runs) r.group = group_of(r.seq);
   $("#meta-line").innerHTML = `<span id="live-dot">●</span> LIVE · ${S.runs.length} run-scores · ${S.baselines.length} baseline runs · data ${res.generated || "?"}`;
   if (first || changed) render();
 }

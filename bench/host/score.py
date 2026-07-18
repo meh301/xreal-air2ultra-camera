@@ -116,15 +116,15 @@ def score(est_path, gt_path, dataset, fps=None, t_max_diff=DEFAULT_T_MAX_DIFF):
     rpe.process_data((gt_s, est_s))
     rte_cm = float(rpe.get_statistic(metrics.StatisticsType.rmse)) * 100.0
 
-    diverged = (ate_m > ate_thresh_m) or (rte_cm > RTE_DIVERGE_CM)
+    # Divergence is ATE-only. The RTE>10cm gate was formally rejected in the
+    # ledger (it marked healthy near-threshold runs inf and diverged from the
+    # site's score_one, so fastbench and site verdicts were incomparable);
+    # RTE stays a reported metric but never gates. (Forensic review 2026-07-19,
+    # numbers finding: "two divergent scorers".)
+    diverged = (ate_m > ate_thresh_m)
     reason = ""
     if diverged:
-        parts = []
-        if ate_m > ate_thresh_m:
-            parts.append(f"ATE {ate_m:.3f} m > {ate_thresh_m} m")
-        if rte_cm > RTE_DIVERGE_CM:
-            parts.append(f"RTE {rte_cm:.2f} cm > {RTE_DIVERGE_CM} cm")
-        reason = "; ".join(parts)
+        reason = f"ATE {ate_m:.3f} m > {ate_thresh_m} m"
     result.update(diverged=diverged, diverge_reason=reason,
                   ate_raw_m=ate_m, rte_raw_cm=rte_cm,
                   ate_m=math.inf if diverged else ate_m,
