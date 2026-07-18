@@ -1589,3 +1589,21 @@ TIGHT-prior soft absorption (never move the map on weak evidence).
 margin) at both closure sites — a weak closure can no longer seed
 persistent poison landmarks. fz20 = fz19 + DEFGUARD; A/B fired on the
 EVENT SET (MH_01/05, V2_03, MOO13/15 + room1/corr3/mag2 sanity, n=5).
+
+### x MICROCORR PARKED + THE CONTINUOUS-ABSORPTION TRUTH (user-driven)
+MEASURED (offset-profile analysis, ledgered): okvis2+lc applies 4-15m
+CUMULATIVE micro-adjustment per run over 1300-4100 frames (>1mm each,
+top-5 frames = 2-5% of total — no steps); OUR map track is
+BIT-IDENTICAL to factor-coupled VIO outside deforms (totalAdj 0.00m).
+User's "VIO offset" read exact. MICROCORR v1 (output-servo toward
+sub-gate D, <=2cm/event): UNIFORMLY HARMFUL (rooms 6.8->9.7, corr3
+18->32) — chases single-frame PnP noise AND double-counts against
+in-estimator factor absorption (LOOPBURST v1's lesson again). PARKED.
+CORRECTED MODEL: our zero output-offset is BECAUSE factors correct
+inside the odom; their continuous lc0-vs-lc1 divergence = in-estimator
++ in-MAP corrections (their keyframe graph stays loop-consistent
+continuously; ours heals only at deforms). NEXT-ARC: continuous map
+self-consistency — rate-limited background micro-PGO using sub-gate
+verifications as edges to OLD keyframes (the valid edge class; NOT
+EDGEGRAPH's self-drift-correlated edges). fz20-v2 (two-strikes
+escalation) subset re-test fired (.58: corr3/MH_01/mag2/MOO15).
