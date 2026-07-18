@@ -47,7 +47,10 @@ new = """    mean = sum / num_valid_points;
       Scalar sigma = nv > 1 ? std::sqrt(var / nv) : Scalar(0);
       if (sigma < Scalar(1e-3)) sigma = Scalar(1e-3);
       for (int i = 0; i < PATTERN_SIZE; i++)
-        if (data[i] >= 0) data[i] = (data[i] - mean) / sigma;
+        if (data[i] >= 0)
+          data[i] = (data[i] - mean) / sigma + Scalar(10); /* +10: keep
+             valid samples positive — data[i] >= 0 is the validity test
+             everywhere; the offset cancels in the residual difference */
       mean = sigma;   /* carry sigma in the mean slot (validity checks) */
       return;
     }
@@ -72,7 +75,8 @@ t = t.replace(old, """    mean = sum / num_valid_points;
       if (sigma < Scalar(1e-3)) sigma = Scalar(1e-3);
       const Scalar sig_inv = Scalar(1) / sigma;
       for (int i = 0; i < PATTERN_SIZE; i++)
-        if (data[i] >= 0) data[i] = (data[i] - mean) * sig_inv;
+        if (data[i] >= 0)
+          data[i] = (data[i] - mean) * sig_inv + Scalar(10);
       J_se2 *= sig_inv;
       mean = sigma;
       return;
@@ -117,7 +121,7 @@ new = """    int num_residuals = 0;
       if (tsig < Scalar(1e-3)) tsig = Scalar(1e-3);
       for (int i = 0; i < PATTERN_SIZE; i++) {
         if (residual[i] >= 0 && data[i] >= 0) {
-          residual[i] = (residual[i] - tmean) / tsig - data[i];
+          residual[i] = ((residual[i] - tmean) / tsig + Scalar(10)) - data[i];
           num_residuals++;
         } else {
           residual[i] = 0;
