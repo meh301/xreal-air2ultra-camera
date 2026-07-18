@@ -1499,3 +1499,25 @@ gate; R6 far-matching for drive3. Report: site /analysis.html.
   .15->.58 (stage-8 level), rebuilt, euroc fz18 wave RE-FIRED. corr10
   re-run queued post-s8. All three containers now at identical
   stage-8 trees.
+
+### x STAGE-8 2x2 VERDICT (.15, 220 runs): INJECTION WORKS, COMPOSES WITH SIGMA
+Rooms (low-noise absorption class): inj improves ALL SIX over fz18
+(room1 7.39->6.69, room2 3.40->2.97, room3 3.62->3.23, room4 4.19->
+3.67, room6 1.75->1.69); rooms-class median fz18 3.91 -> inj 3.45 ->
+sg10/injsg 3.36. CORR3 HALVED: 24.8 -> inj 12.5 (okvis2 4.9 — the
+absorption gap finally moves on a corridor). Safety: mag2 59->50,
+slides2 41->37 (both BETTER under inj). corr1 = bimodal noise (fz18
+drew 6.35; sigma arms drew 26-32; lockstep infra will settle it).
+11-seq aggregate misleads (corr1-dominated) — class medians are the
+read. v1 injection captures a SLICE of the okvis2 mechanism (2-obs
+landmarks, no old-obs revival, no loop re-opt) — modest but uniform
+and safe. FZ19 CANDIDATE = fz18 + XR_LMF_SIGMA=1.0 + XR_LMINJ=1.
+### x FIXED-.58 EUROC/MSD RE-RUN: the contamination was masking real gains
+fz18(fixed) vs fzbase within-round: agg 6.78->5.17 (fold-less had
+6.08). MOO02 23.7->12.6 (was 24.0!), MOO01 25.9->17.4, MOO14 8.5->4.8,
+MOO06 5.3->3.5, MOO13 27.9->23.4, MOO15 27.7->19.5, V2_03 21.1->16.6,
+MH_01 7.0->5.4, MH_04 8.9->6.8; V2_01 3.5->4.1 lone small regression.
+Site refreshed with corrected cells. vs okvis2+lc: euroc 5.17 vs 3.82,
+MSD gaps narrow substantially (MOO02 5.5x from 10.5x).
+FZ19 VALIDATION FIRED: .58 euroc+msd fz19 wave; .15 TUM held-out
+(corr4/5, mag1, slides1) fz18-vs-fz19.
