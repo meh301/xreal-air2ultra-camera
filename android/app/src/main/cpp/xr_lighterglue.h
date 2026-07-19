@@ -27,6 +27,16 @@
  * call performs the lazy ORT bring-up on the calling (map) thread. */
 void xr_lglue_set_model(const char *onnx_path);
 
+/* Register the v81 EPContext: the attention stack in native fp16 on the HTP,
+ * TRUNCATED at the log-assignment matrix — the dynamic tail cannot live in a
+ * static HTP graph and is applied in C. Optional; without it (or on any SoC
+ * below v73, whose Hexagon cannot build the attention MatMul at all) the full
+ * CPU graph above is used unchanged. */
+void xr_lglue_set_npu_model(const char *epctx_path);
+
+/* 1 when matching is actually running on the HTP. */
+int xr_lglue_npu_active(void);
+
 /* 1 once a session is up (after the first successful bring-up). */
 int xr_lglue_ready(void);
 

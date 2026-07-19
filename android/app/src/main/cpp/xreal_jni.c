@@ -2757,6 +2757,18 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetLglueModel(JNIEnv *env, jclass
     }
 }
 
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetLglueNpuModel(JNIEnv *env, jclass cls,
+                                                                jstring path) {
+    (void)cls;
+    if (!path) return;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (p) {
+        xr_lglue_set_npu_model(p);
+        (*env)->ReleaseStringUTFChars(env, path, p);
+    }
+}
+
 /* Path of the staged fast-tier (192x256) depth model. Empty/unset -> the depth
  * worker stays on SGM. The worker inits it (off the UI thread) on first use. */
 JNIEXPORT void JNICALL

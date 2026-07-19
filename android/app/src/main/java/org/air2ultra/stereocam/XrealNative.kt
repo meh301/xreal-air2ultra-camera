@@ -76,6 +76,12 @@ object XrealNative {
      *  NN+margin matcher. */
     external fun nativeSetLglueModel(path: String)
 
+    /** LighterGlue on the v81 HTP: the attention stack in native fp16,
+     *  truncated at the log-assignment matrix (the dynamic match tail runs in
+     *  C). Optional — absent, or on any SoC below Hexagon v73 whose HTP cannot
+     *  build the attention MatMul, the CPU graph above is used unchanged. */
+    external fun nativeSetLglueNpuModel(path: String)
+
     /** Thermal feed for the depth-worker governor: battery temperature in
      *  deci-Celsius (the vendor never raises PowerManager thermal status, so
      *  battery temp is the working signal) plus that status for the record. */

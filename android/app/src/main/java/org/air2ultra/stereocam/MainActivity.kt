@@ -624,6 +624,22 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.i("xrealcam", "LighterGlue model absent (NN matcher): $e")
         }
+        // v81 only: the attention stack in native fp16 on the HTP (10.5 ms vs
+        // 17.5 ms for the same graph on the CPU, and it stops the matcher
+        // competing with the map thread for cores). Truncated at the
+        // log-assignment matrix — the dynamic tail runs in C. There is no v68
+        // counterpart: that Hexagon cannot build the attention MatMul at all
+        // (needs dsp_arch >= v73), so the 888 keeps the CPU graph.
+        if (isV81) {
+            try {
+                val ctx = java.io.File(filesDir, "lglue_v81_ctx.onnx")
+                stage("lglue_v81_ctx.onnx", ctx)
+                XrealNative.nativeSetLglueNpuModel(ctx.absolutePath)
+                android.util.Log.i("xrealcam", "LighterGlue NPU context staged: ${ctx.absolutePath}")
+            } catch (e: Exception) {
+                android.util.Log.i("xrealcam", "LighterGlue NPU context absent (CPU matcher): $e")
+            }
+        }
         // Stage the LiteAnyStereo depth model (an EPContext-wrapped QNN HTP context
         // binary) if present; absent -> the depth worker stays on SGM. nativeSetZip
         // Model / S.zip_model just holds "the staged depth-model path" (reused for
