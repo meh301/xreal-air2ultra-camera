@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <android/log.h>
 
@@ -167,8 +168,11 @@ int xr_lglue_match(const float (*uv0)[2], const int8_t (*d0)[64], int n0,
     const char *ins[4] = { "kpts0", "kpts1", "desc0", "desc1" };
     const char *outs[2] = { "matches", "scores" };
     OrtValue *ov[2] = { NULL, NULL };
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     OrtStatus *st = G.api->Run(G.session, NULL, ins,
                                (const OrtValue *const *)in, 4, outs, 2, ov);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
     for (int i = 0; i < 4; i++) G.api->ReleaseValue(in[i]);
     if (!ort_ok(st, "Run")) {
         for (int i = 0; i < 2; i++)
@@ -203,5 +207,21 @@ int xr_lglue_match(const float (*uv0)[2], const int8_t (*d0)[64], int n0,
     }
     G.api->ReleaseValue(ov[0]);
     G.api->ReleaseValue(ov[1]);
+
+    /* This is the one model with no accelerator path on Android — the CUDA
+     * escape above is compiled out, so it runs fp32 on the ORT CPU EP. On the
+     * bench host a pass cost 30-80 ms and starved the map thread, which is why
+     * the caller budgets it to the candidate keyframe alone (xr_map.c c==0).
+     * Log the real per-call cost so that budget can be judged on this SoC
+     * instead of assumed: first few calls, then every 16th. */
+    {
+        const double ms = (t1.tv_sec - t0.tv_sec) * 1e3 +
+                          (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        static int lgn;
+        if (lgn < 4 || (lgn & 15) == 0)
+            LOGI("LGLUE match #%d: %.1f ms (%d x %d kpts -> %d matches, CPU fp32)",
+                 lgn, ms, n0, n1, nm);
+        lgn++;
+    }
     return nm;
 }
