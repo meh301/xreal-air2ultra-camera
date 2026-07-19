@@ -86,6 +86,31 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — UNLIMITED-MAP DRIVES: the cap was NEVER the drive limiter
+User: run 4Seasons drives with unlimited keyframes to see "without mapping
+limitations". Built xr_unl_drive (cap 20000, dense KF_DIST_M=0.10m, 60m
+range) + best-config + MegaLoc. RESULT:
+- KF stored: drive1 1559, drive2 1316, drive3 1231 — SAME as the old
+  0.30m/2000-cap runs (1355/1293). Cap 20000 + dense 0.10m changed
+  NOTHING; the drives never came near 2000, let alone 20000.
+- Why: 30fps drive, ~1 KF / 18 frames (~0.6s) -> the KEYFRAME-STORE
+  CADENCE (basalt connectivity take_kf, ~0.6s) is the limiter, NOT the cap
+  and NOT the distance gate. At driving speed 0.6s = ~10-16m KF spacing
+  over a km-scale loop.
+- Consequence: reloc recall 0% / 3% / 10% (essentially failed), ATE
+  135-365m absolute (drive-scale %path but reloc dead). The ~10m KF
+  spacing is too sparse to re-localize on a fast outdoor loop.
+HONEST ANSWER to "what happens without mapping limits": NOTHING changes
+from raising the cap — the cap was never binding on drives. The drive-map
+density is set by take_kf cadence (the SAME connectivity-trigger weakness
+as the corridor parallax finding), and drive reloc is a distinct hard
+regime. To genuinely densify a drive map you must change the STORE CADENCE
+(basalt take_kf rate / map store gate), not the cap. Follow-up if pushing:
+lower the store interval / add a translation-distance take_kf so the drive
+map is dense enough (~2-3m) to reloc.
+
+---
+
 ### 2026-07-19 — VIO ARCH changes tested: parallax NULL, recall MIXED (honest)
 Empirically tested the two easiest high-tier VIO changes; NEITHER is a clean
 win — the Basalt VIO is nearer its floor than the roadmap's confidence:
