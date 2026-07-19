@@ -2181,6 +2181,14 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
         { "XR_LMMARG_SCENE_M", "6" },   { "XR_LMMARG_FOLD_PX", "999" },
         { "XR_LMINJ", "1" },            { "XR_BURSTPNP", "1" },
         { "XR_MULTIHYP", "1" },
+        /* The one still-open question, and the only knob the final lockstep
+         * fleet run is A/B-ing (lock.sh: `base` vs `outfilt`). Our basalt patch
+         * defaults it ON (`!(e && *e == '0')`) whereas the containers default it
+         * OFF, so leaving it unset would put the device on the arm the published
+         * rows were NOT produced with. Pinned to the published configuration;
+         * it also costs accuracy at room scale, which is the demo regime.
+         * Flip to "1" to take the drive-favouring arm (drive3 VIO H -60%). */
+        { "XR_OUTFILT", "0" },
     };
     for (size_t i = 0; i < sizeof XR_BENCH_CONFIG / sizeof XR_BENCH_CONFIG[0]; i++)
         setenv(XR_BENCH_CONFIG[i][0], XR_BENCH_CONFIG[i][1], 0);
