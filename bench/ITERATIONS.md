@@ -86,6 +86,27 @@ corridors at large drift.
 
 ## In flight
 
+### 🏁 2026-07-19 — VIO ARCHITECTURE PROGRAM: DEFINITIVE VERDICT (all 3 tested, none ships clean)
+Answer to "VIO architectural changes to increase performance": empirically,
+NO clean win — Basalt VIO is at its practical floor.
+- **Parallax KF trigger (stage 16)**: NULL (FoE geometry + 7-kf window).
+- **Feature recall**: MIXED (helps MH_05, hurts slides +42%).
+- **Regularized affine photometric (stage 15)**: big win on photometric
+  EVENTS (V2_03 -62%, MOO05 -30%) + rooms protected, BUT net-fleet
+  always-on = **+2.8% mean REGRESSION** (the extra per-patch photometric
+  DoF fits noise on normal seqs: MH_02 +32%, MH_04 +28%). Only pays off
+  transient-GATED, which repeatedly proved fragile (ZNCC v3/v4).
+ALL THREE stay committed but env-gated OFF (parked, available for gated
+deployment if ever wanted). THE VIO LEVER THAT SHIPPED = obs_std=0.3
+(measured, per-sensor). Differentiation = the MAP layer (both new baselines
+DM-VIO + HybVIO drift 280-555cm on magistrale that our map closes).
+RECOMMENDATION: further VIO front-end work (IMU-RANSAC #2, chi2 #5,
+global-exposure state) is high-effort with 3/3-mixed priors — map-layer
+work has the better return. Await user steer before multi-day VIO builds.
+Lockstep corridor confirmation still running (variance-free corridor #s).
+
+---
+
 ### 2026-07-19 — AFFINE PHOTOMETRIC (stage 15): the one VIO change with a real signal
 Regularized affine-photometric (XR_AFFINE, sigma_reg=sqrt(sigma^2+lambda^2))
 pure-VIO A/B, lambda sweep:
