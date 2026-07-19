@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -2236,10 +2237,25 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
          * Flip to "1" to take the drive-favouring arm (drive3 VIO H -60%). */
         { "XR_OUTFILT", "0" },
     };
-    for (size_t i = 0; i < sizeof XR_BENCH_CONFIG / sizeof XR_BENCH_CONFIG[0]; i++)
-        setenv(XR_BENCH_CONFIG[i][0], XR_BENCH_CONFIG[i][1], 0);
-    LOGI("map config: applied %zu benchmark env defaults",
-         sizeof XR_BENCH_CONFIG / sizeof XR_BENCH_CONFIG[0]);
+    /* On-device A/B without a rebuild. These 18 gates went from all-OFF to
+     * all-ON in one step, which is a lot of new per-frame estimator work to
+     * introduce blind; when the pipeline misbehaves it has to be possible to
+     * bisect them in seconds rather than by reflashing:
+     *     adb shell setprop debug.xr.bench 0   (then relaunch) -> bare map
+     *     adb shell setprop debug.xr.bench 1   (or unset)      -> benchmark
+     * Read once at load, before any map state exists. */
+    char xr_bench[PROP_VALUE_MAX] = { 0 };
+    __system_property_get("debug.xr.bench", xr_bench);
+    if (xr_bench[0] == '0') {
+        LOGI("map config: benchmark defaults DISABLED (debug.xr.bench=0) — "
+             "bare map, every gate off");
+    } else {
+        for (size_t i = 0; i < sizeof XR_BENCH_CONFIG / sizeof XR_BENCH_CONFIG[0]; i++)
+            setenv(XR_BENCH_CONFIG[i][0], XR_BENCH_CONFIG[i][1], 0);
+        LOGI("map config: applied %zu benchmark env defaults "
+             "(setprop debug.xr.bench 0 to disable)",
+             sizeof XR_BENCH_CONFIG / sizeof XR_BENCH_CONFIG[0]);
+    }
     (void)vm;
     (void)reserved;
     return JNI_VERSION_1_6;
