@@ -1440,7 +1440,30 @@ static void *depth_worker(void *arg) {
         int bt = atomic_load(&BATT_DECIC);
         int period_ms;
         {
-            static int dyn_period;                   /* 0 = unpaced */
+            /* BASE RATE = the power policy; the governor below is only overload
+             * rescue. Running depth at the full camera rate is the single
+             * largest energy draw in the system: one LAS2 pass measures 9.6 ms
+             * on the v81 HTP and 23.0 ms on the v68 (SM8350) HTP, so unpaced at
+             * ~30 Hz that is ~29% of the v81 NPU and ~69% of the v68 NPU held
+             * busy continuously, before the VIO, the map and the compositor ask
+             * for anything. Depth feeds occlusion and the depth view, both of
+             * which are reprojected by the head pose at panel rate anyway, so
+             * they do not need a new disparity map every camera frame — the
+             * scene geometry simply does not change that fast. 15 Hz keeps
+             * occlusion visually continuous at roughly half the NPU energy and
+             * leaves the accelerator idle (and clocked down) most of the time,
+             * which is where the real saving is on a mobile DSP.
+             * XR_DEPTH_PERIOD_MS overrides; 0 restores the old unpaced
+             * behaviour for A/B. */
+            static int base_ms = -1;
+            if (base_ms < 0) {
+                const char *e = getenv("XR_DEPTH_PERIOD_MS");
+                base_ms = (e && *e) ? atoi(e) : 66;   /* ~15 Hz */
+                if (base_ms < 0) base_ms = 0;
+                LOGI("depth: base period %d ms (%s)", base_ms,
+                     base_ms ? "power-paced" : "unpaced");
+            }
+            static int dyn_period;                   /* 0 = at base rate */
             static int64_t last_adj;
             if (bt >= 440) {
                 period_ms = -1;                      /* hand-comfort suspend */
@@ -1449,21 +1472,21 @@ static void *depth_worker(void *arg) {
                 int64_t nowg = now_ms();
                 if (fps10 > 0 && nowg - last_adj >= 1000) {
                     if (fps10 < 560) {
-                        dyn_period = dyn_period
-                                         ? (dyn_period * 2 > 700 ? 700
-                                                                 : dyn_period * 2)
-                                         : 100;
+                        int step = dyn_period ? dyn_period * 2
+                                              : (base_ms > 100 ? base_ms * 2 : 100);
+                        dyn_period = step > 700 ? 700 : step;
                         last_adj = nowg;
                         LOGI("depth governor: cam %.1f fps < 56 -> period %d ms",
                              fps10 / 10.0, dyn_period);
                     } else if (fps10 >= 580 && dyn_period) {
-                        dyn_period = dyn_period >= 200 ? dyn_period / 2 : 0;
+                        /* recover toward the base rate, never past it */
+                        dyn_period = dyn_period / 2 <= base_ms ? 0 : dyn_period / 2;
                         last_adj = nowg;
                         LOGI("depth governor: cam %.1f fps ok -> period %d ms",
-                             fps10 / 10.0, dyn_period);
+                             fps10 / 10.0, dyn_period ? dyn_period : base_ms);
                     }
                 }
-                period_ms = dyn_period;
+                period_ms = dyn_period ? dyn_period : base_ms;
             }
         }
         static int64_t last_pass_ms;
