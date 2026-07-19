@@ -471,8 +471,10 @@ void xr_map_set_model(const char *onnx_path) {
      * accurate the moment the user flips the descriptor toggle (the lazy
      * map-thread init made the button label race and read "not ready") */
     pthread_t t;
-    if (pthread_create(&t, NULL, xfeat_preload_thread, NULL) == 0)
+    if (pthread_create(&t, NULL, xfeat_preload_thread, NULL) == 0) {
+        pthread_setname_np(t, "xr-xfeat-pre");
         pthread_detach(t);
+    }
 }
 
 void xr_map_set_mapping(int on) {
@@ -5714,6 +5716,7 @@ int xr_map_probe_burst(const uint8_t *img, const float grav_q[4],
 static void thread_start(void) {
     pthread_t t;
     pthread_create(&t, NULL, map_thread, NULL);
+    pthread_setname_np(t, "xr-map");
     pthread_detach(t);
 }
 

@@ -1449,16 +1449,19 @@ static void *depth_worker(void *arg) {
              * for anything. Depth feeds occlusion and the depth view, both of
              * which are reprojected by the head pose at panel rate anyway, so
              * they do not need a new disparity map every camera frame — the
-             * scene geometry simply does not change that fast. 15 Hz keeps
-             * occlusion visually continuous at roughly half the NPU energy and
-             * leaves the accelerator idle (and clocked down) most of the time,
-             * which is where the real saving is on a mobile DSP.
-             * XR_DEPTH_PERIOD_MS overrides; 0 restores the old unpaced
-             * behaviour for A/B. */
+             * scene geometry simply does not change that fast.
+             * HOWEVER: depth drives real-time occlusion of virtual objects, so
+             * it is pinned to the CAMERA rate (30 fps => 33 ms) rather than
+             * subsampled — occlusion edges lag visibly if a virtual object
+             * moves against geometry that is a frame or two stale. This is a
+             * FLOOR, not a throttle: it stops depth free-running faster than
+             * the camera can feed it, and gives the governor a defined rate to
+             * recover to. XR_DEPTH_PERIOD_MS overrides (e.g. 66 for ~15 Hz if
+             * a session is thermally limited); 0 restores fully unpaced. */
             static int base_ms = -1;
             if (base_ms < 0) {
                 const char *e = getenv("XR_DEPTH_PERIOD_MS");
-                base_ms = (e && *e) ? atoi(e) : 66;   /* ~15 Hz */
+                base_ms = (e && *e) ? atoi(e) : 33;   /* 30 Hz = camera rate */
                 if (base_ms < 0) base_ms = 0;
                 LOGI("depth: base period %d ms (%s)", base_ms,
                      base_ms ? "power-paced" : "unpaced");
@@ -1687,7 +1690,12 @@ static void slam_start(void) {
     DEPTH_BOX.full = 0;
     atomic_store(&S.slam_running, 1);
     pthread_create(&S.slam_thread, NULL, slam_worker, NULL);
+    /* Name the workers so `top -H` and simpleperf can attribute CPU. Without
+     * this every native thread shows as "ultra.stereocam" and a power profile
+     * cannot tell VIO from depth from the map. Bionic truncates at 15 chars. */
+    pthread_setname_np(S.slam_thread, "xr-slam");
     pthread_create(&S.depth_thread, NULL, depth_worker, NULL);
+    pthread_setname_np(S.depth_thread, "xr-depth");
 }
 
 static void slam_stop(void) {
@@ -2165,6 +2173,7 @@ static void imu_start(void) {
         }
     }
     pthread_create(&S.imu_thread, NULL, imu_worker, NULL);
+    pthread_setname_np(S.imu_thread, "xr-imu");
     imu_started = 1;
 }
 

@@ -926,6 +926,7 @@ static void ensure_thread(void) {
     if (!G.thread_running) {
         G.thread_running = 1;
         pthread_create(&G.thread, NULL, render_thread, NULL);
+        pthread_setname_np(G.thread, "xr-render");
     }
 }
 

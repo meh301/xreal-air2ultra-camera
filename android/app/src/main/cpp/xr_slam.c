@@ -102,6 +102,7 @@ static void redirect_stdio(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
     pthread_t t;
     pthread_create(&t, NULL, stdio_pump, (void *)(intptr_t)p[0]);
+    pthread_setname_np(t, "xr-stdio");
     pthread_detach(t);
 }
 #else
