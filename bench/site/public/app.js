@@ -503,7 +503,7 @@ function datasetBar(group, view) {
   const cv = (s, v) => v == null ? null
       : drives && !S.useRte ? (v / 100) / (PATH[s] || 1) * 100 : v;
   const series = [
-    { label: "VIO only", color: col("vio"), values: seqs.map(s => cv(s, med[s]?.fzbase?.vio ?? (drives ? med[s]?.fz17d?.vio : null))) },
+    { label: "VIO only", color: col("vio"), values: seqs.map(s => cv(s, med[s]?.fzbase?.vio ?? (drives ? (med[s]?.bc?.vio ?? med[s]?.fz17d?.vio) : null))) },
     ...armsOn.map(a => ({ label: `+map ${ARM_LABEL[a]}`, color: col(a),
       values: seqs.map(s => cv(s, med[s]?.[a]?.map)) })),
   ];
@@ -533,7 +533,7 @@ function datasetBar(group, view) {
 function overviewView() {
   const view = $("#view");
   const med = medians(S.runs, "ate");
-  const gmed = g => { const v = seqsIn(g).map(s => med[s]?.fz18?.map ?? med[s]?.fzbase?.map).filter(x => x != null); return v.length ? median(v) : null; };
+  const gmed = g => { const v = seqsIn(g).map(s => med[s]?.bc?.map ?? med[s]?.fz18?.map ?? med[s]?.fzbase?.map).filter(x => x != null); return v.length ? median(v) : null; };
   const tiles = el("div", { class: "tiles" });
   const defs = [
     [new Set(S.runs.map(r => r.seq)).size, "sequences"],
@@ -550,8 +550,8 @@ function overviewView() {
    * from bench/ITERATIONS.md (2026-07-18 finale, n=3 / n=90 probes);
    * same machine, same causal protocol as everything else here. */
   view.append(el("div", { class: "card" }, `
-    <h3>Wake-up relocalization (fz18 frozen)</h3>
-    <table class="mini"><thead><tr><th></th><th>ours fz18</th><th>OKVIS2+LC</th></tr></thead><tbody>
+    <h3>Wake-up relocalization (burst-15)</h3>
+    <table class="mini"><thead><tr><th></th><th>ours (burst-15)</th><th>OKVIS2+LC</th></tr></thead><tbody>
       <tr><td>burst-15 recall, corridors (90 probes/seq)</td><td class="best">99&ndash;100% (r@10cm 90&ndash;96%, ~55 ms)</td><td>DNF &mdash; reference harness deadlocks at the camera gap</td></tr>
       <tr><td>burst-15 recall, magistrale2</td><td class="best">85.6%</td><td>DNF</td></tr>
     </tbody></table>
@@ -571,16 +571,16 @@ function systemsView() {
   const sysArms = [...new Set(base.map(b => `${b.sys}_lc${b.lc}`))].sort();
   const bestArm = s => { const v = ARMS.map(a => med[s]?.[a]?.map).filter(x => x != null); return v.length ? Math.min(...v) : null; };
   const series = [
-    { label: "ours: VIO", color: col("vio"), values: seqs.map(s => med[s]?.fzbase?.vio) },
-    { label: "ours: fz18 (frozen)", color: col("fz18"), values: seqs.map(s => med[s]?.fz18?.map ?? bestArm(s)) },
+    { label: "ours: VIO floor", color: col("vio"), values: seqs.map(s => med[s]?.fzbase?.vio ?? med[s]?.bc?.vio) },
+    { label: "ours: best-config (+map, cap 3333)", color: col("bc"), values: seqs.map(s => med[s]?.bc?.map ?? bestArm(s)) },
     ...sysArms.map(sa => ({ label: BASE_LABEL[sa] || sa.replace("_", " "), color: BASE_COLORS[sa] || "#888",
       defaultOff: sa.startsWith("orb3"),
       values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === sa); return b ? (S.useRte ? b.rte : b.ate) : null; }) })),
   ];
   view.append(barChart({
-    title: `Ours vs systems we ran — causal ${S.useRte ? "RTE" : "ATE"} medians [cm]`,
+    title: `Ours vs every system we ran — causal ${S.useRte ? "RTE" : "ATE"} medians [cm]`,
     cats: seqs.map(shortName), series,
-    note: "Every row: same machine, same causal protocol (pose at first estimate). Whole-run causal ATE penalizes loop-closure re-anchoring for ALL systems — see Method for the tail-window caveat.",
+    note: "Ours = best-config (cap 3333, full flag stack). Baselines: OKVIS2 (±LC), OpenVINS, DM-VIO, HybVIO — all built and run in-house, same machine, same causal protocol (pose at first estimate). ORB-SLAM3 quarantined (dead LC toggle). Whole-run causal ATE penalizes loop-closure re-anchoring for ALL systems — see Method for the tail-window caveat.",
     onBar: i => { document.getElementById("sys-traj").innerHTML = ""; document.getElementById("sys-traj").append(trajPanel({ seq: seqs[i], compact: true })); },
   }));
   view.append(el("div", { id: "sys-traj" }));
@@ -781,7 +781,7 @@ function methodView() {
     <h3>Protocol</h3>
     <p>${S.meta.protocol || "causal, SE(3)-Umeyama ATE, RTE Δ=6 frames"}. One replay emits both tracks: raw VIO pose and map-corrected session pose (the map layer has no feedback into VIO). Arms differ only in descriptor (BAD/TEBLID vs XFeat) and retrieval model (none / EigenPlaces-512 / MegaLoc-8448).</p>
     <h3>Comparing to other systems, honestly</h3>
-    <p>OKVIS2, ORB-SLAM3 and OpenVINS were built and run by us on the same container under the same causal protocol (see "vs. Systems"). Whole-run causal ATE penalizes any loop-closure system at the instant a correction re-anchors the live pose (past poses stay in the old frame) — ORB-SLAM3 shows metre-scale steps at closures while its tail-window ATE is centimetres. Divergence therefore gates on ATE only (10 m; 1 m for MSD): an RTE gate would structurally disqualify correction-based systems, since one re-anchor step is a giant frame-pair error. RTE is still computed and reported for every run — correction snaps are plainly visible there.</p>
+    <p>Five baselines were built and run by us on the same container under the same causal protocol (see "vs. Systems"): OKVIS2 (LC on/off), OpenVINS, DM-VIO and HybVIO. ORB-SLAM3 is quarantined — its LC toggle is a byte-identical no-op and MH_01 lands ~230× off published, so a dead baseline is dropped from every comparison until its harness is fixed. Whole-run causal ATE penalizes any loop-closure system at the instant a correction re-anchors the live pose (past poses stay in the old frame) — OKVIS2+LC shows metre-scale steps at closures while its tail-window ATE is centimetres. Divergence therefore gates on ATE only (10 m; 1 m for MSD): an RTE gate would structurally disqualify correction-based systems, since one re-anchor step is a giant frame-pair error. RTE is still computed and reported for every run — correction snaps are plainly visible there. DM-VIO is monocular and scale-fragile on aggressive motion (diverges on 6 of 14 MSD sequences); it does not lead us on any group.</p>
     <h3>Aggregation rules</h3>
     <p>Error metrics: per-seq RMSE → median over runs → <b>median over sequences</b> (mean on hover). Recall metrics: <b>mean over sequences</b> (median on hover) — recall is bimodal and a median lands on the easy mode. Bimodal results are reported per mode. The full rulebook lives in <code>bench/EVALUATION.md</code>.</p>
     <h3>Reproduce</h3>
