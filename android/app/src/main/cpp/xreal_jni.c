@@ -2160,6 +2160,37 @@ static void imu_stop(void) {
     S.usb = NULL;
 }
 
+/* The benchmark's configuration of record lives ENTIRELY in the environment:
+ * every map gate in xr_map.c reads getenv() with the pattern
+ * `e && *e && *e != '0'`, so an unset variable means OFF and a device build
+ * with no environment runs a bare map — no coverage-aware eviction, no pose
+ * graph, no map->VIO coupling. These are the 17 settings behind the published
+ * "bc" rows (bench freeze fz19 + BURSTPNP + MULTIHYP; see bench/ITERATIONS.md
+ * and the container's bc_rebench.sh), applied at library load so they are in
+ * place before any map state is constructed. setenv() overwrite=0: a value
+ * already present in the environment always wins, so this is a default, not a
+ * lock. */
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    static const char *const XR_BENCH_CONFIG[][2] = {
+        { "XR_COVKEEP", "1" },          { "XR_PGO", "1" },
+        { "XR_LMDESC", "1" },           { "XR_TIGHT", "1" },
+        { "XR_TIGHTSUB", "1" },         { "XR_SEQVOTE", "1" },
+        { "XR_TRUSTVPR", "1" },         { "XR_LMFACT", "1" },
+        { "XR_LMTRACK", "1" },          { "XR_LMTRACK_PERSIST", "1" },
+        { "XR_LMMARG", "1" },           { "XR_LMMARG_AUTO", "1" },
+        { "XR_LMMARG_SCENE_M", "6" },   { "XR_LMMARG_FOLD_PX", "999" },
+        { "XR_LMINJ", "1" },            { "XR_BURSTPNP", "1" },
+        { "XR_MULTIHYP", "1" },
+    };
+    for (size_t i = 0; i < sizeof XR_BENCH_CONFIG / sizeof XR_BENCH_CONFIG[0]; i++)
+        setenv(XR_BENCH_CONFIG[i][0], XR_BENCH_CONFIG[i][1], 0);
+    LOGI("map config: applied %zu benchmark env defaults",
+         sizeof XR_BENCH_CONFIG / sizeof XR_BENCH_CONFIG[0]);
+    (void)vm;
+    (void)reserved;
+    return JNI_VERSION_1_6;
+}
+
 JNIEXPORT jint JNICALL
 Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, jint fd) {
     (void)env; (void)cls;

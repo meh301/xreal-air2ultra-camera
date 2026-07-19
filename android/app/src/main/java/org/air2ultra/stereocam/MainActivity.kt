@@ -674,6 +674,20 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.i("xrealcam", "QNN DSP libs absent (ZipDepth CPU/SGM): $e")
         }
+        // The published configuration is dense XFeat + LighterGlue-L6; BAD/TEBLID
+        // is the fallback for when ORT or the model is missing, not the intended
+        // descriptor, and LighterGlue only ever runs on XFeat maps. Ask for XFeat
+        // now that the models are staged. Native returns the descriptor ACTUALLY
+        // in effect, so a refusal still leaves the flag and the button truthful.
+        try {
+            useXfeat = XrealNative.nativeSetUseXfeat(true)
+            findViewById<Button>(R.id.desc_mode)?.text = getString(
+                if (useXfeat) R.string.desc_xfeat else R.string.desc_bad)
+            android.util.Log.i("xrealcam",
+                "descriptor at boot: " + if (useXfeat) "XFeat" else "BAD/TEBLID (XFeat refused)")
+        } catch (e: Exception) {
+            android.util.Log.i("xrealcam", "XFeat descriptor request failed: $e")
+        }
     }
 
     /** Parse the on-device factory calibration and enable the world-aligned
