@@ -684,19 +684,21 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(const OpticalFlowResult::Ptr& op
           }
           if (!xr_hit) { ++it; continue; }
           if (e.created) {
-            /* Re-check at the point of use, not just at the top of the loop.
-             * getLandmark() is kpts.at() and THROWS; on device this aborted the
-             * VIO thread (std::out_of_range, unordered_map::at) after ~90 s of
-             * mapping. The existence test at the head of this iteration is not
-             * sufficient in practice, and an injected landmark disappearing
-             * under us is a lost race with marginalization/outlier removal, not
-             * a logic error worth dying for — drop the entry and carry on. */
-            if (!lmdb.landmarkExists(xr_bid)) {
+            /* ONE lookup, and one that cannot throw. landmarkExists() followed
+             * by getLandmark() is a test-then-use pair over kpts, and on device
+             * the two disagreed on ADJACENT statements for the same key —
+             * getLandmark() is kpts.at(), so that aborted the VIO thread with
+             * std::out_of_range after ~90 s of mapping. Both accessors resolve
+             * the identical key, and this estimator has a single processing
+             * thread, so the pair should be atomic and is not; until that is
+             * understood, do not re-introduce a second lookup here. */
+            const auto& xr_kpts = lmdb.getLandmarks();
+            const auto xr_lit = xr_kpts.find(xr_bid);
+            if (xr_lit == xr_kpts.end()) {
               it = xr_inj_lms.erase(it);
               continue;
             }
-            auto& lm = lmdb.getLandmark(xr_bid);
-            if (lm.obs.count(TimeCamId(xr_now, 0)) == 0) {
+            if (xr_lit->second.obs.count(TimeCamId(xr_now, 0)) == 0) {
               KeypointObservation<Scalar> ko;
               ko.kpt_id = xr_bid;
               ko.pos = xr_uv;
@@ -746,12 +748,12 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(const OpticalFlowResult::Ptr& op
                     const int64_t tf = ob.first.frame_id;
                     if (!frame_poses.count(tf) && !frame_states.count(tf))
                       continue;
-                    /* addObservation() below rehashes kpts, so this reference
-                     * is deliberately re-taken each pass — and must be tested,
-                     * since getLandmark() throws rather than returning null. */
-                    if (!lmdb.landmarkExists(xr_bid)) break;
-                    auto& lm2 = lmdb.getLandmark(xr_bid);
-                    if (lm2.obs.count(ob.first)) continue;
+                    /* Same single non-throwing lookup as above; addObservation()
+                     * rehashes kpts so it is re-taken every pass. */
+                    const auto& xr_k2 = lmdb.getLandmarks();
+                    const auto xr_l2 = xr_k2.find(xr_bid);
+                    if (xr_l2 == xr_k2.end()) break;
+                    if (xr_l2->second.obs.count(ob.first)) continue;
                     KeypointObservation<Scalar> kg;
                     kg.kpt_id = xr_bid;
                     kg.pos = ob.second;
