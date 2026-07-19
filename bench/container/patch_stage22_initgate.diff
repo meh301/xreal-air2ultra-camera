@@ -1,0 +1,81 @@
+--- src/vi_estimator/sqrt_keypoint_vio.cpp.xrbak_initgate	2026-07-19 07:59:25.682567481 +0000
++++ src/vi_estimator/sqrt_keypoint_vio.cpp	2026-07-19 07:59:25.698567646 +0000
+@@ -278,19 +278,77 @@
+       }
+ 
+       if (!initialized) {
++        // XR_INITGATE (audit finding #4): replace single-sample gravity
++        // init with an averaged + stationarity-gated init. OFF (default)
++        // is bit-identical to the original single-sample FromTwoVectors.
++        static const bool xr_initgate = [] {
++          const char* e = getenv("XR_INITGATE");
++          return e && atoi(e) != 0;
++        }();
++        static const double xr_initgate_var = [] {
++          const char* e = getenv("XR_INITGATE_VAR");
++          return e ? atof(e) : 0.5;  // total accel var thresh (m/s^2)^2
++        }();
++        static Vec3 xr_accel_sum = Vec3::Zero();
++        static Vec3 xr_accel_sqsum = Vec3::Zero();
++        static long xr_accel_cnt = 0;
++        static int xr_defer_frames = 0;
++        static bool xr_init_logged = false;
++        if (reset_performed) {
++          xr_accel_sum.setZero();
++          xr_accel_sqsum.setZero();
++          xr_accel_cnt = 0;
++          xr_defer_frames = 0;
++        }
++        if (xr_initgate && data) {
++          xr_accel_sum += data->accel;
++          xr_accel_sqsum += data->accel.cwiseProduct(data->accel);
++          ++xr_accel_cnt;
++        }
++
+         while (data->t_ns < curr_frame->t_ns) {
+           data = popFromImuDataQueue();
+           if (!data) break;
+           data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
+           data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
++          if (xr_initgate) {
++            xr_accel_sum += data->accel;
++            xr_accel_sqsum += data->accel.cwiseProduct(data->accel);
++            ++xr_accel_cnt;
++          }
+           // std::cout << "Skipping IMU data.." << std::endl;
+         }
+ 
++        Vec3 xr_grav_accel = data->accel;  // original: single latest sample
++        if (xr_initgate && xr_accel_cnt > 0) {
++          const Vec3 xr_mean = xr_accel_sum / double(xr_accel_cnt);
++          const Vec3 xr_var =
++              xr_accel_sqsum / double(xr_accel_cnt) - xr_mean.cwiseProduct(xr_mean);
++          const double xr_var_scalar = xr_var.sum();
++          const int XR_MAX_DEFER = 30;
++          if (xr_accel_cnt >= 2 && xr_var_scalar > xr_initgate_var &&
++              xr_defer_frames < XR_MAX_DEFER) {
++            // not stationary yet: defer init, keep accumulating next frame
++            ++xr_defer_frames;
++            continue;
++          }
++          xr_grav_accel = xr_mean;
++          if (!xr_init_logged) {
++            std::cerr << "[XR_INITGATE] gravity init averaged over "
++                      << xr_accel_cnt << " accel samples, var="
++                      << xr_var_scalar << " (m/s^2)^2";
++            if (xr_defer_frames)
++              std::cerr << ", deferred " << xr_defer_frames << " frame(s)";
++            std::cerr << std::endl;
++            xr_init_logged = true;
++          }
++        }
++
+         Vec3 vel_w_i_init;
+         vel_w_i_init.setZero();
+ 
+         T_w_i_init.translation().setZero();
+-        T_w_i_init.setQuaternion(Eigen::Quaternion<Scalar>::FromTwoVectors(data->accel, Vec3::UnitZ()));
++        T_w_i_init.setQuaternion(Eigen::Quaternion<Scalar>::FromTwoVectors(xr_grav_accel, Vec3::UnitZ()));
+ 
+         last_state_t_ns = curr_frame->t_ns;
+         imu_meas[last_state_t_ns] = IntegratedImuMeasurement<Scalar>(last_state_t_ns, bg, ba);

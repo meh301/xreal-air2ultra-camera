@@ -2599,3 +2599,30 @@ Combined lib (TRIPAR+OUTFILT) built + distributed to all 3 containers. FULL-
 FLEET SWEEP running (base vs XR_TRIPAR=1 XR_OUTFILT=1, map ON, all groups,
 canonical bc recipe) to validate no held-out regression before default-on.
 Patches: patch_stage20_tripar.py, patch_stage21_outfilt.diff.
+
+### x FINAL SHIP VERDICT: OUTFILT only (2026-07-19)
+Audit -> verify -> reliable n=8 fleet decided it. SHIP XR_OUTFILT default-on;
+DO NOT ship XR_TRIPAR or XR_INITGATE.
+- XR_OUTFILT (stage 21): re-enable stock filterOutliers(3.0px) after
+  convergence. Clean everywhere — EuRoC helps, MSD neutral/helps, drive VIO
+  H -60% V -27%, magistrale VIO V -62%. No near-field downside. SHIPS.
+- XR_TRIPAR (stage 20): min-parallax triangulation gate. Big win on large/open
+  (magistrale H -35%, drives), but REGRESSES near-field MSD — decomposition:
+  MOO16 tripar +19% / outfilt -15% / comb +45% (the parallax gate rejects
+  good close-range features on small indoor scenes). Glasses are near-field-
+  heavy indoors -> DO NOT ship (would need scene-gating; parked).
+- XR_INITGATE (stage 22): averaged+gated gravity init. Helped drive (H -17%)
+  but regressed magistrale on TUM-VI. Not a clean win -> parked.
+RELIABLE n=8 (base vs comb=TRIPAR+OUTFILT, map track): EuRoC -11% (the n=3
+-19% was variance — MH_01 base 19.9@n3 -> 6.0@n8), MSD +4% (real, TRIPAR-
+driven), rooms ~-3%.
+VARIANCE ROOT CAUSE (key finding): the map-track bimodal variance is NOT
+dropped keyframes (kf count constant ~218 across runs) — it is SPURIOUS LOOP
+CLOSURES on aliased/small scenes. MH_01: bad runs fired 2-6 closures (20-43cm),
+good runs fired 0 (4-6cm); more closures = worse. This is a MAP closure-
+verification issue (hits device too), orthogonal to the VIO gates — which is
+why the --no-map VIO-track A/B is clean while the map-track is noisy. Follow-up:
+tighten closure acceptance. n=8 median lands on the good mode -> reliable.
+Rejected-experiment diffs preserved: patch_stage18_19 (EPIRANSAC/TRKGATE),
+patch_stage22 (INITGATE). Final deterministic (LOCKSTEP) full-fleet run
+launched (base vs OUTFILT) for the authoritative site update.

@@ -1,0 +1,209 @@
+--- frame_to_frame_optical_flow.h.stock_bak	2026-07-19 02:30:26.886051424 +0000
++++ frame_to_frame_optical_flow.h	2026-07-19 02:39:07.949456751 +0000
+@@ -38,6 +38,7 @@
+ #include <cstring>
+ 
+ #include <memory>
++#include <random>
+ 
+ #include <sophus/se2.hpp>
+ #include "basalt/imu/imu_types.h"
+@@ -121,6 +122,31 @@
+     for (size_t i = 0; i < getNumCams(); i++) cells.at(i).setZero(h / c + 1, w / c + 1);
+   }
+ 
++  // ---------------------------------------------------------------------------
++  // XR frontend reliability gates (env-controlled). When a gate is OFF the
++  // corresponding call site no-ops, so behaviour is bit-identical to stock.
++  // ---------------------------------------------------------------------------
++  static bool xr_epiransac() {
++    static const bool v = [] { const char* e = getenv("XR_EPIRANSAC"); return e && atoi(e) != 0; }();
++    return v;
++  }
++  static float xr_epiransac_px() {
++    static const float v = [] { const char* e = getenv("XR_EPIRANSAC_PX"); return e && *e ? (float)atof(e) : 2.0f; }();
++    return v;
++  }
++  static double xr_epiransac_tmin() {
++    static const double v = [] { const char* e = getenv("XR_EPIRANSAC_TMIN"); return e && *e ? atof(e) : 0.02; }();
++    return v;
++  }
++  static bool xr_trkgate() {
++    static const bool v = [] { const char* e = getenv("XR_TRKGATE"); return e && atoi(e) != 0; }();
++    return v;
++  }
++  static float xr_trkgate_max_override() {
++    static const float v = [] { const char* e = getenv("XR_TRKGATE_MAX"); return e && *e ? (float)atof(e) : -1.0f; }();
++    return v;
++  }
++
+   void processingLoop() override {
+     using std::make_shared;
+     OpticalFlowInput::Ptr img;
+@@ -357,6 +383,9 @@
+                     transforms->keypoints[i], new_transforms->keypoints[i],
+                     new_transforms->tracking_guesses[i],  //
+                     new_img_vec->masks.at(i), new_img_vec->masks.at(i), T_c1_c2, i, i);
++        // XR_EPIRANSAC (stage 18): IMU-rotation-prior temporal epipolar gate on cam0.
++        if (xr_epiransac() && i == 0)
++          xrEpiRansacFilter(transforms->keypoints[i], new_transforms->keypoints[i], T_c1_c2, i);
+       }
+       new_img_vec->addTime("frontend_tracking_ended");
+ 
+@@ -463,6 +492,130 @@
+     guesses.insert(guesses_tbb.begin(), guesses_tbb.end());
+   }
+ 
++  /* XR_EPIRANSAC (stage 18): IMU-rotation-prior temporal epipolar gate on cam0.
++   * Reuses the gyro/IMU-driven relative pose T_c1_c2 (prev<-curr) as a fixed
++   * rotation prior R. For every cam0 track present in both prev and curr frame
++   * we predict where the previous feature *should* land in the current image
++   * under pure rotation (rotation-compensated reprojection: f_c2 = R^T f_c1).
++   * The residual parallax vector must point at a single focus-of-expansion
++   * (the epipole implied by the translation). A 2-point RANSAC over the
++   * parallax lines finds that epipole; tracks whose parallax deviates from it
++   * by more than XR_EPIRANSAC_PX pixels are geometrically impossible given the
++   * measured rotation (classic motion-blur mistrack) and are removed. Degrades
++   * to a no-op under near-pure-rotation: skipped when |t| < XR_EPIRANSAC_TMIN
++   * metres. Removal pattern mirrors filterPointsForCam. */
++  void xrEpiRansacFilter(const Keypoints& prev_kpts, Keypoints& curr_kpts,
++                         const SE3& T_c1_c2, size_t cam_id) const {
++    // (1) Near-pure-rotation guard: skip if measured translation is tiny.
++    const double t_norm = T_c1_c2.translation().template cast<double>().norm();
++    if (t_norm < xr_epiransac_tmin()) return;
++
++    // (2) Gather matched tracks; rotation-compensate previous bearings forward
++    //     into the current frame (pure-rotation prediction).
++    const Eigen::Matrix<Scalar, 3, 3> R = T_c1_c2.so3().matrix();  // c2 -> c1
++    std::vector<KeypointId> ids;
++    Eigen::aligned_vector<Eigen::Vector2f> prev_px, curr_px;
++    ids.reserve(curr_kpts.size());
++    prev_px.reserve(curr_kpts.size());
++    curr_px.reserve(curr_kpts.size());
++    for (const auto& [kpid, affine] : curr_kpts) {
++      auto it = prev_kpts.find(kpid);
++      if (it == prev_kpts.end()) continue;
++      ids.push_back(kpid);
++      prev_px.emplace_back(it->second.translation());
++      curr_px.emplace_back(affine.translation());
++    }
++    if (ids.size() < 12) return;  // too few to estimate an epipole robustly
++
++    Eigen::aligned_vector<Eigen::Vector4f> f_prev;
++    std::vector<bool> up_ok;
++    calib.intrinsics[cam_id].unproject(prev_px, f_prev, up_ok);
++
++    Eigen::aligned_vector<Eigen::Vector4f> f_prev_in_curr(f_prev.size());
++    for (size_t i = 0; i < f_prev.size(); i++) {
++      f_prev_in_curr[i] = f_prev[i];
++      f_prev_in_curr[i].template head<3>() = R.transpose() * f_prev[i].template head<3>();
++    }
++    Eigen::aligned_vector<Eigen::Vector2f> pred_px;
++    std::vector<bool> pr_ok;
++    calib.intrinsics[cam_id].project(f_prev_in_curr, pred_px, pr_ok);
++
++    // (3) Build parallax constraints (current-image pixels). d is the actual
++    //     (unnormalized) parallax vector after rotation compensation; only
++    //     tracks with parallax above the residual scale are judged/removable.
++    const float px_thr = xr_epiransac_px();
++    const float d_min2 = (2.0f * px_thr) * (2.0f * px_thr);
++    Eigen::aligned_vector<Eigen::Vector2f> P, D;  // anchor point, parallax vec
++    std::vector<size_t> idx;                      // back-reference into ids
++    P.reserve(ids.size());
++    D.reserve(ids.size());
++    idx.reserve(ids.size());
++    for (size_t i = 0; i < ids.size(); i++) {
++      if (!up_ok[i] || !pr_ok[i]) continue;
++      Eigen::Vector2f d = curr_px[i] - pred_px[i];
++      if (d.squaredNorm() < d_min2) continue;  // low parallax: ambiguous, never remove
++      P.push_back(pred_px[i]);
++      D.push_back(d);
++      idx.push_back(i);
++    }
++    const size_t n = P.size();
++    if (n < 8) return;  // too few constrained tracks -> trust nothing, remove nothing
++
++    // Epipolar residual (pixels): the parallax component of track i that is
++    // perpendicular to the epipolar direction (P[i] -> epipole e). This is
++    // |d_i x Lhat|, bounded by |d_i|, so it is a genuine pixel residual and
++    // does NOT blow up with distance to the (possibly far) epipole.
++    auto epi_resid = [&](const Eigen::Vector2f& e, size_t i) -> float {
++      Eigen::Vector2f L = e - P[i];
++      const float Ln = L.norm();
++      if (Ln < 1e-6f) return 0.f;  // at the epipole: degenerate -> treat as inlier
++      L /= Ln;
++      return std::abs(D[i].x() * L.y() - D[i].y() * L.x());
++    };
++
++    // (4) 2-point RANSAC for the focus-of-expansion (epipole): intersect the
++    //     parallax lines of two tracks, score every track by epi_resid.
++    std::mt19937 rng(12345u);
++    std::uniform_int_distribution<size_t> pick(0, n - 1);
++    int best_inliers = -1;
++    Eigen::Vector2f best_e(0, 0);
++    for (int it = 0; it < 100; it++) {
++      size_t a = pick(rng), b = pick(rng);
++      if (a == b) continue;
++      const float det = D[a].x() * (-D[b].y()) - (-D[b].x()) * D[a].y();
++      if (std::abs(det) < 1e-3f) continue;  // near-parallel lines -> epipole ill-conditioned
++      const Eigen::Vector2f rhs = P[b] - P[a];
++      const float s = (rhs.x() * (-D[b].y()) - (-D[b].x()) * rhs.y()) / det;
++      const Eigen::Vector2f e = P[a] + s * D[a];
++      int inliers = 0;
++      for (size_t i = 0; i < n; i++)
++        if (epi_resid(e, i) <= px_thr) inliers++;
++      if (inliers > best_inliers) { best_inliers = inliers; best_e = e; }
++    }
++
++    if (getenv("XR_EPIRANSAC_DEBUG")) {
++      static int dbgn = 0;
++      if (dbgn < 60) { dbgn++;
++        float mp = 0; for (size_t i = 0; i < n; i++) mp += D[i].norm(); mp /= n;
++        std::vector<float> rr(n); for (size_t i = 0; i < n; i++) rr[i] = epi_resid(best_e, i);
++        std::nth_element(rr.begin(), rr.begin() + n / 2, rr.end());
++        std::cerr << "[xr-epi] n=" << n << " inl=" << best_inliers
++                  << " ratio=" << (n ? (float)best_inliers / n : 0.f)
++                  << " medresid=" << rr[n / 2] << " meanpar=" << mp
++                  << " |t|=" << t_norm << " thr=" << px_thr << std::endl;
++      }
++    }
++
++    // (5) Fail-safe: if even the best epipole explains too few tracks, the
++    //     rotation prior / geometry is unreliable this frame -> remove nothing.
++    if (best_inliers < 0 || (float)best_inliers < 0.5f * (float)n) return;
++
++    // (6) Remove tracks whose rotation-compensated epipolar residual exceeds
++    //     the threshold (mirrors filterPointsForCam removal).
++    for (size_t i = 0; i < n; i++)
++      if (epi_resid(best_e, i) > px_thr) curr_kpts.erase(ids[idx[i]]);
++  }
++
+   inline bool trackPoint(const ManagedImagePyr<uint16_t>& old_pyr, const ManagedImagePyr<uint16_t>& pyr,
+                          const Eigen::AffineCompact2f& old_transform, Eigen::AffineCompact2f& transform) const {
+     bool patch_valid = true;
+@@ -479,7 +632,24 @@
+       patch_valid &= p.valid;
+       if (patch_valid) {
+         // Perform tracking on current level
+-        patch_valid &= trackPointAtLevel(pyr.lvl(level), p, transform);
++        if (xr_trkgate()) {
++          /* XR_TRKGATE (stage 19): capture the main-path residual and reject
++           * the track when the final patch residual norm exceeds a threshold --
++           * the same quality test the recall path (trackPointFromPyrPatch)
++           * already applies. Default per-level threshold =
++           * optical_flow_recall_max_patch_norms; XR_TRKGATE_MAX overrides it
++           * with a single scalar for all levels. */
++          Scalar error = -1;
++          patch_valid &= trackPointAtLevel(pyr.lvl(level), p, transform, &error);
++          if (patch_valid) {
++            const float thr = xr_trkgate_max_override() >= 0.f
++                                  ? xr_trkgate_max_override()
++                                  : config.optical_flow_recall_max_patch_norms.at(level);
++            patch_valid &= error <= (Scalar)thr;
++          }
++        } else {
++          patch_valid &= trackPointAtLevel(pyr.lvl(level), p, transform);
++        }
+       }
+ 
+       transform.translation() *= scale;
