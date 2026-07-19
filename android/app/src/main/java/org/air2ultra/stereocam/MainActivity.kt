@@ -603,6 +603,12 @@ class MainActivity : Activity() {
         // second call is what actually turns retrieval pre-ranking on. A missing
         // asset (no v68 context shipped) throws out of stage() before either
         // registration, leaving the map's spatial-gate candidate scan in charge.
+        // Both arches. The v68 asset MUST be the POWFIX build: GeM's Pow is an
+        // ElementWiseBinary on HTP with no LUT path and burns 1.78B cycles on
+        // v68 A16 — 2415 ms per embed, which squats on XR_NPU_GATE and starves
+        // depth. Rewritten as Exp(p*Log(x)) it is 12.07 ms. Do not rebuild this
+        // context from eigenplaces_r18_512.onnx; use eigen_plc (see
+        // F:\xreal_depth\eigen_powfix.py).
         try {
             val asset = modelAsset("eigen_ctx.onnx", "eigen_v81_ctx.onnx")
             val model = java.io.File(filesDir, asset)
@@ -616,13 +622,22 @@ class MainActivity : Activity() {
         // LighterGlue verification matcher — only ever runs on the handful of
         // retrieval candidates that reach PnP, and only for XFeat maps. Absent
         // -> the greedy NN+margin correspondence path stays.
-        try {
-            val model = java.io.File(filesDir, "lighterglue.onnx")
-            stage("lighterglue.onnx", model)
-            XrealNative.nativeSetLglueModel(model.absolutePath)
-            android.util.Log.i("xrealcam", "LighterGlue model staged: ${model.absolutePath}")
-        } catch (e: Exception) {
-            android.util.Log.i("xrealcam", "LighterGlue model absent (NN matcher): $e")
+        // v81 ONLY, and never as a CPU fallback. LighterGlue costs 91.3 ms per
+        // call on the SM8350 CPU and has no HTP path there at all (its
+        // attention MatMul needs dsp_arch >= v73), which starves the map
+        // thread. Greedy NN+margin is the only matcher that belongs on a CPU.
+        if (isV81) {
+            try {
+                val model = java.io.File(filesDir, "lighterglue.onnx")
+                stage("lighterglue.onnx", model)
+                XrealNative.nativeSetLglueModel(model.absolutePath)
+                android.util.Log.i("xrealcam", "LighterGlue model staged: ${model.absolutePath}")
+            } catch (e: Exception) {
+                android.util.Log.i("xrealcam", "LighterGlue model absent (NN matcher): $e")
+            }
+        } else {
+            android.util.Log.i("xrealcam",
+                "LighterGlue skipped on this SoC (no HTP path) — greedy NN+margin")
         }
         // v81 only: the attention stack in native fp16 on the HTP (10.5 ms vs
         // 17.5 ms for the same graph on the CPU, and it stops the matcher
