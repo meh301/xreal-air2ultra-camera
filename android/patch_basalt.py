@@ -9,13 +9,19 @@
    Realtime capture must drop, not wait.
 3. stop() drains queues before pushing the shutdown sentinels for the same
    reason.
+4. XR_OUTFILT ship (audit finding #3, benchmark-verified 2026-07-19): re-enable
+   the dormant stock filterOutliers(3.0 px, min 2 obs) after convergence,
+   before marginalize() — deletes gross/dynamic-object outliers the Huber cost
+   only softens (drive3 VIO H -60% / V -27%, clean fleet-wide). Default-ON;
+   XR_OUTFILT=0 disables for A/B. TRIPAR was tested and NOT shipped.
 """
 
 import sys
 from pathlib import Path
 
-VT = Path(__file__).resolve().parent / \
-    "app/src/main/cpp/third_party/basalt/src/vit/vit_tracker.cpp"
+_ROOT = Path(__file__).resolve().parent / "app/src/main/cpp/third_party/basalt"
+VT = _ROOT / "src/vit/vit_tracker.cpp"
+SKV = _ROOT / "src/vi_estimator/sqrt_keypoint_vio.cpp"
 
 REPLACEMENTS = [
     # 1. cam-calib optional
@@ -61,21 +67,56 @@ REPLACEMENTS = [
 ]
 
 
-def main():
-    src = VT.read_text(encoding="utf-8")
+SKV_REPLACEMENTS = [
+    # cstdlib for std::getenv (the XR_OUTFILT ship gate)
+    ("#include <memory>\n\n#include <tbb/blocked_range.h>",
+     "#include <memory>\n#include <cstdlib>  // XREAL: std::getenv for XR_OUTFILT ship gate\n\n#include <tbb/blocked_range.h>"),
+    # re-enable the dormant hard outlier filter after convergence, before marg
+    ("    // TODO: call filterOutliers at least once (also for CG version)\n\n"
+     "    stats_all_.merge_all(stats);",
+     "    // XREAL SHIP (audit #3, benchmark-verified): hard reprojection-outlier\n"
+     "    // rejection after convergence, before marginalize(). Deletes gross /\n"
+     "    // dynamic-object outliers the Huber cost only softens (drive3 VIO H\n"
+     "    // -60% / V -27%). Default-ON; XR_OUTFILT=0 disables for A/B.\n"
+     "    {\n"
+     "      static const bool xr_outfilt = [] {\n"
+     "        const char* e = std::getenv(\"XR_OUTFILT\");\n"
+     "        return !(e && *e == '0');\n"
+     "      }();\n"
+     "      if (xr_outfilt && converged) this->filterOutliers(Scalar(3.0), 2);\n"
+     "    }\n\n"
+     "    stats_all_.merge_all(stats);"),
+]
+
+
+def _apply(path, replacements):
+    """Apply (old,new) replacements to a file idempotently. Returns count or None on error."""
+    if not path.exists():
+        print(f"patch_basalt: FILE MISSING: {path}")
+        return None
+    src = path.read_text(encoding="utf-8")
     changed = 0
-    for old, new in REPLACEMENTS:
+    for old, new in replacements:
         if new in src:
             continue                       # already applied
         if old not in src:
-            print(f"patch_basalt: TARGET NOT FOUND:\n{old}\n")
-            return 1
+            print(f"patch_basalt: TARGET NOT FOUND in {path.name}:\n{old}\n")
+            return None
         src = src.replace(old, new, 1)
         changed += 1
     if changed:
-        VT.write_text(src, encoding="utf-8", newline="\n")
-    print(f"patch_basalt: {changed} patch(es) applied, "
-          f"{len(REPLACEMENTS) - changed} already present")
+        path.write_text(src, encoding="utf-8", newline="\n")
+    return changed
+
+
+def main():
+    total = 0
+    for path, reps in ((VT, REPLACEMENTS), (SKV, SKV_REPLACEMENTS)):
+        n = _apply(path, reps)
+        if n is None:
+            return 1
+        total += n
+        print(f"patch_basalt: {path.name}: {n} applied, {len(reps) - n} already present")
     return 0
 
 
