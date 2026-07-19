@@ -16,12 +16,32 @@
    XR_OUTFILT=0 disables for A/B. TRIPAR was tested and NOT shipped.
 """
 
+import shutil
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent / "app/src/main/cpp/third_party/basalt"
+_HERE = Path(__file__).resolve().parent
+_ROOT = _HERE / "app/src/main/cpp/third_party/basalt"
 VT = _ROOT / "src/vit/vit_tracker.cpp"
 SKV = _ROOT / "src/vi_estimator/sqrt_keypoint_vio.cpp"
+VTH = _ROOT / "include/basalt/vit/vit_tracker.hpp"
+
+# 5. The estimator that produced the published benchmark numbers. The map->VIO
+#    coupling (XR_TIGHT prior, XR_LMFACT factors, XR_LMINJ injection, XR_LMTRACK,
+#    XR_LMMARG, XR_DELAYMARG re-advance) lives in the estimator, and the upstream
+#    clone has none of it — a stock build silently produces a libbasalt.so whose
+#    vit_tracker_xreal_* symbols do not exist, so every gate is a no-op no matter
+#    what the environment says. These three files are copied verbatim from the
+#    benchmark containers (/root/xreal/bench/container/basalt-linux) so a fresh
+#    clone reproduces the benchmarked estimator rather than a bare one. They are
+#    installed BEFORE the string patches below, which then re-apply XR_OUTFILT on
+#    top (the containers do not carry OUTFILT — it was a separate A/B and is our
+#    ship decision, default-on, disabled with XR_OUTFILT=0).
+_OVERLAY = {
+    "vio_estimator.h":      _ROOT / "include/basalt/vi_estimator/vio_estimator.h",
+    "sqrt_keypoint_vio.h":  _ROOT / "include/basalt/vi_estimator/sqrt_keypoint_vio.h",
+    "sqrt_keypoint_vio.cpp": SKV,
+}
 
 REPLACEMENTS = [
     # 1. cam-calib optional
@@ -109,9 +129,78 @@ def _apply(path, replacements):
     return changed
 
 
+VTH_REPLACEMENTS = [
+    # stage-8 / stage-12 Tracker method declarations (the clone has neither)
+    ("  void xreal_seed_keypoints(int64_t t_ns, int cam, const float* uv, int n);",
+     "  void xreal_seed_keypoints(int64_t t_ns, int cam, const float* uv, int n);\n\n"
+     "  /* XREAL stage-8: inject verified closure landmarks into the live lmdb as\n"
+     "   * optimizable landmarks with streaming observations (XR_LMINJ). */\n"
+     "  void xreal_inject_landmarks(int64_t t_ns, int cam_id, const float *uv, const float *xyz_world,\n"
+     "                              const int32_t *ids, int n);\n\n"
+     "  /* XREAL stage-12: arm a delayed-marg re-advance on a closure trigger. */\n"
+     "  void xreal_readvance();"),
+]
+
+VT_XREAL_REPLACEMENTS = [
+    # the two Tracker methods the overlay estimator exposes
+    ("}  // namespace basalt::vit_implementation",
+     "void Tracker::xreal_inject_landmarks(int64_t t_ns, int cam_id, const float *uv, const float *xyz_world,\n"
+     "                                     const int32_t *ids, int n) {\n"
+     "  if (!impl_ || !impl_->vio) return;\n"
+     "  impl_->vio->setXrInjectLandmarks(t_ns, cam_id, uv, xyz_world, ids, n);\n"
+     "}\n\n"
+     "void Tracker::xreal_readvance() {\n"
+     "  if (!impl_ || !impl_->vio) return;\n"
+     "  impl_->vio->setXrReadvance();\n"
+     "}\n\n"
+     "}  // namespace basalt::vit_implementation"),
+    # and their dlsym-reachable C entry points (xr_slam.c resolves all five)
+    ("/* XREAL extension: reachable via dlsym, no header coupling required. */",
+     "/* XREAL stage-8 extension: closure-landmark injection into the lmdb. */\n"
+     "extern \"C\" vit_result_t vit_tracker_xreal_inject_landmarks(vit_tracker_t *tracker, int64_t t_ns, int32_t cam_id,\n"
+     "                                                           const float *uv, const float *xyz_world,\n"
+     "                                                           const int32_t *ids, int32_t n) {\n"
+     "  if (!tracker || !uv || !xyz_world || !ids || n <= 0) return VIT_ERROR_INVALID_VALUE;\n"
+     "  auto *t = static_cast<basalt::vit_implementation::Tracker *>(static_cast<vit::Tracker *>(tracker));\n"
+     "  t->xreal_inject_landmarks(t_ns, cam_id, uv, xyz_world, ids, n);\n"
+     "  return VIT_SUCCESS;\n"
+     "}\n\n"
+     "/* XREAL stage-12 extension: closure-triggered re-advance. */\n"
+     "extern \"C\" vit_result_t vit_tracker_xreal_readvance(vit_tracker_t *tracker) {\n"
+     "  if (!tracker) return VIT_ERROR_INVALID_VALUE;\n"
+     "  auto *t = static_cast<basalt::vit_implementation::Tracker *>(static_cast<vit::Tracker *>(tracker));\n"
+     "  t->xreal_readvance();\n"
+     "  return VIT_SUCCESS;\n"
+     "}\n\n"
+     "/* XREAL extension: reachable via dlsym, no header coupling required. */"),
+]
+
+
+def _install_overlay():
+    """Copy the benchmarked estimator over the clone's. Idempotent by content."""
+    src_dir = _HERE / "basalt_overlay"
+    n = 0
+    for name, dst in _OVERLAY.items():
+        src = src_dir / name
+        if not src.exists():
+            print(f"patch_basalt: OVERLAY MISSING: {src}")
+            return None
+        if not dst.exists():
+            print(f"patch_basalt: TARGET MISSING: {dst}")
+            return None
+        if src.read_bytes() != dst.read_bytes():
+            shutil.copyfile(src, dst)
+            n += 1
+    print(f"patch_basalt: estimator overlay: {n} installed, {len(_OVERLAY) - n} current")
+    return n
+
+
 def main():
+    if _install_overlay() is None:
+        return 1
     total = 0
-    for path, reps in ((VT, REPLACEMENTS), (SKV, SKV_REPLACEMENTS)):
+    for path, reps in ((VTH, VTH_REPLACEMENTS), (VT, VT_XREAL_REPLACEMENTS),
+                       (VT, REPLACEMENTS), (SKV, SKV_REPLACEMENTS)):
         n = _apply(path, reps)
         if n is None:
             return 1
