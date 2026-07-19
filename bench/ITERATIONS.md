@@ -2497,3 +2497,44 @@ rejected or wrong-accepted; our burst 87% exceeds their ceiling).
 CAVEATS: cv::ORB vs ORB3's octree extractor (slightly better spread);
 retrieval-only vs end-to-end favors DBoW2 in this table. room1 cell
 absent (probes parse; minor, not re-run).
+
+### x UNBOUNDED DRIVE = STORE_MIN_INTERVAL, NOT THE CAP (user: "unlimited kf ver")
+User wanted the 4Seasons drives with "no mapping limitations." First
+mistake corrected in-flight: XR_KFDIST (stage-17 VIO translation-distance
+keyframe trigger) is the WRONG lever for drive map density — the session
+map's keyframe cadence is its OWN wall-clock throttle STORE_MIN_INTERVAL_NS
+(xr_map.c:68 = 350 ms), independent of the VIO take_kf. At walking speed
+350 ms ~= 0.5 m (dense indoors); at driving speed ~= 3.5-5 m -> the sparse
+~1200-kf drive map, regardless of XR_MAP_MAX_KF or the VIO trigger. The
+cap was NEVER binding (map reached 1200-3000 << 20000 cap).
+Rebuilt xr_unl_drive2 with STORE_MIN_INTERVAL_NS=50000000ull (50 ms) +
+cap 20000 + VER_MAX_RANGE_M=60. Result (dense2 vs prior sparse):
+  drive1_city    1458 -> 2978 kf   reloc 0.000 -> 0.000
+  drive3_country 1228 -> 2439 kf   reloc 0.100 -> 0.133 (r@25cm 0.033, med 1.17 m)
+  drive2_city    1129 ->  236 kf   reloc 0.000 (UNSTABLE: 50 ms saturated the
+                 map thread on this seq -> segment thrash, only ~12 kf searchable)
+VERDICT: ~2x map density does NOT rescue drive relocalization. The limit is
+the outdoor-driving APPEARANCE regime (wide baselines, far depth, repetitive
+city scenes, few true revisits in a point-to-point pass), not map capacity.
+Country roads (near-field distinctive structure) reloc slightly > city.
+Even r@25cm ~= 0 => the few country hits land at ~1 m (too coarse). 50 ms is
+too aggressive for real-time (map thread saturates); it is an offline probe.
+
+### x DM-VIO ON MSD MERGED (user: "DM-VIO was not run on MSD???")
+Ran DM-VIO (mono) on all 14 MOO seqs, 5 iters each. Scored via the CANONICAL
+score.py (msd divergence gate ATE>1.0 m), fair median-of-5 representative per
+seq (index-2 after sorting, diverged=inf -> if >=3/5 diverge the seq is
+DIVERGED). Merged into site baselines.json (arm=dmvio, group=msd, 14 rows).
+DM-VIO DIVERGES on 6/14 MSD seqs: MOO02(3/5) MOO04(3/5) MOO08(4/5) MOO11(3/5)
+MOO13(5/5) MOO14(5/5). Where it holds: MOO01 50.5, MOO03 28.8, MOO05 7.2,
+MOO06 19.1, MOO07 12.2, MOO09 0.44, MOO10 5.4, MOO16 0.27 cm (09/10/16 are
+short ~1 m GT-span seqs -> sub-cm is trivial there). MONO DM-VIO is
+scale-fragile on MSD's blur/aggressive-motion seqs.
+SCORING-BUG CAUGHT (per overfitting-and-claims memory): my first pass regex
+grabbed score.py's FIRST float and labeled it cm — but ATE prints in METERS
+(and for DIVERGED runs the first float is completion%). "MOO01 0.51cm" was
+really 50.5cm; near-stationary collapses (MOO16 19934 poses spanning 0.6 m)
+scored a meaningless 0.28cm. Rewrote to parse `ATE ([0-9.]+) m` + DIVERGED
+token + m->cm, with a collapse guard (est span < 0.25*gt span). VERIFIED raw
+score.py output before trusting. Do NOT hand-edit baselines.json numbers;
+the canonical pipeline is the source of truth.
