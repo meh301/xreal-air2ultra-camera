@@ -184,7 +184,12 @@ class MainActivity : Activity() {
                     "thermalStatus=$thermal | " +
                     "search: ${slamPerf[0]}kf ${slamPerf[1]}cand " +
                     "${slamPerf[2]}us match ${slamPerf[3]}us lock | " +
-                    "pairDrops=${slamPerf[4]} depthDuty=${slamPerf[5] / 10.0}%")
+                    // depthMode alongside the duty: 0.0% alone is ambiguous
+                    // between "depth is switched off" and "depth is wedged",
+                    // and a walk log that can't tell them apart costs a whole
+                    // debugging round-trip.
+                    "pairDrops=${slamPerf[4]} depth=$depthMode " +
+                    "depthDuty=${slamPerf[5] / 10.0}%")
             }
 
             // accumulated landmark cloud for the 3D map view

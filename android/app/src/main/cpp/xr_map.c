@@ -4427,18 +4427,26 @@ static void process_keyframe(void) {
      * normal selection in place, so a sweep search costs shortlist + chunk
      * rather than the whole store. The cursor persists across searches, so
      * coverage is complete over ceil(map/chunk) sweeps. */
-    if (XR_SWEEP_CHUNK > 0 && sweep) {
+    if (XR_SWEEP_CHUNK > 0) {
         static int sweep_cur;                  /* map thread only */
-        int span = scan_hi - scan_lo;
+        /* Clear on EVERY search, not just sweeps: force_pick is static and the
+         * scan loop honours `forced` unconditionally, so a window left set here
+         * keeps force-including the same chunk on the 7 intervening searches.
+         * Measured on the SM8350 with that bug: `searched` pinned at 12+24=36
+         * every single search (a ~90 ms match+PnP floor) instead of the intended
+         * 12 normally / 36 once every 8. */
         memset(force_pick, 0, (size_t)lim);
-        if (span > 0) {
-            int take = span < XR_SWEEP_CHUNK ? span : XR_SWEEP_CHUNK;
-            if (sweep_cur >= span) sweep_cur = 0;
-            for (int c = 0; c < take; c++)
-                force_pick[scan_lo + (sweep_cur + c) % span] = 1;
-            sweep_cur = (sweep_cur + take) % span;
+        if (sweep) {
+            int span = scan_hi - scan_lo;
+            if (span > 0) {
+                int take = span < XR_SWEEP_CHUNK ? span : XR_SWEEP_CHUNK;
+                if (sweep_cur >= span) sweep_cur = 0;
+                for (int c = 0; c < take; c++)
+                    force_pick[scan_lo + (sweep_cur + c) % span] = 1;
+                sweep_cur = (sweep_cur + take) % span;
+            }
+            sweep = 0;                         /* handled; keep gate/VPR on */
         }
-        sweep = 0;                             /* handled; keep gate/VPR on */
     }
     use_vpr = work.has_emb && lim > VPR_MIN_KF && !(scan_hi - scan_lo == 1);
     /* XR_RELOCSWEEP: while RELOCALIZING, the shortlist is a liability —
