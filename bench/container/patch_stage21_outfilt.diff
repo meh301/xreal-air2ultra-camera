@@ -1,0 +1,81 @@
+--- src/vi_estimator/sqrt_keypoint_vio.cpp.bak_preoutfilt	2026-07-19 07:08:39.930009182 +0000
++++ /tmp/skv_pre_tripar.cpp	2026-07-19 07:43:00.212354962 +0000
+@@ -2032,6 +2032,78 @@
+       }
+     }
+ 
++
++    /* XREAL CHANGE (XR_OUTFILT): stock fixed-PIXEL-threshold reprojection
++     * outlier rejection after convergence, before marginalization. Audit
++     * high-severity #3: the hard filterOutliers() pass is NEVER called in the
++     * live VIO path (see TODO above); gross reprojection outliers (persistent
++     * mismatches, dynamic-object tracks such as a moving car or waving hand)
++     * are only soft-Huber down-weighted, never deleted, so many correlated
++     * bounded biases sum to trajectory drag. This is the PLAIN reprojection-
++     * pixel filter the code already provides -- NOT the chi2 variant above,
++     * which was tried separately and net-hurt. filterOutliers computes
++     * per-observation ||res|| in PIXELS via computeError and removes any obs
++     * with e > outlier_threshold, dropping the whole landmark if fewer than
++     * min_num_obs would remain (or if e == -2, i.e. behind camera).
++     * Threshold: stock vio_outlier_threshold = 3.0 px. NOTE: that config field
++     * is commented out in vio_config.{h,cpp}, so we use the stock 3.0 literal
++     * (overridable via XR_OUTFILT_PX). min_num_obs = 2 (the landmark DB
++     * minimum), so filtering never empties a landmark below the minimum.
++     * Guard: only when the estimate CONVERGED this frame (converged), so we
++     * never cull good tracks during a transient LM divergence. Runs before
++     * marginalize() (optimize_and_marg calls it after optimize() returns), so
++     * outlier information is never folded into the marg prior.
++     * Env: XR_OUTFILT (on/off, static-cached). OFF => bit-identical to stock. */
++    {
++      static int xr_outfilt = -1;
++      static Scalar xr_outfilt_px = Scalar(3.0);
++      if (xr_outfilt < 0) {
++        const char* e = getenv("XR_OUTFILT");
++        xr_outfilt = (e && *e && *e != '0') ? 1 : 0;
++        const char* ep = getenv("XR_OUTFILT_PX");
++        if (ep && *ep) {
++          double v = atof(ep);
++          if (v > 0) xr_outfilt_px = Scalar(v);
++        }
++      }
++      if (xr_outfilt && converged) {
++        const size_t lms_before = this->lmdb.numLandmarks();
++        const int obs_before = this->lmdb.numObservations();
++        this->filterOutliers(xr_outfilt_px, 2);
++        const size_t lms_after = this->lmdb.numLandmarks();
++        const int obs_after = this->lmdb.numObservations();
++        static bool xr_outfilt_active_announced = false;
++        static bool xr_outfilt_removal_announced = false;
++        static long xr_outfilt_cum_lms = 0;
++        static long xr_outfilt_cum_obs = 0;
++        static int xr_outfilt_verbose = -1;
++        if (xr_outfilt_verbose < 0) {
++          const char* ev = getenv("XR_OUTFILT_VERBOSE");
++          xr_outfilt_verbose = (ev && *ev && *ev != 0) ? 1 : 0;
++        }
++        xr_outfilt_cum_lms += (long)lms_before - (long)lms_after;
++        xr_outfilt_cum_obs += (long)obs_before - (long)obs_after;
++        if (!xr_outfilt_active_announced) {
++          xr_outfilt_active_announced = true;
++          std::cerr << "[xr] OUTFILT active: reprojection filterOutliers(thresh="
++                    << xr_outfilt_px << " px, min_num_obs=2); first converged frame removed landmarks "
++                    << lms_before << " -> " << lms_after << " ("
++                    << (long)lms_before - (long)lms_after << "), observations "
++                    << obs_before << " -> " << obs_after << " ("
++                    << (obs_before - obs_after) << ")" << std::endl;
++        }
++        if (!xr_outfilt_removal_announced && (lms_after != lms_before || obs_after != obs_before)) {
++          xr_outfilt_removal_announced = true;
++          std::cerr << "[xr] OUTFILT first NONZERO removal: landmarks -"
++                    << ((long)lms_before - (long)lms_after) << ", observations -"
++                    << (obs_before - obs_after) << " (thresh=" << xr_outfilt_px << " px)" << std::endl;
++        }
++        if (xr_outfilt_verbose) {
++          std::cerr << "[xr] OUTFILT cum: landmarks_removed=" << xr_outfilt_cum_lms
++                    << " observations_removed=" << xr_outfilt_cum_obs << std::endl;
++        }
++      }
++    }
+     stats_all_.merge_all(stats);
+     stats_sums_.merge_sums(stats);
+ 

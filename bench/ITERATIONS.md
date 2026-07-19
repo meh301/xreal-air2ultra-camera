@@ -2572,3 +2572,30 @@ NEXT THREAD (more promising, different layer): the vertical-drift diagnosis
 WITHOUT loop closure) points at (a) accel-bias random-walk tightening [VIO
 config, sweeping] and (b) XR_PGO4DOF gravity-locked closure [MAP, exists but
 unshipped — the fix for closure twisting a warped map]. A/Bs in flight.
+
+### x AUDIT-VERIFIED VIO FIXES: XR_TRIPAR + XR_OUTFILT SHIP (finally, 2 wins)
+The 62-finding assumptions audit -> benchmark verification of the 4 high-
+severity findings on a fast reduced set (magistrale1/2 + corridor2, --no-map
+VIO-only, non-lockstep n=3; lockstep was abandoned — too slow, only reached
+~15% of each trajectory). Independently re-scored. TWO ship:
+- XR_TRIPAR (stage 20, min-parallax triangulation gate, sqrt_keypoint_vio.cpp
+  ~533 after triangulate()): rejects low-parallax far-feature triangulations
+  (35% corridor2 / 76-80% magistrale). HORIZONTAL win: mag1 H -19%, mag2 H
+  -35%, robust across runs, ZERO regression; vertical unchanged (NOT the twist
+  fix, contra my prior). Ships for large-space scale accuracy.
+- XR_OUTFILT (stage 21, re-enable stock filterOutliers(3.0px,2) after
+  convergence before marg, ~2032): BIGGEST win. mag1 H -53% V -62%, mag2 H
+  -51%. Removes 3-5 gross-outlier obs/frame (dynamic objects), no divergence,
+  cuts variance. TOUCHES VERTICAL. Explains the earlier CHI2 failure: CHI2 was
+  the SAME filter at chi2-scaled 0.73px (over-rejects, +23% hurt); OUTFILT at
+  stock 3.0px (gross-only) is a big win. Same code, 4x threshold, opposite.
+DRIVE3 confirmation (VIO track, --no-map): OUTFILT H 125.7->50.7m (-60%, now
+BEATS OKVIS2's 62m horizontal) V 65.7->47.8m (-27%); INITGATE (#4) H -17% V
+-6% (helps on drive by denoising gravity init, though neutral on stationary
+TUM-VI); ASCALE 2% inject degrades V (+8%, confirms #1 scale unabsorbable).
+Residual drive V=47.8m still >> OKVIS2 2.5m -> the twist is only PARTLY these
+fixes; the IMU-scale/attitude estimator gap (#1) remains the dominant residual.
+Combined lib (TRIPAR+OUTFILT) built + distributed to all 3 containers. FULL-
+FLEET SWEEP running (base vs XR_TRIPAR=1 XR_OUTFILT=1, map ON, all groups,
+canonical bc recipe) to validate no held-out regression before default-on.
+Patches: patch_stage20_tripar.py, patch_stage21_outfilt.diff.
