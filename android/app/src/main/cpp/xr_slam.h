@@ -58,6 +58,14 @@ int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
                   int variant, const float gyro_bias[3],
                   const float accel_bias[3], const float noises[4]);
 
+/* Derive benchmark-pack calib fields (kb4 pinhole+dist, cam->IMU q_xyzw + p)
+ * for one eye WITHOUT starting the tracker — the data recorder writes calib.txt
+ * from the live factory blob while SLAM stays off. Uses the same fisheye624 ->
+ * kb4 refit as xr_slam_start, so a capture's calib matches what the VIO uses. */
+void xr_slam_derive_calib(const xr_eye_calib *c, int variant,
+                          float pinhole[4], float dist4[4],
+                          float q_xyzw[4], float p[3]);
+
 /* Raw calibration for dataset replay (benchmark harness): intrinsics passed
  * straight through (no fisheye624 refit, no device conventions), cam->IMU
  * extrinsics as an explicit xyzw quaternion + translation, and the dataset's

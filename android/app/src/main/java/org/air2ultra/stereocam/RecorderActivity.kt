@@ -3,7 +3,6 @@ package org.air2ultra.stereocam
 import android.app.Activity
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -15,35 +14,61 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.provider.MediaStore
-import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import org.json.JSONObject
+import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.Deflater
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
- * xreal_datarecorder — a STRIPPED-DOWN sibling of MainActivity for gathering IR
- * stereo-pair training data. It only opens the glasses' camera and shows/saves
- * the raw LEFT|RIGHT pair. It deliberately never calls nativeSetAlignment, so
- * Basalt/SLAM/depth never start (xr_slam_start is gated behind alignment) — no
- * tracking, minimal battery. One button toggles auto-snapshot every 2 s into
- * Pictures/xreal_datarecorder. Shares libxrealcam.so + XrealNative with the main
- * app but touches none of its code.
+ * xreal_datarecorder — a sibling of MainActivity that captures a device-specific
+ * VIO/SLAM dataset from the glasses. It opens the UVC stereo feed + the 1 kHz
+ * IMU (but deliberately never calls nativeSetAlignment, so Basalt/SLAM/depth
+ * never start — no tracking, minimal battery) and streams a benchmark-style
+ * "replay pack" to internal app storage.
+ *
+ * Capture format (a self-describing ZIP, laid out like a bench replay pack so a
+ * capture is a drop-in benchmark sequence — see bench/host/pack_common.py):
+ *
+ *   meta.txt     dataset seq W H fps imu_hz compressed n_frames  (key=value)
+ *   calib.txt    model kb4 + per-eye pinhole/dist/q_xyzw/p + IMU noises, the
+ *                EXACT bench field format (built natively from the factory blob
+ *                via the SAME fisheye624->kb4 refit the live VIO uses)
+ *   frames.csv   "ts_ns,idx" per stereo pair (header-less)
+ *   frames.raw   L8 gray pairs [left W*H][right W*H] per frames.csv line — the
+ *                exact bytes the VIO consumed (no lossy re-encode)
+ *   imu.bin      32-byte LE records: i64 ts_ns, f32 gyro_dps[3], f32 accel_g[3]
+ *   config.json  raw factory calibration blob (provenance / re-derivation)
+ *   README.txt   this format + the timestamp-sync note
+ *
+ * TIMESTAMP SYNC (the crux of a usable VIO dataset): frames.csv ts_ns and
+ * imu.bin ts_ns are in ONE clock. Each frame's ts is the camera exposure stamp
+ * unwrapped against the IMU's 64-bit ns clock (native frame_cb), and the IMU
+ * samples carry that same clock — so a host can integrate IMU between frames
+ * with no cross-clock guesswork. left = physical left camera (cam1).
+ *
+ * The only bench-pack file NOT written is gt.tum (6-DoF ground truth): a
+ * headset has no external mocap. Packs without it still replay; they just can't
+ * be ATE-scored. dataset is "xreal" (see README for using it with the strict
+ * bench tooling).
  */
 class RecorderActivity : Activity() {
 
@@ -51,10 +76,12 @@ class RecorderActivity : Activity() {
         private const val XREAL_VID = 0x3318
         private const val XREAL_PID = 0x0426
         private const val ACTION_USB_PERMISSION = "org.air2ultra.stereocam.RECORDER_USB_PERMISSION"
-        private const val SNAP_INTERVAL_MS = 2000L      // auto-snapshot cadence (1-5 s window)
         private const val FRAME_INTERVAL_MS = 33L       // ~30 fps preview poll
-        private const val ALBUM = "xreal_datarecorder"  // Pictures/<ALBUM>
-        // USB access to the composite (UVC+audio) device needs these granted on 10+
+        private const val CAPTURE_DIR = "captures"      // <externalFiles>/captures
+        private const val POLL_MS = 4L                  // writer drain cadence
+        private const val IMU_BATCH = 512               // samples per IMU drain
+        private const val ALIGN_VARIANT = 2             // XR_ALIGN_VARIANT_DEFAULT
+        // USB access to the composite (UVC+audio) device needs these on 10+.
         private val RUNTIME_PERMS = arrayOf(
             android.Manifest.permission.CAMERA,
             android.Manifest.permission.RECORD_AUDIO
@@ -68,15 +95,19 @@ class RecorderActivity : Activity() {
 
     private var connection: UsbDeviceConnection? = null
     private var streaming = false
-    private var recording = false
     private var bitmap: Bitmap? = null
-    private var lastSnapAt = 0L
-    private val snapCount = AtomicInteger(0)
 
-    private val frameBuffer =
+    // Recording state. `capturing` is read by the writer thread, so @Volatile.
+    @Volatile private var capturing = false
+    // Keeps an important status message (Saved / failed) on screen instead of
+    // letting the ~30 fps preview loop overwrite it immediately.
+    @Volatile private var statusHoldUntil = 0L
+
+    // Preview buffer (composed side-by-side RGBA, same as the main app).
+    private val previewBuffer =
         ByteBuffer.allocateDirect(1280 * 640 * 4).order(ByteOrder.nativeOrder())
     private val handler = Handler(Looper.getMainLooper())
-    private val saveExec = Executors.newSingleThreadExecutor()
+    private val recExec = Executors.newSingleThreadExecutor()
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -179,9 +210,10 @@ class RecorderActivity : Activity() {
         handler.post(pollFrame)
     }
 
+    /** Preview loop only — recording runs on its own thread off the native tap. */
     private val pollFrame = object : Runnable {
         override fun run() {
-            val packed = XrealNative.nativeGrabFrame(frameBuffer)
+            val packed = XrealNative.nativeGrabFrame(previewBuffer)
             if (packed != 0L) {
                 val w = (packed ushr 48).toInt()
                 val h = ((packed ushr 32) and 0xFFFF).toInt()
@@ -190,62 +222,330 @@ class RecorderActivity : Activity() {
                     bm = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                     bitmap = bm; imageView.setImageBitmap(bm)
                 }
-                frameBuffer.position(0)
-                bm.copyPixelsFromBuffer(frameBuffer)
+                previewBuffer.position(0)
+                bm.copyPixelsFromBuffer(previewBuffer)
                 imageView.invalidate()
-                val now = System.currentTimeMillis()
-                if (recording && now - lastSnapAt >= SNAP_INTERVAL_MS) {
-                    lastSnapAt = now
-                    val snap = bm.copy(Bitmap.Config.ARGB_8888, false)   // detach from the live buffer
-                    saveExec.execute { savePng(snap) }
-                }
-                status(if (recording) "● REC  ${w}x$h  saved ${snapCount.get()}"
-                       else "Streaming  ${w}x$h  — press START")
+                // The writer thread owns the status line while capturing, and a
+                // held message (Saved / failed) stays put until it expires.
+                if (!capturing && System.currentTimeMillis() > statusHoldUntil)
+                    status("Streaming  ${w}x$h  — press START")
             }
             if (streaming) handler.postDelayed(this, FRAME_INTERVAL_MS)
         }
     }
 
     private fun toggleRecord() {
-        recording = !recording
-        recButton.text = if (recording) "STOP" else "START"
-        if (recording) lastSnapAt = 0L          // snap immediately on start
-    }
-
-    private fun savePng(bm: Bitmap) {
-        val name = "xreal_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) +
-            "_%04d.png".format(snapCount.get())
-        try {
-            if (Build.VERSION.SDK_INT >= 29) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                    put(MediaStore.Images.Media.RELATIVE_PATH,
-                        Environment.DIRECTORY_PICTURES + "/" + ALBUM)
-                }
-                val uri = contentResolver.insert(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return
-                contentResolver.openOutputStream(uri)?.use {
-                    bm.compress(Bitmap.CompressFormat.PNG, 100, it)
-                }
-            } else {
-                val dir = File(Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_PICTURES), ALBUM).apply { mkdirs() }
-                FileOutputStream(File(dir, name)).use {
-                    bm.compress(Bitmap.CompressFormat.PNG, 100, it)
-                }
-            }
-            snapCount.incrementAndGet()
-        } catch (e: Exception) {
-            runOnUiThread { status("save failed: ${e.message}") }
-        } finally {
-            bm.recycle()
+        if (!capturing) {
+            capturing = true
+            recButton.text = "STOP"
+            XrealNative.nativeSetRecordTap(true)
+            recExec.execute { runCapture() }
+        } else {
+            // Stop producing; the writer flushes the ring, finalizes the zip,
+            // then re-enables the button from its own thread.
+            capturing = false
+            XrealNative.nativeSetRecordTap(false)
+            recButton.isEnabled = false
+            recButton.text = "finalizing…"
         }
     }
 
+    // ---- capture (writer thread) --------------------------------------------
+
+    /** Runs entirely on [recExec]: owns all zip I/O so no locking is needed. */
+    private fun runCapture() {
+        val dims = XrealNative.nativeRawDims()
+        val w = dims ushr 16
+        val h = dims and 0xFFFF
+        val pairBytes = 2 * w * h
+
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val seq = "xreal_$stamp"
+        val base = getExternalFilesDir(null) ?: filesDir   // no storage permission needed
+        val dir = File(base, CAPTURE_DIR).apply { mkdirs() }
+        val zipFile = File(dir, "$seq.zip")
+        val imuTmp = File(dir, "$seq.imu.tmp")
+        val csvTmp = File(dir, "$seq.csv.tmp")
+
+        // Reusable buffers (allocated once per capture).
+        val pairDirect = ByteBuffer.allocateDirect(pairBytes).order(ByteOrder.nativeOrder())
+        val pairHeap = ByteArray(pairBytes)
+        // imu.bin records are little-endian; native writes native-order bytes
+        // (LE on the device). LE order here also makes getLong() read ts_ns.
+        val imuDirect = ByteBuffer.allocateDirect(IMU_BATCH * 32).order(ByteOrder.LITTLE_ENDIAN)
+        val imuHeap = ByteArray(IMU_BATCH * 32)
+
+        var frameIdx = 0
+        var frameFirstTs = 0L
+        var frameLastTs = 0L
+        var imuCount = 0L
+        var imuFirstTs = 0L
+        var imuLastTs = 0L
+        var lastStatusMs = 0L
+
+        var zip: ZipOutputStream? = null
+        var imuOut: OutputStream? = null
+        var csvOut: OutputStream? = null
+        try {
+            // Grab the factory calibration up front (fetched over the IMU
+            // channel during nativeStart; ready by the time recording starts).
+            val configBytes: ByteArray? = XrealNative.nativeGetConfig()
+            val calibText: String? = configBytes?.let { buildCalibText(it) }
+
+            // NO_COMPRESSION: L8 camera noise barely deflates, and we want cheap
+            // CPU + a frames.raw that extracts byte-identical. The pack's own
+            // "compressed=0" flag still holds (frames.raw content is raw L8).
+            val z = ZipOutputStream(BufferedOutputStream(FileOutputStream(zipFile), 1 shl 20))
+            z.setLevel(Deflater.NO_COMPRESSION)
+            zip = z
+            val iout = BufferedOutputStream(FileOutputStream(imuTmp), 1 shl 16)
+            imuOut = iout
+            val cout = BufferedOutputStream(FileOutputStream(csvTmp), 1 shl 16)
+            csvOut = cout
+
+            // frames.raw is the one huge stream: open it as the first entry and
+            // write each pair into it live so a long capture never buffers in
+            // RAM. Small entries (csv/imu/calib/meta/…) are folded in at stop.
+            z.putNextEntry(ZipEntry("frames.raw"))
+
+            // Drain both streams until the user stops; then one final flush so
+            // the last frames still queued in the native ring are captured.
+            while (capturing) {
+                imuCount = drainImu(imuDirect, imuHeap, iout,
+                    imuCount, { imuFirstTs = it }, { imuLastTs = it })
+                frameIdx = drainFrames(pairDirect, pairHeap, pairBytes, z, cout, frameIdx,
+                    { if (frameFirstTs == 0L) frameFirstTs = it }, { frameLastTs = it })
+
+                val now = System.currentTimeMillis()
+                if (now - lastStatusMs >= 250) {
+                    lastStatusMs = now
+                    val mb = frameIdx.toLong() * pairBytes / (1L shl 20)
+                    status("● REC  ${w}x$h  pairs=$frameIdx  imu=$imuCount  ${mb}MB")
+                }
+                try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) {}
+            }
+            // Final flush of whatever is still queued after the tap was cut.
+            imuCount = drainImu(imuDirect, imuHeap, iout,
+                imuCount, { imuFirstTs = it }, { imuLastTs = it })
+            frameIdx = drainFrames(pairDirect, pairHeap, pairBytes, z, cout, frameIdx,
+                { if (frameFirstTs == 0L) frameFirstTs = it }, { frameLastTs = it })
+            z.closeEntry()   // frames.raw complete
+
+            iout.flush(); iout.close(); imuOut = null
+            cout.flush(); cout.close(); csvOut = null
+
+            // Remaining pack entries (order is irrelevant to pack readers).
+            copyFileEntry(z, "frames.csv", csvTmp)
+            copyFileEntry(z, "imu.bin", imuTmp)
+            if (calibText != null) writeTextEntry(z, "calib.txt", calibText)
+            if (configBytes != null) writeBytesEntry(z, "config.json", configBytes)
+
+            val fps = rateHz(frameIdx.toLong(), frameFirstTs, frameLastTs)
+            val imuHz = rateHz(imuCount, imuFirstTs, imuLastTs)
+            val drops = XrealNative.nativeRecordDrops()
+            writeTextEntry(z, "meta.txt", buildMeta(seq, w, h, fps, imuHz, frameIdx))
+            writeTextEntry(z, "README.txt",
+                buildReadme(seq, w, h, fps, imuHz, frameIdx, imuCount, drops,
+                    calibText != null))
+            z.close(); zip = null
+
+            imuTmp.delete(); csvTmp.delete()
+            val finalIdx = frameIdx
+            val finalImu = imuCount
+            handler.post {
+                statusHoldUntil = System.currentTimeMillis() + 8000
+                status("Saved $seq.zip  ($finalIdx pairs, $finalImu imu" +
+                    (if (drops > 0) ", $drops dropped" else "") + ")")
+                onCaptureFinished()
+            }
+        } catch (e: Exception) {
+            try { zip?.close() } catch (_: Exception) {}
+            try { imuOut?.close() } catch (_: Exception) {}
+            try { csvOut?.close() } catch (_: Exception) {}
+            imuTmp.delete(); csvTmp.delete()
+            handler.post {
+                statusHoldUntil = System.currentTimeMillis() + 8000
+                status("Capture failed: ${e.message}")
+                onCaptureFinished()
+            }
+        }
+    }
+
+    private fun onCaptureFinished() {
+        capturing = false
+        recButton.text = "START"
+        recButton.isEnabled = streaming
+    }
+
+    /** Drain queued raw stereo pairs into the open frames.raw entry. Returns
+     *  the next frame index. */
+    private inline fun drainFrames(
+        pairDirect: ByteBuffer, pairHeap: ByteArray, pairBytes: Int,
+        zip: ZipOutputStream, csvOut: OutputStream, startIdx: Int,
+        onFirstTs: (Long) -> Unit, onLastTs: (Long) -> Unit
+    ): Int {
+        var idx = startIdx
+        while (true) {
+            pairDirect.clear()
+            val ts = XrealNative.nativeGrabRawPair(pairDirect)
+            if (ts == 0L) break
+            pairDirect.position(0)
+            pairDirect.get(pairHeap, 0, pairBytes)
+            zip.write(pairHeap, 0, pairBytes)
+            csvOut.write("$ts,$idx\n".toByteArray(Charsets.US_ASCII))
+            onFirstTs(ts); onLastTs(ts)
+            idx++
+        }
+        return idx
+    }
+
+    /** Drain queued IMU samples (raw 32-byte records) into imu.bin. Returns the
+     *  new cumulative sample count. */
+    private inline fun drainImu(
+        imuDirect: ByteBuffer, imuHeap: ByteArray, imuOut: OutputStream,
+        startCount: Long, onFirstTs: (Long) -> Unit, onLastTs: (Long) -> Unit
+    ): Long {
+        var count = startCount
+        while (true) {
+            imuDirect.clear()
+            val k = XrealNative.nativeGrabImuBatch(imuDirect)
+            if (k <= 0) break
+            val bytes = k * 32
+            imuDirect.position(0)
+            imuDirect.get(imuHeap, 0, bytes)
+            imuOut.write(imuHeap, 0, bytes)
+            if (count == 0L) onFirstTs(imuDirect.getLong(0))
+            onLastTs(imuDirect.getLong((k - 1) * 32))
+            count += k
+            if (k < IMU_BATCH) break   // ring drained
+        }
+        return count
+    }
+
+    // ---- pack text builders --------------------------------------------------
+
+    /** Parse the factory calibration JSON (mirrors MainActivity.setupAlignment)
+     *  and hand it to native for exact bench-format calib.txt. */
+    private fun buildCalibText(raw: ByteArray): String? {
+        val params = try {
+            val cfg = JSONObject(String(raw))
+            val disp = cfg.getJSONObject("display")
+            val cams = cfg.getJSONObject("SLAM_camera")
+            val p = FloatArray(82)
+            var o = 0
+            for (eye in arrayOf("left", "right")) {
+                // left eye pairs with device_1 (= cam1, the physical left camera)
+                val cam = cams.getJSONObject(if (eye == "left") "device_1" else "device_2")
+                for (arr in arrayOf(disp.getJSONArray("k_${eye}_display"),
+                                    disp.getJSONArray("target_q_${eye}_display"),
+                                    cam.getJSONArray("imu_q_cam"),
+                                    cam.getJSONArray("fc"),
+                                    cam.getJSONArray("cc"),
+                                    cam.getJSONArray("kc"),
+                                    cam.getJSONArray("imu_p_cam"))) {
+                    for (i in 0 until arr.length()) p[o++] = arr.getDouble(i).toFloat()
+                }
+            }
+            if (o != 72) return null
+            try {
+                val imu = cfg.getJSONObject("IMU").getJSONObject("device_1")
+                for (arr in arrayOf(imu.getJSONArray("gyro_bias"),
+                                    imu.getJSONArray("accel_bias"),
+                                    imu.getJSONArray("imu_noises"))) {
+                    for (i in 0 until arr.length()) p[o++] = arr.getDouble(i).toFloat()
+                }
+                if (o != 82) o = 72
+            } catch (e: Exception) {
+                o = 72   // vision-only calib still valid; noises fall back to 0
+            }
+            p.copyOf(o)
+        } catch (e: Exception) {
+            return null
+        }
+        return XrealNative.nativeFormatCalib(params, ALIGN_VARIANT)
+    }
+
+    private fun buildMeta(seq: String, w: Int, h: Int, fps: Double, imuHz: Double,
+                          nFrames: Int): String =
+        "dataset=xreal\n" +
+        "seq=$seq\n" +
+        "W=$w\n" +
+        "H=$h\n" +
+        "fps=${round3(fps)}\n" +
+        "imu_hz=${round3(imuHz)}\n" +
+        "compressed=0\n" +
+        "n_frames=$nFrames\n"
+
+    private fun buildReadme(seq: String, w: Int, h: Int, fps: Double, imuHz: Double,
+                            nFrames: Int, nImu: Long, drops: Int, haveCalib: Boolean): String =
+        """xreal_datarecorder capture: $seq
+
+This is a benchmark-style replay pack (see bench/host/pack_common.py) captured
+from XREAL Air 2 Ultra glasses.
+
+  meta.txt     dataset/seq/W/H/fps/imu_hz/compressed/n_frames (key=value)
+  calib.txt    ${if (haveCalib) "model kb4, per-eye pinhole/dist/q_xyzw/p + IMU noises"
+                 else "ABSENT (factory calibration blob was not available)"}
+  frames.csv   header-less "ts_ns,idx", one line per stereo pair
+  frames.raw   L8 gray pairs [left ${w}x${h}][right ${w}x${h}] per frames.csv line
+  imu.bin      32-byte LE records: i64 ts_ns, f32 gyro_dps[3], f32 accel_g[3]
+  config.json  raw factory calibration blob (provenance / re-derivation)
+
+Geometry: W=$w H=$h, $nFrames pairs @ ${round3(fps)} fps, $nImu imu @ ${round3(imuHz)} Hz.
+${if (drops > 0) "WARNING: $drops stereo pairs were dropped (writer fell behind).\n" else ""}
+TIMESTAMPS: frames.csv ts_ns and imu.bin ts_ns share ONE clock (the glasses'
+64-bit IMU ns clock). Each frame ts is the camera exposure stamp unwrapped
+against that clock, so IMU can be integrated between frames with no cross-clock
+alignment. left = physical left camera (cam1); frames.raw and calib.txt agree.
+
+UNITS: gyro deg/s, accel g (= 9.80665 m/s^2) — identical to a pack's imu.bin.
+calib.txt: fisheye624 refit to Kannala-Brandt kb4 (the model the on-device VIO
+uses); q_xyzw/p are camera->IMU (p_imu = R(q)*p_cam + p); noises are SI
+[gyro_n, gyro_bias_rw, accel_n, accel_bias_rw].
+
+frames.raw are the conditioned L8 frames the VIO actually consumed (descrambled,
+FPN/vignette-corrected, contrast-stretched) — i.e. exactly what a replay feeds
+xr_slam_push_pair, matching the semantics of an EuRoC/TUM/MSD pack's frames.raw.
+
+BENCHMARK USE: this pack has no gt.tum (a headset has no external mocap), so it
+replays but is not ATE-scored. dataset=xreal is not in pack_common.DATASETS;
+either add "xreal" to that tuple (imu_hz/fps math is generic) or drop these
+files into an msd-typed pack dir. Everything else is already 1:1 with a pack.
+"""
+
+    private fun round3(v: Double): String =
+        if (v.isFinite()) String.format(Locale.US, "%.3f", v) else "0.000"
+
+    private fun rateHz(n: Long, firstTs: Long, lastTs: Long): Double =
+        if (n > 1 && lastTs > firstTs) (n - 1) * 1e9 / (lastTs - firstTs) else 0.0
+
+    private fun writeTextEntry(zip: ZipOutputStream, name: String, text: String) {
+        zip.putNextEntry(ZipEntry(name))
+        zip.write(text.toByteArray(Charsets.US_ASCII))
+        zip.closeEntry()
+    }
+
+    private fun writeBytesEntry(zip: ZipOutputStream, name: String, bytes: ByteArray) {
+        zip.putNextEntry(ZipEntry(name))
+        zip.write(bytes)
+        zip.closeEntry()
+    }
+
+    private fun copyFileEntry(zip: ZipOutputStream, name: String, src: File) {
+        zip.putNextEntry(ZipEntry(name))
+        FileInputStream(src).use { it.copyTo(zip, 1 shl 16) }
+        zip.closeEntry()
+    }
+
+    // ---- lifecycle -----------------------------------------------------------
+
     private fun stopStreaming(msg: String) {
         if (!streaming) return
-        streaming = false; recording = false
+        streaming = false
+        // Stop producing capture data before tearing down the native stream;
+        // the writer thread flushes the ring and finalizes the zip.
+        capturing = false
+        XrealNative.nativeSetRecordTap(false)
         handler.removeCallbacks(pollFrame)
         XrealNative.nativeStop()
         connection?.close(); connection = null
@@ -263,7 +563,7 @@ class RecorderActivity : Activity() {
         super.onDestroy()
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         stopStreaming("Stopped")
-        saveExec.shutdown()
+        recExec.shutdown()   // lets an in-flight finalize complete
     }
 
     private fun status(s: String) = runOnUiThread { statusText.text = s }

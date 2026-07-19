@@ -319,6 +319,33 @@ static void cam_calibration(const xr_eye_calib *c, int variant, uint32_t index,
     out->transform[15] = 1.0;
 }
 
+/* Derive benchmark-pack calibration fields for one eye WITHOUT creating a
+ * tracker (the data recorder builds calib.txt from the live factory blob while
+ * SLAM stays off). Numerically identical to cam_calibration(): pinhole is the
+ * factory fc/cc, dist4 is the kb4 refit of the fisheye624 radial polynomial,
+ * and (q_xyzw, p) is the camera->IMU transform for `variant`. The effective
+ * cam->IMU quaternion is just q_cam normalized, conjugated when the variant's
+ * bit 1 is set — that is EXACTLY the quaternion quat_to_rot_xyzw() turns into
+ * R_ic, so no rotation-matrix -> quaternion step is needed. */
+void xr_slam_derive_calib(const xr_eye_calib *c, int variant,
+                          float pinhole[4], float dist4[4],
+                          float q_xyzw[4], float p[3]) {
+    float kb[8];
+    fit_kb4(c, kb);
+    pinhole[0] = kb[0]; pinhole[1] = kb[1];
+    pinhole[2] = kb[2]; pinhole[3] = kb[3];
+    for (int i = 0; i < 4; i++) dist4[i] = kb[4 + i];
+
+    float x = c->q_cam[0], y = c->q_cam[1], z = c->q_cam[2], w = c->q_cam[3];
+    float n = sqrtf(x * x + y * y + z * z + w * w);
+    if (n < 1e-12f) n = 1.0f;
+    x /= n; y /= n; z /= n; w /= n;
+    if ((variant >> 1) & 1) { x = -x; y = -y; z = -z; }   /* conjugate */
+    q_xyzw[0] = x; q_xyzw[1] = y; q_xyzw[2] = z; q_xyzw[3] = w;
+
+    for (int i = 0; i < 3; i++) p[i] = c->p_cam[i];
+}
+
 int xr_slam_start(const xr_eye_calib *left, const xr_eye_calib *right,
                   int variant, const float gyro_bias[3],
                   const float accel_bias[3], const float noises[4]) {

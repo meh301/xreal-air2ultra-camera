@@ -61,6 +61,21 @@ object XrealNative {
      *  tries the Hexagon first; absent/rejected -> CPU model as before. */
     external fun nativeSetXfeatNpuModel(path: String)
 
+    /** Path of the staged VPR NPU model (EPContext-wrapped EigenPlaces HTP
+     *  context). Register BEFORE nativeSetVprModel so the first keyframe embed
+     *  already takes the Hexagon; absent/rejected -> the CPU EP as before. */
+    external fun nativeSetVprNpuModel(path: String)
+
+    /** Path of the staged VPR (place-recognition) model — per-keyframe
+     *  embeddings pre-rank loop/reloc candidates by appearance. Unset leaves
+     *  the map on its spatial-gate candidate scan. */
+    external fun nativeSetVprModel(path: String)
+
+    /** Path of the staged LighterGlue model — learned matching for loop/reloc
+     *  verification (XFeat descriptors only). Unset keeps the greedy
+     *  NN+margin matcher. */
+    external fun nativeSetLglueModel(path: String)
+
     /** Thermal feed for the depth-worker governor: battery temperature in
      *  deci-Celsius (the vendor never raises PowerManager thermal status, so
      *  battery temp is the working signal) plus that status for the record. */
@@ -188,6 +203,42 @@ object XrealNative {
      * ByteBuffer, native order), 32 bytes per sample: u64 ts_ns,
      * f32 gyro_dps[3], f32 accel_g[3]. Returns the number of samples
      * written; call every UI tick to keep up.
+     *
+     * This 32-byte record is byte-identical to a benchmark pack's imu.bin
+     * record, so the recorder streams these bytes straight to imu.bin.
      */
     external fun nativeGrabImuBatch(buf: ByteBuffer): Int
+
+    // ---- data recorder (RecorderActivity) --------------------------------
+
+    /**
+     * Enable/disable the raw stereo-pair capture tap. While on, the UVC
+     * thread copies each pair it feeds the VIO into a small ring for
+     * [nativeGrabRawPair]; while off it costs nothing. Enabling resets the
+     * ring and the drop counter.
+     */
+    external fun nativeSetRecordTap(on: Boolean)
+
+    /**
+     * Pop the oldest captured stereo pair into [buf] (direct ByteBuffer >=
+     * 2*W*H bytes): [left W*H][right W*H], L8 — the exact grayscale bytes the
+     * VIO consumed. Returns the pair's IMU-clock exposure timestamp in ns, or
+     * 0 when nothing new is queued. left = physical left camera (cam1).
+     */
+    external fun nativeGrabRawPair(buf: ByteBuffer): Long
+
+    /** (width shl 16) or height of the captured raw frames. */
+    external fun nativeRawDims(): Int
+
+    /** Cumulative capture pairs dropped because the writer fell behind. */
+    external fun nativeRecordDrops(): Int
+
+    /**
+     * Format a benchmark-pack calib.txt from the factory alignment floats
+     * (the same array [nativeSetAlignment] takes: 82, 72 or 66 long) using the
+     * given rotation-convention [variant]. Returns the exact-format text
+     * (model kb4 / {left,right}_pinhole|dist|q_xyzw|p / noises), or null if the
+     * array is too short. Does NOT start SLAM.
+     */
+    external fun nativeFormatCalib(alignParams: FloatArray, variant: Int): String?
 }

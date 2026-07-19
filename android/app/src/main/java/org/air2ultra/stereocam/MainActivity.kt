@@ -598,6 +598,32 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.e("xrealcam", "XFeat staging failed (BAD/TEBLID only): $e")
         }
+        // VPR place-recognition context (EigenPlaces-512, arch-matched EPContext).
+        // Registered on the NPU path first, then as the map's VPR model — that
+        // second call is what actually turns retrieval pre-ranking on. A missing
+        // asset (no v68 context shipped) throws out of stage() before either
+        // registration, leaving the map's spatial-gate candidate scan in charge.
+        try {
+            val asset = modelAsset("eigen_ctx.onnx", "eigen_v81_ctx.onnx")
+            val model = java.io.File(filesDir, asset)
+            stage(asset, model)
+            XrealNative.nativeSetVprNpuModel(model.absolutePath)
+            XrealNative.nativeSetVprModel(model.absolutePath)
+            android.util.Log.i("xrealcam", "VPR model staged: ${model.absolutePath}")
+        } catch (e: Exception) {
+            android.util.Log.i("xrealcam", "VPR model absent (spatial-gate retrieval): $e")
+        }
+        // LighterGlue verification matcher — only ever runs on the handful of
+        // retrieval candidates that reach PnP, and only for XFeat maps. Absent
+        // -> the greedy NN+margin correspondence path stays.
+        try {
+            val model = java.io.File(filesDir, "lighterglue.onnx")
+            stage("lighterglue.onnx", model)
+            XrealNative.nativeSetLglueModel(model.absolutePath)
+            android.util.Log.i("xrealcam", "LighterGlue model staged: ${model.absolutePath}")
+        } catch (e: Exception) {
+            android.util.Log.i("xrealcam", "LighterGlue model absent (NN matcher): $e")
+        }
         // Stage the LiteAnyStereo depth model (an EPContext-wrapped QNN HTP context
         // binary) if present; absent -> the depth worker stays on SGM. nativeSetZip
         // Model / S.zip_model just holds "the staged depth-model path" (reused for

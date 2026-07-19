@@ -57,6 +57,7 @@
 #define XFN_SCORE_SCALE 0.00390625f      /* offset 0 */
 #define XFN_REL_SCALE   0.003351456253f  /* offset -1 */
 #define XFN_SCORE_QTHR  13               /* 0.05 (official threshold) / scale */
+#define XFN_SCORE_THR   0.05f            /* same gate, float-IO contexts */
 #define XFN_BORDER      4                /* skip rectified frame edges */
 
 static struct {
@@ -78,19 +79,28 @@ static struct {
     float input[3 * IMG_PH * IMG_PW];
 
     /* last extract's dense descriptor map, for xr_xfeat_sample (map thread
-     * only). kind: 0 none, 1 float (CPU dense), 2 u8 (NPU dense). */
+     * only). kind: 0 none, 1 float (CPU dense, PADDED grid), 2 u8 (NPU
+     * dense), 3 float (NPU dense, float-IO context, plain grid). */
     int dense_kind;
     float dense_f[64 * PGRID_H * PGRID_W];
     uint8_t dense_u8[64 * GRID_H * GRID_W];
 
-    /* NPU path: dense EPContext (score/desc/reliability maps, u8 IO) */
+    /* NPU path: dense EPContext (score/desc/reliability maps). The graph IO
+     * encoding is DISCOVERED from the session, never assumed: the shipping
+     * A8W8 context is u8 in / u8 out, while a v81 native-fp16 context carries
+     * FLOAT16 IO (and a plain float export FLOAT) — see xfeat_npu_dtypes. */
     OrtSession *npu_session;
     OrtRunOptions *run_opts; /* per-run DSP clock vote (see LAS2) */
     char npu_in[64];
     char npu_out[3][64];     /* names by session index */
     int role[3];             /* session output index -> 0 score, 1 desc, 2 rel */
+    ONNXTensorElementDataType npu_in_dt;
+    ONNXTensorElementDataType npu_out_dt[3];  /* by session output index */
+    int npu_out_float;       /* outputs are FLOAT/FLOAT16 -> float tail */
+    __fp16 npu_in_half[IMG_H * IMG_W];        /* fp16-IO staging */
     char npu_path[256];
     atomic_int npu_ready;
+    atomic_int npu_vote;     /* run_opts carries the v81 burst power vote */
 
     atomic_int ready;        /* release-published once EITHER path is usable;
                               * acquire-loaded by availability/extraction (UI +
@@ -157,6 +167,18 @@ static int xfeat_is_qcom(void) {
            strstr(b, "pineapple") || strstr(b, "sm8") ? 1 : 0;
 }
 
+/* Hexagon v81 (SM8850 / 8 Elite Gen 5, board "canoe"). Its unsigned
+ * protection domain ACCEPTS HAP_Power votes; the v68 (SM8350) rejects them
+ * and a vote there fails the whole Run — so the clock vote below is selected
+ * per-SoC, never applied blind. */
+static int xfeat_is_v81(void) {
+    char soc[PROP_VALUE_MAX] = {0}, b[PROP_VALUE_MAX] = {0};
+    __system_property_get("ro.soc.model", soc);
+    __system_property_get("ro.board.platform", b);
+    lc(soc); lc(b);
+    return strstr(b, "canoe") || strstr(soc, "sm8850") ? 1 : 0;
+}
+
 /* Prepend our native-lib dir to the loader paths so QNN's HTP can reach the
  * Hexagon (libcdsprpc + DSP skel). ADSP_LIBRARY_PATH is SEMICOLON-delimited
  * (FastRPC convention). Mirrors las_fastrpc_env; both modules may run this —
@@ -178,6 +200,39 @@ static void xfeat_fastrpc_env(char *libdir, size_t ln) {
       snprintf(v, sizeof v, "%s%s%s", libdir,
                (e && e[0]) ? ";" : "", (e && e[0]) ? e : "");
       setenv("ADSP_LIBRARY_PATH", v, 1); }
+}
+
+/* Abandon a session the HTP accepted but whose contract we cannot honour
+ * (unexpected shapes or IO dtype): tear it down completely so init falls
+ * through to the CPU model instead of binding memory we misread. */
+static int xfeat_npu_reject(const char *why) {
+    LOGE("XFeat NPU: %s — CPU model", why);
+    if (X.run_opts) { X.api->ReleaseRunOptions(X.run_opts); X.run_opts = NULL; }
+    atomic_store_explicit(&X.npu_vote, 0, memory_order_release);
+    if (X.npu_session) { X.api->ReleaseSession(X.npu_session); X.npu_session = NULL; }
+    return 0;
+}
+
+/* Element type of session IO `idx`; leaves *dt untouched when the session
+ * cannot describe it (caller's default stands and the shape check rejects). */
+static void xfeat_io_dtype(int is_input, size_t idx, int64_t d[4],
+                           ONNXTensorElementDataType *dt) {
+    OrtTypeInfo *ti = NULL;
+    const OrtTensorTypeAndShapeInfo *tsi = NULL;
+    size_t nd = 0;
+    OrtStatus *st = is_input
+        ? X.api->SessionGetInputTypeInfo(X.npu_session, idx, &ti)
+        : X.api->SessionGetOutputTypeInfo(X.npu_session, idx, &ti);
+    if (!ort_ok(st, "npu TypeInfo") || !ti) return;
+    X.api->CastTypeInfoToTensorInfo(ti, &tsi);
+    if (tsi) {
+        if (d) {
+            X.api->GetDimensionsCount(tsi, &nd);
+            X.api->GetDimensions(tsi, d, nd < 4 ? nd : 4);
+        }
+        ort_ok(X.api->GetTensorElementType(tsi, dt), "npu element type");
+    }
+    X.api->ReleaseTypeInfo(ti);
 }
 
 static int xfeat_try_init_npu(void) {
@@ -225,15 +280,31 @@ static int xfeat_try_init_npu(void) {
         return 0;
     }
 
-    /* Per-run DSP clock vote: pin for the inference, release after (the map
-     * thread runs at keyframe rate — the DSP idles cold in between). */
+    /* Per-run DSP clock vote. v68: pin for the inference, release after (the
+     * map thread runs at keyframe rate — the DSP idles cold in between).
+     * v81: burst + a 100 us RPC latency budget, held across runs (no
+     * post_run release — the validated recipe; tearing the vote down between
+     * paced runs is what lets DCVS settle back to the slow sustained clock,
+     * worth 31.5 -> ~9 ms on a reference model). If this firmware refuses the
+     * vote anyway the first Run drops it and keeps going (see extract). */
+    const int v81 = xfeat_is_v81();
     if (ort_ok(X.api->CreateRunOptions(&X.run_opts), "CreateRunOptions")) {
-        ort_ok(X.api->AddRunConfigEntry(X.run_opts, "qnn.htp_perf_mode",
-                                        "sustained_high_performance"),
-               "RunCfg perf_mode");
-        ort_ok(X.api->AddRunConfigEntry(X.run_opts, "qnn.htp_perf_mode_post_run",
-                                        "default"),
-               "RunCfg perf_post");
+        if (v81) {
+            int voted =
+                ort_ok(X.api->AddRunConfigEntry(X.run_opts, "qnn.htp_perf_mode",
+                                                "burst"), "RunCfg perf_mode") &&
+                ort_ok(X.api->AddRunConfigEntry(X.run_opts,
+                                                "qnn.rpc_control_latency", "100"),
+                       "RunCfg rpc_latency");
+            atomic_store_explicit(&X.npu_vote, voted, memory_order_release);
+        } else {
+            ort_ok(X.api->AddRunConfigEntry(X.run_opts, "qnn.htp_perf_mode",
+                                            "sustained_high_performance"),
+                   "RunCfg perf_mode");
+            ort_ok(X.api->AddRunConfigEntry(X.run_opts, "qnn.htp_perf_mode_post_run",
+                                            "default"),
+                   "RunCfg perf_post");
+        }
     }
 
     /* Discover IO names and map the 3 outputs to roles BY SHAPE — never by
@@ -247,6 +318,21 @@ static int xfeat_try_init_npu(void) {
         return 0;
     strncpy(X.npu_in, name, sizeof X.npu_in - 1);
     alloc->Free(alloc, name);
+    /* Input encoding. UINT8 is the shipping A8W8 contract (input scale
+     * 0.998 ~= 1.0, so the raw gray frame IS the tensor); FLOAT/FLOAT16
+     * contexts take the same raw [0,255] gray level in the graph's float
+     * domain. A u16 context cannot be bound here: unlike LAS2, XFeat's
+     * contract carries no quantization scale to encode the input with, and
+     * guessing one silently poisons every descriptor. */
+    X.npu_in_dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+    xfeat_io_dtype(1, 0, NULL, &X.npu_in_dt);
+    if (X.npu_in_dt != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8 &&
+        X.npu_in_dt != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 &&
+        X.npu_in_dt != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        char why[64];
+        snprintf(why, sizeof why, "input dtype %d unsupported", (int)X.npu_in_dt);
+        return xfeat_npu_reject(why);
+    }
     int mapped = 0;
     for (int i = 0; i < 3; i++) {
         if (!ort_ok(X.api->SessionGetOutputName(X.npu_session, (size_t)i, alloc,
@@ -254,31 +340,47 @@ static int xfeat_try_init_npu(void) {
             return 0;
         strncpy(X.npu_out[i], name, sizeof X.npu_out[i] - 1);
         alloc->Free(alloc, name);
-        OrtTypeInfo *ti = NULL;
-        const OrtTensorTypeAndShapeInfo *tsi = NULL;
         int64_t d[4] = { 0 };
-        size_t nd = 0;
-        if (!ort_ok(X.api->SessionGetOutputTypeInfo(X.npu_session, (size_t)i,
-                                                    &ti), "npu OutputTypeInfo"))
-            return 0;
-        X.api->CastTypeInfoToTensorInfo(ti, &tsi);
-        if (tsi) {
-            X.api->GetDimensionsCount(tsi, &nd);
-            X.api->GetDimensions(tsi, d, nd < 4 ? nd : 4);
-        }
-        X.api->ReleaseTypeInfo(ti);
+        X.npu_out_dt[i] = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+        xfeat_io_dtype(0, (size_t)i, d, &X.npu_out_dt[i]);
         if (d[1] == 64)                   { X.role[i] = 1; mapped |= 2; }
         else if (d[2] == IMG_H)           { X.role[i] = 0; mapped |= 1; }
         else if (d[2] == GRID_H)          { X.role[i] = 2; mapped |= 4; }
     }
     if (mapped != 7) {
-        LOGE("XFeat NPU: unexpected output shapes (mask %d) — CPU model", mapped);
-        X.api->ReleaseSession(X.npu_session);
-        X.npu_session = NULL;
-        return 0;
+        char why[64];
+        snprintf(why, sizeof why, "unexpected output shapes (mask %d)", mapped);
+        return xfeat_npu_reject(why);
     }
+    /* The three dense maps must share one encoding family: all u8 (the A8W8
+     * tail, dequantized with XFN_*_SCALE) or all float (fp16/fp32 tail). A
+     * mixed set would need per-map scales the context does not hand us. */
+    int n_u8 = 0, n_f = 0;
+    for (int i = 0; i < 3; i++) {
+        if (X.npu_out_dt[i] == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) n_u8++;
+        else if (X.npu_out_dt[i] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+                 X.npu_out_dt[i] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) n_f++;
+    }
+    if (n_u8 != 3 && n_f != 3) {
+        char why[80];
+        snprintf(why, sizeof why, "mixed output dtypes %d/%d/%d",
+                 (int)X.npu_out_dt[0], (int)X.npu_out_dt[1],
+                 (int)X.npu_out_dt[2]);
+        return xfeat_npu_reject(why);
+    }
+    X.npu_out_float = n_f == 3;
+    /* Only the A8W8 tail exists: it reads the three maps as u8 planes, so a
+     * float-IO context would be misread rather than merely slower. XFeat has
+     * no fp16 build to feed one anyway — the v81 offline preparer cannot
+     * create q::InstanceNorm.SumAndSquares_Tile.tcm, which its norm layer
+     * needs — so refuse instead of publishing a session the tail cannot read. */
+    if (X.npu_out_float)
+        return xfeat_npu_reject("float-IO context has no dense tail");
     atomic_store_explicit(&X.npu_ready, 1, memory_order_release);
-    LOGI("XFeat NPU ready: %s (HTP dense A8W8, CPU tail)", X.npu_path);
+    LOGI("XFeat NPU ready: %s (HTP dense, in dtype %d, %s tail%s)", X.npu_path,
+         (int)X.npu_in_dt, X.npu_out_float ? "float" : "A8W8",
+         atomic_load_explicit(&X.npu_vote, memory_order_acquire)
+             ? ", v81 burst vote" : "");
     return 1;
 }
 
@@ -293,41 +395,12 @@ static int64_t xfn_us(void) {
     return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
-static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
+static void xfeat_sample_one(float x, float y, int8_t out[64]);
+
+/* A8W8 tail: the dense maps in the context's u8 encoding. */
+static int xfeat_npu_tail_u8(const uint8_t *score, const uint8_t *dns,
+                             const uint8_t *rel, float (*uv)[2],
                              int8_t (*desc)[64], int max) {
-    const int64_t t_all = xfn_us();
-    const int64_t shape[4] = { 1, 1, IMG_H, IMG_W };
-    OrtValue *in = NULL;
-    /* the raw gray frame is already the quantized u8 tensor (scale ~1.0) */
-    if (!ort_ok(X.api->CreateTensorWithDataAsOrtValue(
-                    X.meminfo, (void *)img, (size_t)(IMG_H * IMG_W), shape, 4,
-                    ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &in),
-                "npu CreateTensor"))
-        return -1;
-
-    const char *ins[1] = { X.npu_in };
-    const char *outs[3] = { X.npu_out[0], X.npu_out[1], X.npu_out[2] };
-    OrtValue *ov[3] = { NULL, NULL, NULL };
-    pthread_mutex_lock(&XR_NPU_GATE);         /* exclusive HTP (see header) */
-    const int64_t t_run = xfn_us();           /* gate wait vs run time split */
-    OrtStatus *st = X.api->Run(X.npu_session, X.run_opts, ins,
-                               (const OrtValue *const *)&in, 1, outs, 3, ov);
-    pthread_mutex_unlock(&XR_NPU_GATE);
-    const int64_t t_done = xfn_us();
-    X.api->ReleaseValue(in);
-    if (!ort_ok(st, "npu Run")) return -1;
-
-    const uint8_t *score = NULL, *dns = NULL, *rel = NULL;
-    for (int i = 0; i < 3; i++) {
-        void *p = NULL;
-        if (!ort_ok(X.api->GetTensorMutableData(ov[i], &p), "npu out data")) {
-            for (int k = 0; k < 3; k++) if (ov[k]) X.api->ReleaseValue(ov[k]);
-            return -1;
-        }
-        if (X.role[i] == 0) score = p;
-        else if (X.role[i] == 1) dns = p;
-        else rel = p;
-    }
     /* stash the dense map for xr_xfeat_sample (landmark anchoring) */
     memcpy(X.dense_u8, dns, sizeof X.dense_u8);
     X.dense_kind = 2;
@@ -441,6 +514,66 @@ static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
                                   : lroundf(q));
         }
     }
+
+    return hn;
+}
+
+/* Dense NPU inference: bind the frame in whatever encoding the context
+ * declares, run the HTP under the process-wide gate, hand the three dense
+ * maps to the tail. The gray frame doubles as the u8 quantized tensor
+ * (input scale ~1.0), so the A8W8 path binds it zero-copy. */
+static int xfeat_npu_extract(const uint8_t *img, float (*uv)[2],
+                             int8_t (*desc)[64], int max) {
+    const int64_t t_all = xfn_us();
+    const size_t px = (size_t)IMG_H * IMG_W;
+    const int64_t shape[4] = { 1, 1, IMG_H, IMG_W };
+    OrtValue *in = NULL;
+    int bound;
+    if (X.npu_in_dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+        for (size_t i = 0; i < px; i++) X.npu_in_half[i] = (__fp16)img[i];
+        bound = ort_ok(X.api->CreateTensorWithDataAsOrtValue(
+                           X.meminfo, X.npu_in_half, px * sizeof(__fp16),
+                           shape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, &in),
+                       "npu CreateTensor");
+    } else if (X.npu_in_dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        for (size_t i = 0; i < px; i++) X.input[i] = (float)img[i];
+        bound = ort_ok(X.api->CreateTensorWithDataAsOrtValue(
+                           X.meminfo, X.input, px * sizeof(float), shape, 4,
+                           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in),
+                       "npu CreateTensor");
+    } else {
+        bound = ort_ok(X.api->CreateTensorWithDataAsOrtValue(
+                           X.meminfo, (void *)img, px, shape, 4,
+                           ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &in),
+                       "npu CreateTensor");
+    }
+    if (!bound) return -1;
+
+    const char *ins[1] = { X.npu_in };
+    const char *outs[3] = { X.npu_out[0], X.npu_out[1], X.npu_out[2] };
+    OrtValue *ov[3] = { NULL, NULL, NULL };
+    pthread_mutex_lock(&XR_NPU_GATE);         /* exclusive HTP (see header) */
+    const int64_t t_run = xfn_us();           /* gate wait vs run time split */
+    OrtStatus *st = X.api->Run(X.npu_session, X.run_opts, ins,
+                               (const OrtValue *const *)&in, 1, outs, 3, ov);
+    pthread_mutex_unlock(&XR_NPU_GATE);
+    const int64_t t_done = xfn_us();
+    X.api->ReleaseValue(in);
+    if (!ort_ok(st, "npu Run")) return -1;
+
+    const uint8_t *score = NULL, *dns = NULL, *rel = NULL;
+    for (int i = 0; i < 3; i++) {
+        void *p = NULL;
+        if (!ort_ok(X.api->GetTensorMutableData(ov[i], &p), "npu out data")) {
+            for (int k = 0; k < 3; k++) if (ov[k]) X.api->ReleaseValue(ov[k]);
+            return -1;
+        }
+        if (X.role[i] == 0) score = p;
+        else if (X.role[i] == 1) dns = p;
+        else rel = p;
+    }
+
+    int hn = xfeat_npu_tail_u8(score, dns, rel, uv, desc, max);
 
     for (int i = 0; i < 3; i++)
         if (ov[i]) X.api->ReleaseValue(ov[i]);

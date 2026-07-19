@@ -15,6 +15,7 @@
 #include <arm_neon.h>
 #endif
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
@@ -28,11 +29,13 @@
 #include <libuvc/libuvc.h>
 
 #include "xr_depthcal.h"
+#include "xr_lighterglue.h"
 #include "xr_map.h"
 #include "xr_sgrid.h"
 #include "xr_slam.h"
 #include "xr_stereo.h"
 #include "xr_track.h"
+#include "xr_vpr.h"
 #include "xr_xfeat.h"
 #include "xr_zipdepth.h"
 #include "xr_liteanystereo.h"
@@ -85,6 +88,27 @@ static struct {
  * still on) — so an in-flight job started before a disable can't repaint the
  * depth output after it. */
 static atomic_uint DEPTH_GEN;
+
+/* ---- data-recorder raw tap -------------------------------------------------
+ * RecorderActivity streams a device SLAM dataset (stereo frames + IMU + calib)
+ * into a benchmark-style pack zip. To capture EXACTLY what the VIO pipeline
+ * consumes — no lossy re-encode — the UVC thread drops the very conditioned L8
+ * pair it hands to xr_slam_push_pair() into this small ring, and the Kotlin
+ * writer thread drains it via nativeGrabRawPair(). Gated by REC_ON so it costs
+ * nothing when not recording. FIFO with drop-oldest-when-full: a brief disk
+ * stall can't tear a frame or block the capture thread (dropped pairs are
+ * counted, and every kept pair keeps its own exposure timestamp so a gap is
+ * just a missing frames.csv index, never a desync). No static initializer
+ * (same .bss rule as S): the 2.4 MB ring zero-fills in .bss, lock set up in the
+ * s_init constructor. */
+#define REC_RING 4
+static atomic_int REC_ON;
+static struct {
+    pthread_mutex_t lock;
+    uint8_t buf[REC_RING][2][XR_OW * XR_OH];   /* [slot]{left=cam1,right=cam0} L8 */
+    uint64_t ts[REC_RING];                     /* IMU-clock exposure ns of the pair */
+    uint32_t head, tail, drops;
+} REC;
 
 /* 0 = IMU-only diagnostic (Basalt never started, pose = AHRS). The IMU
  * pose was signed off on-device with the ground-truth remap; Basalt now
@@ -244,6 +268,7 @@ __attribute__((constructor)) static void s_init(void) {
     pthread_cond_init(&S.slam_cond, NULL);
     pthread_mutex_init(&DEPTH_BOX.lock, NULL);
     pthread_cond_init(&DEPTH_BOX.cond, NULL);
+    pthread_mutex_init(&REC.lock, NULL);
     atomic_store(&S.align_variant, XR_ALIGN_VARIANT_DEFAULT);
     atomic_store(&S.stereo_mode, 1);
     atomic_store(&S.depth_on, 0);        /* off by default — clean SLAM baseline;
@@ -619,6 +644,20 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
          * IMU-replay window doesn't). Basalt copies synchronously; VIT wants
          * cam0=left first, then cam1, same timestamp. */
         xr_slam_push_pair(SLAM_FEED[1], SLAM_FEED[0], t_exp);
+
+        /* data recorder: stash the exact bytes just pushed to the VIO so a
+         * capture replays 1:1 (see REC). t_exp == 0 means the IMU clock isn't
+         * up yet — such a frame is useless for a VIO dataset, so skip it. */
+        if (atomic_load(&REC_ON) && t_exp) {
+            pthread_mutex_lock(&REC.lock);
+            if (REC.head - REC.tail >= REC_RING) { REC.tail++; REC.drops++; }
+            uint32_t slot = REC.head % REC_RING;
+            memcpy(REC.buf[slot][0], SLAM_FEED[1], XR_OW * XR_OH);   /* left  = cam1 */
+            memcpy(REC.buf[slot][1], SLAM_FEED[0], XR_OW * XR_OH);   /* right = cam0 */
+            REC.ts[slot] = t_exp;
+            REC.head++;
+            pthread_mutex_unlock(&REC.lock);
+        }
 
         /* hand the pair to the SLAM worker (it snapshots the buffers) */
         pthread_mutex_lock(&S.slam_lock);
@@ -2283,6 +2322,126 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetSwap(JNIEnv *env, jclass cls,
     atomic_store(&S.swap_eyes, swap ? 1 : 0);
 }
 
+/* ---- data recorder (RecorderActivity) ------------------------------------ */
+
+/* Enable/disable the raw-pair capture tap (see REC). On enable the ring is
+ * emptied and the drop counter cleared so each capture starts clean. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetRecordTap(JNIEnv *env, jclass cls,
+                                                            jboolean on) {
+    (void)env; (void)cls;
+    if (on) {
+        pthread_mutex_lock(&REC.lock);
+        REC.head = REC.tail = REC.drops = 0;
+        pthread_mutex_unlock(&REC.lock);
+    }
+    atomic_store(&REC_ON, on ? 1 : 0);
+}
+
+/* Pop the oldest captured stereo pair into `buf` (a direct ByteBuffer of at
+ * least 2*XR_OW*XR_OH bytes): [left XR_OW*XR_OH][right XR_OW*XR_OH], L8 — the
+ * exact pair pushed to the VIO. Returns the pair's IMU-clock exposure
+ * timestamp (ns), or 0 when the ring is empty (nothing new). */
+JNIEXPORT jlong JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeGrabRawPair(JNIEnv *env, jclass cls,
+                                                           jobject buf) {
+    (void)cls;
+    uint8_t *dst = (*env)->GetDirectBufferAddress(env, buf);
+    jlong cap = (*env)->GetDirectBufferCapacity(env, buf);
+    if (!dst || cap < 2 * XR_OW * XR_OH) return 0;
+    jlong ts = 0;
+    pthread_mutex_lock(&REC.lock);
+    if (REC.head != REC.tail) {
+        uint32_t slot = REC.tail % REC_RING;
+        memcpy(dst, REC.buf[slot][0], XR_OW * XR_OH);
+        memcpy(dst + XR_OW * XR_OH, REC.buf[slot][1], XR_OW * XR_OH);
+        ts = (jlong)REC.ts[slot];
+        REC.tail++;
+    }
+    pthread_mutex_unlock(&REC.lock);
+    return ts;
+}
+
+/* (width << 16) | height of the captured frames (= this build's XR_OW/XR_OH),
+ * so the recorder writes the pack meta/geometry without hardcoding. */
+JNIEXPORT jint JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeRawDims(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    return (XR_OW << 16) | XR_OH;
+}
+
+/* Cumulative pairs dropped because the capture thread fell behind (ring full).
+ * A nonzero value means the capture has gaps; recorded into the pack meta. */
+JNIEXPORT jint JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeRecordDrops(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&REC.lock);
+    jint d = (jint)REC.drops;
+    pthread_mutex_unlock(&REC.lock);
+    return d;
+}
+
+/* Build the benchmark-pack calib.txt text from the factory alignment floats
+ * (same layout MainActivity.setupAlignment / nativeSetAlignment consume: per
+ * eye K[9] q_disp[4] q_cam[4] fc[2] cc[2] kc[12] p_cam[3] = 36, then
+ * gyro_bias[3] accel_bias[3] imu_noises[4]). Returns the exact-format text
+ * (model kb4 / {left,right}_pinhole|dist|q_xyzw|p / noises) as a String, or
+ * NULL when passed too few floats. Formatted here — not in Kotlin — because
+ * (a) the kb4 refit of the fisheye624 model must be the SAME code the live VIO
+ * uses (xr_slam_derive_calib), so a capture's calib.txt matches what the
+ * device actually tracks with, and (b) C's %.12g matches the Python pack
+ * writer's field format exactly (Java's %g does not strip trailing zeros).
+ * Runs without starting SLAM, so the recorder stays a low-power camera app. */
+JNIEXPORT jstring JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeFormatCalib(JNIEnv *env, jclass cls,
+                                                           jfloatArray arr,
+                                                           jint variant) {
+    (void)cls;
+    jsize len = (*env)->GetArrayLength(env, arr);
+    if (len < 66) return NULL;
+    int stride = len >= 72 ? 36 : 33;
+    float f[82];
+    (*env)->GetFloatArrayRegion(env, arr, 0, len >= 82 ? 82 : stride * 2, f);
+
+    xr_eye_calib eye[2];
+    memset(eye, 0, sizeof eye);
+    for (int e = 0; e < 2; e++) {
+        const float *p = f + e * stride;
+        memcpy(eye[e].K, p, 9 * sizeof(float));
+        memcpy(eye[e].q_disp, p + 9, 4 * sizeof(float));
+        memcpy(eye[e].q_cam, p + 13, 4 * sizeof(float));
+        memcpy(eye[e].fc, p + 17, 2 * sizeof(float));
+        memcpy(eye[e].cc, p + 19, 2 * sizeof(float));
+        memcpy(eye[e].kc, p + 21, 12 * sizeof(float));
+        if (stride == 36) memcpy(eye[e].p_cam, p + 33, 3 * sizeof(float));
+    }
+    float noises[4] = { 0, 0, 0, 0 };
+    if (len >= 82) memcpy(noises, f + 78, 4 * sizeof(float));
+
+    char buf[2048];
+    int o = 0;
+    o += snprintf(buf + o, sizeof buf - o, "model kb4\n");
+    const char *side[2] = { "left", "right" };
+    for (int e = 0; e < 2; e++) {
+        float ph[4], d4[4], q[4], pp[3];
+        xr_slam_derive_calib(&eye[e], variant, ph, d4, q, pp);
+        o += snprintf(buf + o, sizeof buf - o,
+                      "%s_pinhole %.12g %.12g %.12g %.12g\n",
+                      side[e], ph[0], ph[1], ph[2], ph[3]);
+        o += snprintf(buf + o, sizeof buf - o,
+                      "%s_dist %.12g %.12g %.12g %.12g\n",
+                      side[e], d4[0], d4[1], d4[2], d4[3]);
+        o += snprintf(buf + o, sizeof buf - o,
+                      "%s_q_xyzw %.12g %.12g %.12g %.12g\n",
+                      side[e], q[0], q[1], q[2], q[3]);
+        o += snprintf(buf + o, sizeof buf - o, "%s_p %.12g %.12g %.12g\n",
+                      side[e], pp[0], pp[1], pp[2]);
+    }
+    o += snprintf(buf + o, sizeof buf - o, "noises %.12g %.12g %.12g %.12g\n",
+                  noises[0], noises[1], noises[2], noises[3]);
+    return (*env)->NewStringUTF(env, buf);
+}
+
 /* Reset the SLAM system: Basalt state (pose back to origin), the
  * accumulated landmark map, and the fallback tracker. */
 JNIEXPORT void JNICALL
@@ -2510,6 +2669,51 @@ Java_org_air2ultra_stereocam_XrealNative_nativeSetXfeatNpuModel(JNIEnv *env,
     const char *p = (*env)->GetStringUTFChars(env, path, NULL);
     if (p) {
         xr_xfeat_set_npu_model(p);
+        (*env)->ReleaseStringUTFChars(env, path, p);
+    }
+}
+
+/* Path of the staged VPR EPContext model (EigenPlaces HTP context, arch-matched
+ * by MainActivity). Register BEFORE nativeSetVprModel so the first embed on the
+ * map thread already sees the NPU path; without it the embed runs the CPU EP. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetVprNpuModel(JNIEnv *env,
+                                                              jclass cls,
+                                                              jstring path) {
+    (void)cls;
+    if (!path) return;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (p) {
+        xr_vpr_set_npu_model(p);
+        (*env)->ReleaseStringUTFChars(env, path, p);
+    }
+}
+
+/* Path of the staged VPR (place-recognition) model — turns on the map's
+ * appearance pre-ranking of loop/reloc candidates. Unset -> the map keeps its
+ * spatial-gate/brute-scan retrieval. The map thread does the lazy bring-up. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetVprModel(JNIEnv *env, jclass cls,
+                                                           jstring path) {
+    (void)cls;
+    if (!path) return;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (p) {
+        xr_map_set_vpr_model(p);
+        (*env)->ReleaseStringUTFChars(env, path, p);
+    }
+}
+
+/* Path of the staged LighterGlue model — loop/reloc verification switches from
+ * greedy NN+margin to learned matching. Unset -> the NN matcher stays. */
+JNIEXPORT void JNICALL
+Java_org_air2ultra_stereocam_XrealNative_nativeSetLglueModel(JNIEnv *env, jclass cls,
+                                                             jstring path) {
+    (void)cls;
+    if (!path) return;
+    const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+    if (p) {
+        xr_lglue_set_model(p);
         (*env)->ReleaseStringUTFChars(env, path, p);
     }
 }
