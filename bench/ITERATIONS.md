@@ -2538,3 +2538,37 @@ scored a meaningless 0.28cm. Rewrote to parse `ATE ([0-9.]+) m` + DIVERGED
 token + m->cm, with a collapse guard (est span < 0.25*gt span). VERIFIED raw
 score.py output before trusting. Do NOT hand-edit baselines.json numbers;
 the canonical pipeline is the source of truth.
+
+### x VIO-ESTIMATOR ARCHITECTURE PROGRAM — 5/5 TESTED, 0 SHIP ("do them all")
+All five env-gated Basalt VIO estimator changes A/B'd (pure-VIO track,
+n=5, canonical score.py) and independently re-scored. NONE ships:
+  FRONTEND (Agent A, .58):
+  - XR_EPIRANSAC (IMU-prior 2-pt RANSAC temporal epipolar gate): WASH.
+    Geometrically correct + validated (inlier ratios 0.84-1.0 after fixing
+    the residual to |d x Lhat|, not epipole-perp), but inert — net +1.5%,
+    no divergence. The recovery-distance + stereo-epipolar + robust-cost
+    stack already reject what it catches.
+  - XR_TRKGATE (activate the dead main-path residual gate): HARMFUL.
+    EuRoC +43..+102%, corridor2 5/5 diverge. The recall-path patch-norm
+    thresholds are wrong for the main forward+backward KLT path.
+  BACKEND (Agent B, .181):
+  - XR_CHI2 (chi2 reproj outlier reject before marg): +23% net. MH_05
+    -30% (real) but V2_03 +94%, corridor2 +42% D4 — doesn't generalize.
+  - XR_KFMARG (baseline-preserving/covisibility marginalization): +19% net
+    AND corridor3 5/5 DIVERGE. The marg-prior corruption from removing a
+    non-oldest keyframe (flagged in the pre-A/B correctness review)
+    MATERIALIZED — adversarial review predicted the exact failure.
+  - XR_EXPO (per-frame global gain/bias, Huber-IRLS): +131% net,
+    catastrophic (V1_03 +288%, corridors DIV). Per-frame brightness
+    estimate destabilizes tracking.
+CROSS-CUT: CHI2/KFMARG/EXPO all HELP MH_05 (the exposure ramp: -30/-18/-8%)
+but none nets positive. CONFIRMS the standing conclusion — Basalt VIO is at
+its floor for bolt-on estimator changes; obs_std=0.3 was the one real VIO
+lever, and the map layer + config are the differentiation. Diffs preserved:
+frontend at bench/container/patch_stage18_19_epiransac_trkgate.diff; backend
+on the .181 container tree (all flags default-off, bit-identical to stock).
+NEXT THREAD (more promising, different layer): the vertical-drift diagnosis
+(our VIO's altitude is 85% of drive error vs OKVIS2's 5%; OKVIS2 holds it
+WITHOUT loop closure) points at (a) accel-bias random-walk tightening [VIO
+config, sweeping] and (b) XR_PGO4DOF gravity-locked closure [MAP, exists but
+unshipped — the fix for closure twisting a warped map]. A/Bs in flight.
