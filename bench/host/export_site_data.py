@@ -302,17 +302,20 @@ def downsample_traj(results_dirs, out_dir, max_pts=1500, baseline_dirs=()):
     seen = set()
     jobs = []
     for d in results_dirs:
-        for f in sorted(Path(d).glob("*_r1_map.tum")):
-            m = re.match(r"(.+?)_{1,2}(fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)_r1_map",
-                         f.stem)
+        # Glob broadly and let the regex filter: multi-run historical dirs hold
+        # r1..r5 and only r1 is plotted, while final_lockstep is n=1 and carries
+        # no _r<N> at all. `(?:_r1)?` accepts both and still rejects r2..r5.
+        for f in sorted(Path(d).glob("*_map.tum")):
+            m = re.match(r"(.+?)_{1,2}(base|outfilt|fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)"
+                         r"(?:_r1)?_map$", f.stem)
             if m:
                 jobs.append((f, m.group(1).rstrip("_"),
                              ARM_ALIAS.get(m.group(2), m.group(2))))
         # VIO track: fzbase's vio IS the raw-VIO reference; fz18's vio shows
         # the factor stack's effect inside the estimator.
-        for f in sorted(Path(d).glob("*_r1_vio.tum")):
-            m = re.match(r"(.+?)_{1,2}(fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)_r1_vio",
-                         f.stem)
+        for f in sorted(Path(d).glob("*_vio.tum")):
+            m = re.match(r"(.+?)_{1,2}(base|outfilt|fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)"
+                         r"(?:_r1)?_vio$", f.stem)
             if m:
                 jobs.append((f, m.group(1).rstrip("_"),
                              ARM_ALIAS.get(m.group(2), m.group(2)) + "-vio"))
@@ -395,10 +398,16 @@ def main():
     # different round labels) and are relabeled at export; every other
     # historical arm lives in the ledger + result dirs, not the site.
     # Only stage-7-era result dirs may be passed to --results.
+    # final_lockstep (the base-vs-outfilt A/B) is n=1 per seq/arm, so its
+    # names carry NO _r<N> component: <seq>__base_map.tum. The run group is
+    # therefore optional — collect_runs already defaults it to 1. Alternation
+    # order is irrelevant here (no arm is a prefix of another at a position
+    # _{1,2} can reach: fzbase is only ever preceded by the same underscores
+    # that would have to introduce `base`, and `fzba` never matches `base`).
     ours_re = re.compile(
         r"(?P<seq>.+?)_{1,2}"
-        r"(?P<arm>fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)"
-        r"_r(?P<run>\d+)_(?P<track>vio|map)\.tum$")
+        r"(?P<arm>base|outfilt|fz19|fz18|fzbase|fz17d|s5off|g99fl|inj)"
+        r"(?:_r(?P<run>\d+))?_(?P<track>vio|map)\.tum$")
     base_re = re.compile(
         r"(?P<seq>.+)_(?P<sys>okvis2|orb3|openvins|dmvio|hybvio)_lc(?P<lc>[01])\.tum$")
 
