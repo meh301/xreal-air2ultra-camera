@@ -1450,18 +1450,27 @@ static void *depth_worker(void *arg) {
              * which are reprojected by the head pose at panel rate anyway, so
              * they do not need a new disparity map every camera frame — the
              * scene geometry simply does not change that fast.
-             * HOWEVER: depth drives real-time occlusion of virtual objects, so
-             * it is pinned to the CAMERA rate (30 fps => 33 ms) rather than
-             * subsampled — occlusion edges lag visibly if a virtual object
-             * moves against geometry that is a frame or two stale. This is a
-             * FLOOR, not a throttle: it stops depth free-running faster than
-             * the camera can feed it, and gives the governor a defined rate to
-             * recover to. XR_DEPTH_PERIOD_MS overrides (e.g. 66 for ~15 Hz if
-             * a session is thermally limited); 0 restores fully unpaced. */
+             *
+             * BUT DO NOT PACE IT BY DEFAULT. Depth drives real-time occlusion
+             * of virtual objects, and it is ALREADY rate-limited by the camera:
+             * one pair per frame at 30 fps. Unpaced means camera-rate, which is
+             * the requirement. Two traps, both learned the hard way by shipping
+             * a regression here:
+             *  1. period_ms is a GAP, not a period — last_pass_ms is stamped
+             *     AFTER the pass completes, so the real cycle is
+             *     (pass duration + period). A 33 ms "30 Hz" setting actually
+             *     yields ~21 Hz on v81 (14 ms pass) and ~18 Hz on v68 (23 ms).
+             *  2. Subsampling below camera rate is visibly worse, not just
+             *     cheaper: occlusion edges lag when a virtual object moves
+             *     against stale geometry, and dropped pairs show up as a
+             *     climbing pairDrops count.
+             * So the base is 0 = unpaced = camera-limited. XR_DEPTH_PERIOD_MS
+             * opts in to a gap for a thermally limited session; remember it is
+             * a gap when choosing a value. */
             static int base_ms = -1;
             if (base_ms < 0) {
                 const char *e = getenv("XR_DEPTH_PERIOD_MS");
-                base_ms = (e && *e) ? atoi(e) : 33;   /* 30 Hz = camera rate */
+                base_ms = (e && *e) ? atoi(e) : 0;    /* unpaced = camera rate */
                 if (base_ms < 0) base_ms = 0;
                 LOGI("depth: base period %d ms (%s)", base_ms,
                      base_ms ? "power-paced" : "unpaced");
@@ -1482,8 +1491,13 @@ static void *depth_worker(void *arg) {
                         LOGI("depth governor: cam %.1f fps < 56 -> period %d ms",
                              fps10 / 10.0, dyn_period);
                     } else if (fps10 >= 580 && dyn_period) {
-                        /* recover toward the base rate, never past it */
-                        dyn_period = dyn_period / 2 <= base_ms ? 0 : dyn_period / 2;
+                        /* Halve back toward the base rate, and snap to it once
+                         * within reach. The `< 200` arm preserves the original
+                         * unpaced-recovery behaviour exactly when base_ms is 0:
+                         * 400 -> 200 -> 100 -> unpaced, never stranding depth at
+                         * a 50 ms gap after a transient fps dip. */
+                        dyn_period = (dyn_period / 2 <= base_ms || dyn_period < 200)
+                                         ? 0 : dyn_period / 2;
                         last_adj = nowg;
                         LOGI("depth governor: cam %.1f fps ok -> period %d ms",
                              fps10 / 10.0, dyn_period ? dyn_period : base_ms);
