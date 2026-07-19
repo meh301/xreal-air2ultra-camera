@@ -557,13 +557,31 @@ class MainActivity : Activity() {
             }
             return true
         }
+        // NPU-context autoswitch (see memory las2-deployment): the HTP offline
+        // caches are Hexagon-arch specific. We ship two sets — v68 (SM8350/888,
+        // the perf floor) and v81 (SM8850 / 8 Elite Gen 5, e.g. Xperia 1 VIII).
+        // A v81 context won't finalize on a v68 skel and vice-versa, so pick the
+        // matched asset here; both DSP skels ride in jniLibs and the HTP loads
+        // whichever the staged binary targets. Detect canoe/SM8850; anything
+        // else takes the v68 set (runs on 888, drops cleanly to CPU elsewhere).
+        val isV81 = try {
+            val board = (android.os.Build.BOARD ?: "").lowercase()
+            val soc = if (android.os.Build.VERSION.SDK_INT >= 31)
+                (android.os.Build.SOC_MODEL ?: "").uppercase() else ""
+            board.contains("canoe") || soc.contains("SM8850")
+        } catch (e: Exception) { false }
+        fun modelAsset(v68: String, v81: String) = if (isV81) v81 else v68
+        android.util.Log.i("xrealcam",
+            "NPU context arch: ${if (isV81) "v81 (SM8850)" else "v68 (SM8350)"} " +
+            "[board=${android.os.Build.BOARD}]")
         // XFeat NPU dense model (EPContext A8W8 HTP context) FIRST — the path
         // must be registered before the preload thread spawned by
         // nativeSetXfeatModel races into xr_xfeat_init. Absent asset or a
         // non-QNN build simply leaves the CPU path in charge.
         try {
-            val ctx = java.io.File(filesDir, "xfeat_a8_ctx.onnx")
-            stage("xfeat_a8_ctx.onnx", ctx)
+            val asset = modelAsset("xfeat_a8_ctx.onnx", "xfeat_v81_ctx.onnx")
+            val ctx = java.io.File(filesDir, asset)
+            stage(asset, ctx)
             XrealNative.nativeSetXfeatNpuModel(ctx.absolutePath)
             android.util.Log.i("xrealcam", "XFeat NPU model staged: ${ctx.absolutePath}")
         } catch (e: Exception) {
@@ -585,8 +603,9 @@ class MainActivity : Activity() {
         // Model / S.zip_model just holds "the staged depth-model path" (reused for
         // LAS2, which replaced the ZipDepth stack — see memory las2-deployment).
         try {
-            val model = java.io.File(filesDir, "las2_s_ctx.onnx")
-            stage("las2_s_ctx.onnx", model)
+            val asset = modelAsset("las2_s_ctx.onnx", "las2_s_v81_ctx.onnx")
+            val model = java.io.File(filesDir, asset)
+            stage(asset, model)
             XrealNative.nativeSetZipModel(model.absolutePath)
             android.util.Log.i("xrealcam", "LiteAnyStereo model staged: ${model.absolutePath}")
         } catch (e: Exception) {
@@ -594,8 +613,9 @@ class MainActivity : Activity() {
         }
         // MID-tier (288x384) depth model for the Dep:NPU+ demo mode
         try {
-            val model = java.io.File(filesDir, "las2_mid_ctx.onnx")
-            stage("las2_mid_ctx.onnx", model)
+            val asset = modelAsset("las2_mid_ctx.onnx", "las2_mid_v81_ctx.onnx")
+            val model = java.io.File(filesDir, asset)
+            stage(asset, model)
             XrealNative.nativeSetZipModelMid(model.absolutePath)
             android.util.Log.i("xrealcam", "LiteAnyStereo MID model staged: ${model.absolutePath}")
         } catch (e: Exception) {
