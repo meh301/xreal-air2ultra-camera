@@ -86,6 +86,28 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — AFFINE PHOTOMETRIC (stage 15): the one VIO change with a real signal
+Regularized affine-photometric (XR_AFFINE, sigma_reg=sqrt(sigma^2+lambda^2))
+pure-VIO A/B, lambda sweep:
+- **V2_03 (flicker) 21.3 -> 8.2 (-62%)** — recovers the ZNCC win.
+- rooms PROTECTED (room1 13.1->12.6, room5 18.1->17.1) — the regularizer
+  fixed the low-texture harm that parked plain ZNCC. This is the key
+  improvement over ZNCC.
+- BUT MH_05 (ramp) +14% (slow GLOBAL gain; per-patch over-fits -> needs the
+  per-frame global-exposure variant, roadmap #promising) and slides +75%
+  (dark projector room, pathological low-contrast + local slide-flip
+  transients the regularizer can't fully tame).
+Best lambda ~600. NOT a clean always-on win (slides pathology) but far
+closer than ZNCC. Net-fleet A/B firing (a600 vs off, full VIO-only set) to
+decide shippability — if net-positive on a representative fleet, ships with
+the slides caveat (dark-projector rooms rare on a headset; LED flicker
+common). SUMMARY OF VIO ARCH PROGRAM: parallax NULL, recall MIXED, affine
+the best (V2_03 -62%, rooms protected) but slides-gated. Confirms Basalt VIO
+near floor; obs_std=0.3 remains the shipped VIO lever; affine is a candidate
+IF the net-fleet is positive.
+
+---
+
 ### 2026-07-19 — UNLIMITED-MAP DRIVES: the cap was NEVER the drive limiter
 User: run 4Seasons drives with unlimited keyframes to see "without mapping
 limitations". Built xr_unl_drive (cap 20000, dense KF_DIST_M=0.10m, 60m
