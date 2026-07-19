@@ -86,6 +86,36 @@ corridors at large drift.
 
 ## In flight
 
+### 2026-07-19 — VIO ARCH changes tested: parallax NULL, recall MIXED (honest)
+Empirically tested the two easiest high-tier VIO changes; NEITHER is a clean
+win — the Basalt VIO is nearer its floor than the roadmap's confidence:
+- **Parallax KF trigger (XR_KFPAR) = NULL** on corridors (corr2 51->49,
+  corr3 60->65, n=5 noise). Root cause: under forward motion the median
+  parallax stays LOW (focus-of-expansion points barely move), so a
+  median-parallax trigger rarely fires (kf 583->598, +2.5% only). AND
+  vio_max_kfs=7 means extra KFs just cycle the window faster, not extend
+  the baseline. The workflow's composition warning was right AND the
+  trigger itself mis-fires on the FoE geometry. Needs a translation-
+  distance or high-percentile trigger + larger/baseline-preserving window
+  to have any hope — but the corridor VIO drift is substantially the
+  fundamental forward-motion scale weakness (the MAP layer already fixes
+  corridors via closure: corr2/3 map-track 15-18cm vs 50cm pure-VIO).
+- **Feature recall = MIXED**: helps MH_05 -13% (re-acquires tracks lost in
+  the exposure event) but HURTS slides badly (slides2 +42% — re-acquires
+  bad low-texture patches), most others flat. Net not shippable; needs
+  scene-gating.
+TAKEAWAY: the real VIO lever was obs_std=0.3 (measured, ships); the
+architectural front-end tweaks give small/mixed effects because Basalt is
+well-tuned. Remaining targeted test: XR_AFFINE (stage 15) on the clear
+photometric events (V2_03 ZNCC showed -60%) — the one change with strong
+prior evidence.
+BASELINES: HybVIO added (5th system) — strong EuRoC/rooms (room1 7.4cm),
+drifts long loops (mag1 555cm) like DM-VIO; both confirm pure-VIO can't do
+the long corridors/magistrale = our map layer's value. DM-VIO MSD fleet
+running.
+
+---
+
 ### 🏗️ 2026-07-19 — VIO ARCHITECTURE PROGRAM (workflow roadmap + implementation started)
 Rigorous VIO-only (not map) architectural analysis (5-agent workflow, code
 + literature + benchmark). KEY REFRAME: the corridors (50cm pure-VIO, the
