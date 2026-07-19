@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-feature
         android:name="android.hardware.usb.host"
@@ -15,6 +16,18 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
+    <!-- xreal_datarecorder writes dataset ZIPs to shared storage
+         (/sdcard/XrealDatasets) rather than app-private storage, so a capture
+         is one `adb pull` away and survives uninstall. Scoped storage gives an
+         app no ordinary way to create a top-level public folder and stream
+         gigabyte files into it with a real path, so this asks for all-files
+         access; the user grants it once in Settings (see
+         RecorderActivity.ensureStorageAccess). Denied simply falls back to
+         app-private external storage, so capture never hard-fails.
+         This is a research/sideload tool, not a Play Store app. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -49,7 +62,7 @@
              gathering training data. Its own launcher icon + USB-attach handler
              (so it can be chosen on plug); shares libxrealcam.so with MainActivity
              but runs none of its SLAM/depth code (never calls nativeSetAlignment).
-             Saves to Pictures/xreal_datarecorder. -->
+             Saves dataset ZIPs to /sdcard/XrealDatasets. -->
         <activity
             android:name=".RecorderActivity"
             android:label="xreal_datarecorder"

@@ -12,16 +12,20 @@ import android.graphics.Color
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.File
@@ -43,7 +47,9 @@ import java.util.zip.ZipOutputStream
  * VIO/SLAM dataset from the glasses. It opens the UVC stereo feed + the 1 kHz
  * IMU (but deliberately never calls nativeSetAlignment, so Basalt/SLAM/depth
  * never start — no tracking, minimal battery) and streams a benchmark-style
- * "replay pack" to internal app storage.
+ * "replay pack" to SHARED device storage (/sdcard/XrealDatasets), so a capture
+ * is one `adb pull` away, browsable in the Files app, and survives uninstall.
+ * App-private storage is only the fallback when all-files access is declined.
  *
  * Capture format (a self-describing ZIP, laid out like a bench replay pack so a
  * capture is a drop-in benchmark sequence — see bench/host/pack_common.py):
@@ -56,6 +62,10 @@ import java.util.zip.ZipOutputStream
  *   frames.raw   L8 gray pairs [left W*H][right W*H] per frames.csv line — the
  *                exact bytes the VIO consumed (no lossy re-encode)
  *   imu.bin      32-byte LE records: i64 ts_ns, f32 gyro_dps[3], f32 accel_g[3]
+ *   intrinsics.json  the same calibration as structured JSON (per-eye fx/fy/
+ *                cx/cy, fisheye624 distortion, cam->IMU q/p, IMU biases +
+ *                noises, geometry and rates) — for tooling that shouldn't
+ *                have to parse bench text
  *   config.json  raw factory calibration blob (provenance / re-derivation)
  *   README.txt   this format + the timestamp-sync note
  *
@@ -77,7 +87,11 @@ class RecorderActivity : Activity() {
         private const val XREAL_PID = 0x0426
         private const val ACTION_USB_PERMISSION = "org.air2ultra.stereocam.RECORDER_USB_PERMISSION"
         private const val FRAME_INTERVAL_MS = 33L       // ~30 fps preview poll
-        private const val CAPTURE_DIR = "captures"      // <externalFiles>/captures
+        // Shared storage, NOT app-private: a dataset is meant to be pulled off
+        // the device (`adb pull /sdcard/XrealDatasets`), opened in the Files
+        // app, and to outlive an app uninstall/reinstall cycle.
+        private const val DATASET_DIR = "XrealDatasets" // /sdcard/XrealDatasets
+        private const val CAPTURE_DIR = "captures"      // app-private fallback
         private const val POLL_MS = 4L                  // writer drain cadence
         private const val IMU_BATCH = 512               // samples per IMU drain
         private const val ALIGN_VARIANT = 2             // XR_ALIGN_VARIANT_DEFAULT
@@ -102,6 +116,9 @@ class RecorderActivity : Activity() {
     // Keeps an important status message (Saved / failed) on screen instead of
     // letting the ~30 fps preview loop overwrite it immediately.
     @Volatile private var statusHoldUntil = 0L
+    // One all-files prompt per launch: re-prompting on every resume would trap
+    // a user who deliberately declined.
+    private var storageAsked = false
 
     // Preview buffer (composed side-by-side RGBA, same as the main app).
     private val previewBuffer =
@@ -128,6 +145,7 @@ class RecorderActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)  // long walks: don't sleep
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         buildUi()
+        ensureStorageAccess()   // before the first capture, not during one
         val filter = IntentFilter(ACTION_USB_PERMISSION).apply {
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         }
@@ -141,6 +159,52 @@ class RecorderActivity : Activity() {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         connect(intent)     // relaunched by USB_DEVICE_ATTACHED (singleTask)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Returning from the all-files Settings screen lands here; refresh the
+        // banner so the user can see whether the grant took.
+        if (!capturing && System.currentTimeMillis() > statusHoldUntil && !haveSharedStorage())
+            status("Storage access not granted — captures go to app-private storage")
+    }
+
+    // ---- shared storage ------------------------------------------------------
+
+    /** True when captures can be written to /sdcard/XrealDatasets. */
+    private fun haveSharedStorage(): Boolean =
+        Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
+
+    /**
+     * Ask once per launch for all-files access. Scoped storage offers no other
+     * way to own a top-level public folder AND stream multi-gigabyte captures
+     * into it by real path; MediaStore would work but hands back opaque content
+     * URIs, which is exactly the "hard to get the data out" problem this avoids.
+     */
+    private fun ensureStorageAccess() {
+        if (haveSharedStorage() || storageAsked) return
+        storageAsked = true
+        val tries = listOf(
+            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                   Uri.parse("package:$packageName")),
+            Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+        )
+        for (i in tries) {
+            try { startActivity(i); return } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Where this capture is written. Shared storage when granted, otherwise
+     * app-private external — a denied grant must never lose a walk, it just
+     * makes the ZIP less convenient to retrieve.
+     */
+    private fun captureDir(): File {
+        if (haveSharedStorage()) {
+            val pub = File(Environment.getExternalStorageDirectory(), DATASET_DIR)
+            if (pub.isDirectory || pub.mkdirs()) return pub
+        }
+        return File(getExternalFilesDir(null) ?: filesDir, CAPTURE_DIR).apply { mkdirs() }
     }
 
     private fun buildUi() {
@@ -261,11 +325,13 @@ class RecorderActivity : Activity() {
 
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val seq = "xreal_$stamp"
-        val base = getExternalFilesDir(null) ?: filesDir   // no storage permission needed
-        val dir = File(base, CAPTURE_DIR).apply { mkdirs() }
+        val dir = captureDir()
         val zipFile = File(dir, "$seq.zip")
-        val imuTmp = File(dir, "$seq.imu.tmp")
-        val csvTmp = File(dir, "$seq.csv.tmp")
+        // Scratch files stay in app cache: they are deleted on finalize and have
+        // no business appearing in the user's dataset folder mid-capture.
+        val tmpDir = cacheDir
+        val imuTmp = File(tmpDir, "$seq.imu.tmp")
+        val csvTmp = File(tmpDir, "$seq.csv.tmp")
 
         // Reusable buffers (allocated once per capture).
         val pairDirect = ByteBuffer.allocateDirect(pairBytes).order(ByteOrder.nativeOrder())
@@ -343,6 +409,12 @@ class RecorderActivity : Activity() {
             val fps = rateHz(frameIdx.toLong(), frameFirstTs, frameLastTs)
             val imuHz = rateHz(imuCount, imuFirstTs, imuLastTs)
             val drops = XrealNative.nativeRecordDrops()
+            // Machine-readable intrinsics: same numbers as calib.txt, but keyed
+            // and typed so a dataset consumer never has to parse bench text.
+            configBytes?.let { cb ->
+                buildIntrinsicsJson(cb, seq, w, h, fps, imuHz, frameIdx, imuCount)
+                    ?.let { writeTextEntry(z, "intrinsics.json", it) }
+            }
             writeTextEntry(z, "meta.txt", buildMeta(seq, w, h, fps, imuHz, frameIdx))
             writeTextEntry(z, "README.txt",
                 buildReadme(seq, w, h, fps, imuHz, frameIdx, imuCount, drops,
@@ -352,9 +424,10 @@ class RecorderActivity : Activity() {
             imuTmp.delete(); csvTmp.delete()
             val finalIdx = frameIdx
             val finalImu = imuCount
+            val where = if (haveSharedStorage()) "/sdcard/$DATASET_DIR" else "app storage"
             handler.post {
                 statusHoldUntil = System.currentTimeMillis() + 8000
-                status("Saved $seq.zip  ($finalIdx pairs, $finalImu imu" +
+                status("Saved $seq.zip -> $where  ($finalIdx pairs, $finalImu imu" +
                     (if (drops > 0) ", $drops dropped" else "") + ")")
                 onCaptureFinished()
             }
@@ -465,6 +538,75 @@ class RecorderActivity : Activity() {
         return XrealNative.nativeFormatCalib(params, ALIGN_VARIANT)
     }
 
+    /**
+     * intrinsics.json — the calibration as structured data.
+     *
+     * Read straight from the factory blob's own field names rather than from
+     * the flattened float array [buildCalibText] builds, so the values keep
+     * their provenance and no array-layout assumption can silently corrupt
+     * them. Distortion is the native fisheye624 (calib.txt carries the kb4
+     * refit the on-device VIO actually runs); both describe the same camera.
+     */
+    private fun buildIntrinsicsJson(raw: ByteArray, seq: String, w: Int, h: Int,
+                                    fps: Double, imuHz: Double, nFrames: Int,
+                                    nImu: Long): String? = try {
+        val cfg = JSONObject(String(raw))
+        val cams = cfg.getJSONObject("SLAM_camera")
+        val out = JSONObject()
+        out.put("dataset", "xreal")
+        out.put("seq", seq)
+        out.put("device", "XREAL Air 2 Ultra")
+        out.put("width", w)
+        out.put("height", h)
+        out.put("fps", fps)
+        out.put("n_frames", nFrames)
+        out.put("n_imu", nImu)
+        out.put("camera_model", "fisheye624")
+        out.put("extrinsics_convention", "p_imu = R(imu_q_cam) * p_cam + imu_p_cam")
+        out.put("quaternion_order", "xyzw")
+
+        val camsOut = JSONArray()
+        // left = device_1 = physical left camera = first half of each frames.raw
+        // pair; keep that mapping explicit, it is the one thing a consumer
+        // cannot recover from the data itself.
+        for ((name, dev) in listOf("left" to "device_1", "right" to "device_2")) {
+            val c = cams.getJSONObject(dev)
+            val fc = c.getJSONArray("fc")
+            val cc = c.getJSONArray("cc")
+            camsOut.put(JSONObject().apply {
+                put("name", name)
+                put("device", dev)
+                put("fx", fc.getDouble(0))
+                put("fy", fc.getDouble(1))
+                put("cx", cc.getDouble(0))
+                put("cy", cc.getDouble(1))
+                put("distortion", c.getJSONArray("kc"))
+                put("imu_q_cam", c.getJSONArray("imu_q_cam"))
+                put("imu_p_cam", c.getJSONArray("imu_p_cam"))
+            })
+        }
+        out.put("cameras", camsOut)
+
+        // IMU block is optional: some units ship a vision-only calibration.
+        try {
+            val imu = cfg.getJSONObject("IMU").getJSONObject("device_1")
+            out.put("imu", JSONObject().apply {
+                put("rate_hz", imuHz)
+                put("gyro_units", "deg/s")
+                put("accel_units", "g")
+                put("gyro_bias", imu.getJSONArray("gyro_bias"))
+                put("accel_bias", imu.getJSONArray("accel_bias"))
+                put("noises", imu.getJSONArray("imu_noises"))
+                put("noises_order", "[gyro_n, gyro_bias_rw, accel_n, accel_bias_rw] (SI)")
+            })
+        } catch (_: Exception) {
+            out.put("imu", JSONObject.NULL)
+        }
+        out.toString(2)
+    } catch (e: Exception) {
+        null
+    }
+
     private fun buildMeta(seq: String, w: Int, h: Int, fps: Double, imuHz: Double,
                           nFrames: Int): String =
         "dataset=xreal\n" +
@@ -489,6 +631,8 @@ from XREAL Air 2 Ultra glasses.
   frames.csv   header-less "ts_ns,idx", one line per stereo pair
   frames.raw   L8 gray pairs [left ${w}x${h}][right ${w}x${h}] per frames.csv line
   imu.bin      32-byte LE records: i64 ts_ns, f32 gyro_dps[3], f32 accel_g[3]
+  intrinsics.json  ${if (haveCalib) "per-eye fx/fy/cx/cy + fisheye624 distortion, cam->IMU q/p,\n               IMU biases/noises, geometry and measured rates"
+                     else "ABSENT (factory calibration blob was not available)"}
   config.json  raw factory calibration blob (provenance / re-derivation)
 
 Geometry: W=$w H=$h, $nFrames pairs @ ${round3(fps)} fps, $nImu imu @ ${round3(imuHz)} Hz.
@@ -501,7 +645,10 @@ alignment. left = physical left camera (cam1); frames.raw and calib.txt agree.
 UNITS: gyro deg/s, accel g (= 9.80665 m/s^2) — identical to a pack's imu.bin.
 calib.txt: fisheye624 refit to Kannala-Brandt kb4 (the model the on-device VIO
 uses); q_xyzw/p are camera->IMU (p_imu = R(q)*p_cam + p); noises are SI
-[gyro_n, gyro_bias_rw, accel_n, accel_bias_rw].
+[gyro_n, gyro_bias_rw, accel_n, accel_bias_rw]. intrinsics.json carries the
+SAME calibration but with the factory's native fisheye624 distortion and its
+original field names — use calib.txt to reproduce the on-device VIO, and
+intrinsics.json to build your own pipeline.
 
 frames.raw are the conditioned L8 frames the VIO actually consumed (descrambled,
 FPN/vignette-corrected, contrast-stretched) — i.e. exactly what a replay feeds
