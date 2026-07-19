@@ -49,7 +49,15 @@ LOCAL_SHARED_LIBRARIES := libusb1.0
 # vit_interface.h comes from the basalt clone (fetch_deps / build_basalt);
 # libbasalt.so itself is dlopen'd at runtime, never linked
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/third_party/basalt/thirdparty/vit
-LOCAL_CFLAGS := -O3 -std=c11 -Wall
+# Bound the map's periodic full-recall sweep on device. Unbounded (the
+# benchmark default, 0) descriptor-scores the entire store in one search:
+# measured 338 ms at 155 keyframes and 412 ms at 175 on the SM8350, which
+# stalls the map thread long enough to starve the camera pump and the VIO
+# thread. 24 holds a sweep search to roughly shortlist + 24 keyframes
+# (~50 ms on the 888, ~15 ms on the 8 Elite) while the rotating cursor
+# still covers the whole map. Replay/bench builds do not set this and keep
+# the unbounded behaviour, so published numbers are unaffected.
+LOCAL_CFLAGS := -O3 -std=c11 -Wall -DXR_SWEEP_CHUNK=24
 LOCAL_ARM_NEON := true      # armeabi-v7a; arm64 has NEON unconditionally
 LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv2 -ldl
 include $(BUILD_SHARED_LIBRARY)

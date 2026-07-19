@@ -159,6 +159,27 @@ enum { REC_HEALTHY = 0, REC_LOST = 1, REC_RECOVERED = 2 };
 #ifndef FULL_SWEEP_EVERY
 #define FULL_SWEEP_EVERY 8
 #endif
+/* XR_SWEEP_CHUNK: keyframes that periodic sweep may add to ONE search.
+ * 0 = unbounded, i.e. scan the whole store in a single search. That is the
+ * benchmark's behaviour and stays the default so replay numbers are
+ * unchanged; the Android build defines a bound instead.
+ *
+ * Unbounded is O(map) on the real-time map thread and does not fit in a
+ * frame. Measured on the SM8350 with XFeat descriptors: a 155-keyframe
+ * sweep cost 338 ms and a 175-keyframe one 412 ms (200x200 keypoints of
+ * 64-D float per pair, ~2.2 ms/kf). Binary BAD/TEBLID descriptors were
+ * ~40x cheaper per pair, which is why this never bit until XFeat became
+ * the boot descriptor — the sweep cadence did not change, its unit cost
+ * did. The stall starved the camera pump (pairDrops 8 -> 104) and the VIO
+ * thread (imu queue full, 6001 samples dropped), which is what killed
+ * depth on the 888.
+ *
+ * Recall is preserved rather than traded away: the window ROTATES, so
+ * every keyframe is still swept, just spread over ceil(map/chunk) sweeps
+ * instead of arriving as one stall. */
+#ifndef XR_SWEEP_CHUNK
+#define XR_SWEEP_CHUNK 0
+#endif
 /* displayed keyframe-derived cloud cap — a generous safety ceiling, not a
  * budget: the map is really bounded by the 200-keyframe rolling cap, and
  * drawing points is cheap (GL_POINTS, ~linear). This shows essentially the
@@ -4372,7 +4393,10 @@ static void process_keyframe(void) {
     float wsp[3] = { 0, 0, 0 };
     if (!relocalizing) {
         sweep = (++healthy_search_n % FULL_SWEEP_EVERY) == 0;
-        gate = !sweep;
+        /* bounded sweeps keep the gate (and the VPR shortlist) and merely
+         * force-include a rotating window; only the unbounded sweep has to
+         * drop the gate to reach the whole store */
+        gate = (XR_SWEEP_CHUNK > 0) ? 1 : !sweep;
         if (gate) {
             qrotv(snap_corr_q, work.p, wsp);
             wsp[0] += snap_corr_p[0]; wsp[1] += snap_corr_p[1];
@@ -4385,6 +4409,8 @@ static void process_keyframe(void) {
      * needs no trusted pose, which is exactly what LOST lacks — and full
      * recall is preserved because every keyframe is ranked, not windowed. */
     static uint8_t vpr_pick[XR_MAP_MAX_KF];    /* map thread only */
+    /* keyframes the sweep force-includes regardless of gate/shortlist */
+    static uint8_t force_pick[XR_MAP_MAX_KF]; /* map thread only */
     /* reactivation-lite: pin the scan to the fresh anchor — no retrieval,
      * no gate; one match+PnP against a known-good keyframe.
      * XR_REACT2 instead keeps the FULL scan and only force-includes the
@@ -4395,6 +4421,24 @@ static void process_keyframe(void) {
         scan_lo = REACT_A.kf;
         scan_hi = REACT_A.kf + 1;
         gate = 0;
+    }
+    /* Bounded sweep. Instead of dropping the gate/shortlist for one search
+     * (unbounded O(map)), force-include a rotating window and leave the
+     * normal selection in place, so a sweep search costs shortlist + chunk
+     * rather than the whole store. The cursor persists across searches, so
+     * coverage is complete over ceil(map/chunk) sweeps. */
+    if (XR_SWEEP_CHUNK > 0 && sweep) {
+        static int sweep_cur;                  /* map thread only */
+        int span = scan_hi - scan_lo;
+        memset(force_pick, 0, (size_t)lim);
+        if (span > 0) {
+            int take = span < XR_SWEEP_CHUNK ? span : XR_SWEEP_CHUNK;
+            if (sweep_cur >= span) sweep_cur = 0;
+            for (int c = 0; c < take; c++)
+                force_pick[scan_lo + (sweep_cur + c) % span] = 1;
+            sweep_cur = (sweep_cur + take) % span;
+        }
+        sweep = 0;                             /* handled; keep gate/VPR on */
     }
     use_vpr = work.has_emb && lim > VPR_MIN_KF && !(scan_hi - scan_lo == 1);
     /* XR_RELOCSWEEP: while RELOCALIZING, the shortlist is a liability —
@@ -4488,13 +4532,14 @@ static void process_keyframe(void) {
                 if (KFO[i2] == vs[v2]) { vpr_pick[i2] = 1; break; }
     }
     for (int i = scan_lo; i < scan_hi; i++) {
-        if (use_vpr && !vpr_pick[i]) continue;
+        const int forced = (XR_SWEEP_CHUNK > 0) && force_pick[i];
+        if (use_vpr && !vpr_pick[i] && !forced) continue;
         /* the spatial gate only means anything within OUR segment; other
          * segments' pc live in a different frame — leave them always
          * eligible, they are exactly the weld opportunities. (Only bites
          * while unwelded segments exist; the VPR shortlist supersedes the
          * gate anyway on the main arms.) */
-        if (gate && KFA(i).seg == snap_seg) {
+        if (gate && !forced && KFA(i).seg == snap_seg) {
             float gx = wsp[0] - KFA(i).pc[0], gy = wsp[1] - KFA(i).pc[1],
                   gz = wsp[2] - KFA(i).pc[2];
             if (gx * gx + gy * gy + gz * gz > SHORTLIST_R_M * SHORTLIST_R_M)
