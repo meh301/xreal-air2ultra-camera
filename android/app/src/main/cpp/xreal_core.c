@@ -85,9 +85,15 @@ int xr_descramble(const uint8_t *img, int cam, uint8_t *out) {
     return 0;
 }
 
-void xr_equalize(const uint8_t *in, uint8_t *out, int n) {
+/* hist_out (256 entries, optional) receives the intensity histogram this
+ * function has to build anyway. The frame path needs the same histogram of the
+ * same buffer a few lines later for its 2%/98% contrast stretch; handing this
+ * one over saves a second full-image pass per callback at 60 Hz, and makes
+ * those percentiles exact instead of 2x-subsampled. */
+void xr_equalize_h(const uint8_t *in, uint8_t *out, int n, int32_t *hist_out) {
     int32_t hist[256] = {0}, cdf[256];
     for (int i = 0; i < n; i++) hist[in[i]]++;
+    if (hist_out) memcpy(hist_out, hist, sizeof hist);
     int32_t acc = 0;
     for (int i = 0; i < 256; i++) { acc += hist[i]; cdf[i] = acc; }
     int32_t cdfmin = 0;
@@ -99,6 +105,10 @@ void xr_equalize(const uint8_t *in, uint8_t *out, int n) {
         lut[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
     }
     for (int i = 0; i < n; i++) out[i] = lut[in[i]];
+}
+
+void xr_equalize(const uint8_t *in, uint8_t *out, int n) {
+    xr_equalize_h(in, out, n, NULL);
 }
 
 /* ---- cleanup ---------------------------------------------------------------

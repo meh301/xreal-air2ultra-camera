@@ -28,6 +28,13 @@
  * call performs the lazy ORT bring-up on the calling (map) thread. */
 void xr_vpr_set_model(const char *onnx_path);
 
+/* Register the precompiled QNN EPContext model used on device (cheap; no
+ * I/O). Was defined in xr_vpr.c but never declared here, so its only caller
+ * (nativeSetVprNpuModel) went through an implicit declaration — it happened
+ * to work on arm64 but the compiler could not check the argument type, on
+ * the path that stages the EigenPlaces context. */
+void xr_vpr_set_npu_model(const char *epctx_path);
+
 /* 1 once a session is up (i.e., after the first successful embed). */
 int xr_vpr_ready(void);
 

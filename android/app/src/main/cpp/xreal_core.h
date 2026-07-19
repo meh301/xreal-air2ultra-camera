@@ -62,6 +62,10 @@ static inline uint32_t xr_exposure_ts(const uint8_t *flat) {
 int xr_descramble(const uint8_t *img, int cam, uint8_t *out);
 
 void xr_equalize(const uint8_t *in, uint8_t *out, int n);
+/* As xr_equalize, but also copies the 256-bin intensity histogram it builds
+ * into hist_out (may be NULL). Lets a caller that needs the same histogram
+ * skip a second full-image pass. */
+void xr_equalize_h(const uint8_t *in, uint8_t *out, int n, int32_t *hist_out);
 
 /* Online column-FPN + row-banding removal (one instance per camera).
  * NOT thread-safe: all cleaners share static scratch buffers, call them from

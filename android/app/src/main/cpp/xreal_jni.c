@@ -65,6 +65,16 @@ static atomic_int  BATT_DECIC = -1;  /* battery temp in 0.1 C from Kotlin (the
                                       * PowerManager thermal status stays 0 even
                                       * while throttling). -1 = unknown. Drives
                                       * the depth-worker thermal governor. */
+/* Bumped by nativeStart. The UVC callback thread and the libusb event thread
+ * are created by libuvc/libusb and DESTROYED on every nativeStop (libuvc
+ * pthread_creates a fresh cb_thread per stream and joins it on close), so a
+ * plain one-shot `static int prio_set` in those callbacks raises the priority
+ * of the FIRST session's threads only — every later session silently runs the
+ * capture thread at nice 0, below the GLES present thread at -2. Restart is
+ * not rare: MainActivity has a 4 s frame watchdog that reconnects, plus USB
+ * detach/reattach and activity recreate. Each callback caches the epoch it
+ * last raised at and re-raises when it changes. */
+static atomic_uint STREAM_EPOCH;
 static atomic_int  DEPTH_WANT = 1;   /* consumer-side gate for the DEPTH_BOX
                                       * producer: cleared by the depth worker
                                       * while thermally suspended so the SLAM
@@ -471,8 +481,15 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
      * the pair sequencing that feeds VIO, yet libuvc spawns it at nice 0 —
      * below every tiered worker's intent. Place it above SLAM/depth (10/15)
      * and just under the IMU thread (-10) so pair timing survives load. */
-    static int prio_set;                              /* uvc thread only */
-    if (!prio_set) { setpriority(PRIO_PROCESS, (id_t)gettid(), -4); prio_set = 1; }
+    static unsigned prio_epoch;                       /* uvc thread only */
+    unsigned ep = atomic_load(&STREAM_EPOCH);
+    if (prio_epoch != ep) {                           /* new stream, new TID */
+        if (setpriority(PRIO_PROCESS, (id_t)gettid(), -4) == 0)
+            LOGI("UVC capture thread priority raised (-4)");
+        else
+            LOGE("UVC capture thread priority raise FAILED — running at nice 0");
+        prio_epoch = ep;
+    }
     if (frame->data_bytes < XR_FRAME_BYTES) return;   /* startup runts */
     memcpy(S.frame, frame->data, XR_FRAME_BYTES);
 
@@ -504,7 +521,10 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
     /* clean without equalization for the trackers (per-frame global HE
      * flickers), then an equalized copy for humans */
     xr_clean(&S.cleaners[cam], dscr, S.clean_raw[cam], 0);
-    xr_equalize(S.clean_raw[cam], S.clean[cam], XR_OW * XR_OH);
+    /* keep the histogram: the contrast stretch below needs the histogram of
+     * this exact buffer, and used to build a second (2x-subsampled) one */
+    int32_t clean_hist[256];
+    xr_equalize_h(S.clean_raw[cam], S.clean[cam], XR_OW * XR_OH, clean_hist);
     /* Basalt feed conditioning, two flicker-free stages:
      *
      * 1. VIGNETTE COMPENSATION — the fisheye's radial falloff violates the
@@ -573,9 +593,12 @@ static void frame_cb(uvc_frame_t *frame, void *user) {
 
         static float lo_f[2], hi_f[2];
         static int have_stretch[2];
-        int32_t hist[256] = { 0 };
-        for (int i = 0; i < XR_OW * XR_OH; i += 2) hist[in[i]]++;
-        int32_t tail = (XR_OW * XR_OH / 2) / 50;      /* 2% each side */
+        /* xr_equalize_h already histogrammed this very buffer at the top of
+         * the callback; reuse it. Full-population now (it used to walk every
+         * 2nd pixel into its own array), so the tail is 2% of the whole image
+         * and the percentiles are exact rather than subsampled. */
+        const int32_t *hist = clean_hist;
+        int32_t tail = (XR_OW * XR_OH) / 50;          /* 2% each side */
         int32_t acc = 0;
         int lo = 0, hi = 255;
         for (int i = 0; i < 256; i++) { acc += hist[i]; if (acc >= tail) { lo = i; break; } }
@@ -1923,11 +1946,14 @@ static pthread_mutex_t IMU_RAW_MX = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t IMU_RAW_CV = PTHREAD_COND_INITIALIZER;
 
 static void imu_xfer_cb(struct libusb_transfer *t) {
-    static int prio_set;                             /* event thread only */
-    if (!prio_set) {
+    static unsigned prio_epoch;                      /* event thread only */
+    unsigned ep = atomic_load(&STREAM_EPOCH);
+    if (prio_epoch != ep) {                          /* new stream, new TID */
         if (setpriority(PRIO_PROCESS, (id_t)gettid(), -6) == 0)
             LOGI("USB event thread priority raised (-6)");
-        prio_set = 1;
+        else
+            LOGE("USB event thread priority raise FAILED — running at nice 0");
+        prio_epoch = ep;
     }
     if (!atomic_load(&S.imu_running)) return;        /* stopping: no resubmit */
     if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0) {
@@ -2270,6 +2296,8 @@ Java_org_air2ultra_stereocam_XrealNative_nativeStart(JNIEnv *env, jclass cls, ji
     S.have[0] = S.have[1] = 0;
     S.seq = S.grabbed = 0;
     S.fps_count = 0; S.fps_t0 = 0; S.fps_x10 = 0;
+    /* new stream => new callback/event TIDs; make them re-raise their nice */
+    atomic_fetch_add(&STREAM_EPOCH, 1);
     xr_cleaner_reset(&S.cleaners[0]);
     xr_cleaner_reset(&S.cleaners[1]);
 

@@ -2516,12 +2516,48 @@ static inline int hamming256(const int8_t *a, const int8_t *b) {
 #endif
 }
 
+/* THE inner loop of every keyframe match: 200x200 = 40k calls per pair, and a
+ * search matches a dozen-plus pairs. Three paths, fastest first:
+ *
+ *   1. ARMv8.2 SDOT, if the build ever defines __ARM_FEATURE_DOTPROD.
+ *      Android.mk deliberately does not: a -march=armv8.2-a+dotprod would
+ *      break the armeabi-v7a build and SIGILL on any pre-8.2 arm64 device.
+ *      Runtime dispatch via __attribute__((target("dotprod"))) was tried and
+ *      does NOT work on this toolchain -- NDK 21's clang only declares
+ *      vdotq_s32 when the feature macro is set for the whole translation
+ *      unit, so the attribute compiles to an implicit-declaration error.
+ *      Reaching SDOT from here needs inline asm; the widening path below is
+ *      most of the win without that risk.
+ *   2. Baseline NEON widening multiply -- what actually runs. No feature
+ *      flags at all, so v7a and every arm64 device gets it. vmull_s8 keeps
+ *      each product in its own int16 lane (|p| <= 127*127 = 16129, no
+ *      overflow), then vpadalq_s16 widens into int32 before anything can
+ *      accumulate past the limit.
+ *   3. Scalar, for non-NEON builds.
+ *
+ * Before this, path 1 was compiled out and paths 2/3 did not exist, so EVERY
+ * device ran the 64-iteration scalar loop below -- confirmed by disassembling
+ * the shipped .so: zero sdot, zero smull, not even unrolled, while hamming256
+ * 60 bytes above vectorised fine because it gates on __ARM_NEON instead. */
 static inline int dot64_i8(const int8_t *a, const int8_t *b) {
 #ifdef MAP_SDOT
     int32x4_t acc = vdupq_n_s32(0);
     for (int k = 0; k < 64; k += 16)
         acc = vdotq_s32(acc, vld1q_s8(a + k), vld1q_s8(b + k));
     return vaddvq_s32(acc);
+#elif defined(__ARM_NEON)
+    int32x4_t acc = vdupq_n_s32(0);
+    for (int k = 0; k < 64; k += 16) {
+        int8x16_t va = vld1q_s8(a + k), vb = vld1q_s8(b + k);
+        acc = vpadalq_s16(acc, vmull_s8(vget_low_s8(va), vget_low_s8(vb)));
+        acc = vpadalq_s16(acc, vmull_s8(vget_high_s8(va), vget_high_s8(vb)));
+    }
+#if defined(__aarch64__)
+    return vaddvq_s32(acc);
+#else
+    int32x2_t s2 = vadd_s32(vget_low_s32(acc), vget_high_s32(acc));
+    return vget_lane_s32(vpadd_s32(s2, s2), 0);
+#endif
 #else
     int s = 0;
     for (int k = 0; k < 64; k++) s += (int)a[k] * (int)b[k];
@@ -5562,25 +5598,67 @@ static void process_keyframe(void) {
                  * most redundant, ties to least-recently-useful. A corridor
                  * walked once in each direction keeps BOTH headings alive —
                  * the reloc bestm~0 coverage mode's storage-side half. */
-                static int cx[XR_MAP_MAX_KF], cy[XR_MAP_MAX_KF],
-                           cz[XR_MAP_MAX_KF], yb[XR_MAP_MAX_KF];
+                /* Redundancy = how many keyframes share (seg, spatial cell,
+                 * yaw quadrant). The nested loop this replaces was O(KF_N^2):
+                 * at the 3333 cap that is 11.1M iterations, each striding
+                 * KFA(j).seg out of a different 53 KB struct, on the map
+                 * thread, under MAP_LOCK, on EVERY store once the map is
+                 * full. Bucket by key instead — two linear passes, one hash
+                 * probe each.
+                 *
+                 * Keys are 64-bit hashes compared directly rather than the
+                 * unpacked tuple. A collision would merge two distinct cells
+                 * and evict a slightly different keyframe; at 3333 entries
+                 * that is a ~1e-13 event and cannot corrupt the map, only the
+                 * choice of victim. */
+                static uint64_t ckey[XR_MAP_MAX_KF];
+                static int cseg[XR_MAP_MAX_KF];
+#define COVK_TSZ 8192                 /* power of two, > 2 * XR_MAP_MAX_KF */
+                _Static_assert(XR_MAP_MAX_KF * 2 <= COVK_TSZ,
+                               "COVK_TSZ must stay above 2 * XR_MAP_MAX_KF");
+                static uint64_t tkey[COVK_TSZ];
+                static int tcnt[COVK_TSZ];
+                /* BOTH must be cleared every call. These are static, and an
+                 * empty bucket is identified by tkey == 0; leaving stale keys
+                 * behind would let the table saturate over successive stores
+                 * until the open-addressing probe never finds a free slot and
+                 * spins forever. 96 KB of memset at 2.86 Hz is nothing next to
+                 * the 11.1M iterations this replaces. */
+                memset(tkey, 0, sizeof tkey);
+                memset(tcnt, 0, sizeof tcnt);
+
                 for (int i = 0; i < KF_N; i++) {
-                    cx[i] = (int)floorf(KFA(i).pc[0] / COVK_CELL_M);
-                    cy[i] = (int)floorf(KFA(i).pc[1] / COVK_CELL_M);
-                    cz[i] = (int)floorf(KFA(i).pc[2] / (2.f * COVK_CELL_M));
+                    int cx = (int)floorf(KFA(i).pc[0] / COVK_CELL_M);
+                    int cy = (int)floorf(KFA(i).pc[1] / COVK_CELL_M);
+                    int cz = (int)floorf(KFA(i).pc[2] / (2.f * COVK_CELL_M));
                     float fwd[3], zax[3] = { 0, 0, 1 };
                     qrotv(KFA(i).qc, zax, fwd);
                     float yaw = atan2f(fwd[1], fwd[0]);
-                    yb[i] = ((int)floorf((yaw + 3.14159265f) /
-                                         1.5707963f)) & 3;
+                    int yb = ((int)floorf((yaw + 3.14159265f) /
+                                          1.5707963f)) & 3;
+                    cseg[i] = KFA(i).seg;      /* hoisted out of the count */
+                    uint64_t k = (uint64_t)(uint32_t)cx * 0x9E3779B185EBCA87ull;
+                    k ^= (uint64_t)(uint32_t)cy * 0xC2B2AE3D27D4EB4Full;
+                    k ^= (uint64_t)(uint32_t)cz * 0x165667B19E3779F9ull;
+                    k ^= (uint64_t)(uint32_t)(yb | (cseg[i] << 2)) *
+                         0x27D4EB2F165667C5ull;
+                    k |= 1ull;                 /* 0 marks an empty bucket */
+                    ckey[i] = k;
+                    for (uint32_t h = (uint32_t)(k >> 40) & (COVK_TSZ - 1);;
+                         h = (h + 1) & (COVK_TSZ - 1)) {
+                        if (tkey[h] == 0) { tkey[h] = k; tcnt[h] = 1; break; }
+                        if (tkey[h] == k) { tcnt[h]++; break; }
+                    }
                 }
                 int best_red = -1;
                 for (int i = 0; i < KF_N; i++) {
+                    uint64_t k = ckey[i];
                     int red = 0;
-                    for (int j = 0; j < KF_N; j++)
-                        if (KFA(j).seg == KFA(i).seg && cx[j] == cx[i] &&
-                            cy[j] == cy[i] && cz[j] == cz[i] && yb[j] == yb[i])
-                            red++;
+                    for (uint32_t h = (uint32_t)(k >> 40) & (COVK_TSZ - 1);;
+                         h = (h + 1) & (COVK_TSZ - 1)) {
+                        if (tkey[h] == k) { red = tcnt[h]; break; }
+                        if (tkey[h] == 0) break;      /* cannot happen */
+                    }
                     if (red > best_red ||
                         (red == best_red &&
                          KFA(i).last_used < KFA(vpos).last_used)) {
