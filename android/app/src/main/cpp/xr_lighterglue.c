@@ -468,10 +468,35 @@ int xr_lglue_match(const float (*uv0)[2], const int8_t (*d0)[64], int n0,
         const double ms = (t1.tv_sec - t0.tv_sec) * 1e3 +
                           (t1.tv_nsec - t0.tv_nsec) / 1e6;
         static int lgn;
+        static double lgsum;
         if (lgn < 4 || (lgn & 15) == 0)
             LOGI("LGLUE match #%d: %.1f ms (%d x %d kpts -> %d matches, CPU fp32)",
                  lgn, ms, n0, n1, nm);
         lgn++;
+        /* AFFORDABILITY GATE. This blocks the map thread, which is duty-capped
+         * near 25% and also owes it XFeat, VPR and PnP. Measured per call:
+         * 10.5 ms on the v81 HTP, 17.9 ms on the v81 CPU, but 91.3 ms on an
+         * SM8350 CPU — where there is no HTP path at all, since the attention
+         * MatMul needs dsp_arch >= v73. At 91 ms the matcher starves the map
+         * (the bench host saw keyframe storage collapse 225 -> 40 at only
+         * 30-80 ms), so an accelerator-less SoC must not pay it.
+         * Rather than hardcode a SoC list, measure: average the first few real
+         * calls and retire the matcher if it cannot fit the budget. Retiring
+         * clears xr_lglue_wanted(), so xr_map falls back to greedy NN+margin
+         * for the rest of the session — the behaviour before LighterGlue
+         * existed. XR_LGLUE_MAX_MS overrides; 0 disables the gate. */
+        if (lgn <= 4) lgsum += ms;
+        if (lgn == 4) {
+            const char *bs = getenv("XR_LGLUE_MAX_MS");
+            const double budget = bs && *bs ? atof(bs) : 40.0;
+            const double avg = lgsum / 4.0;
+            if (budget > 0.0 && avg > budget) {
+                G.failed = 1;              /* xr_lglue_wanted() -> 0 */
+                LOGI("LGLUE retired: %.1f ms/call on the CPU exceeds the %.0f ms "
+                     "budget (no HTP path on this SoC) — greedy NN+margin from here",
+                     avg, budget);
+            }
+        }
     }
     return nm;
 }
