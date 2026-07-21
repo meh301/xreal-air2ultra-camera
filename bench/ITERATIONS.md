@@ -2733,3 +2733,63 @@ The protocol DISCRIMINATES: all three collapse together from 0.97 (MH_02) to
 0.03 (MH_04) as the appearance gap widens, which is the behaviour a reloc
 benchmark should have and the same-session one does not.
 Site: new Cross-session tab, data/reloc_xsession.json.
+
+### x MAPLAB RUNS — all three third-party systems now measured (2026-07-21)
+maplab is the third system on the reloc axis. Built in an Ubuntu 20.04/ROS
+Noetic chroot on .181 (24.04 cannot host ROS1); pipeline per sequence is
+ASL -> rosbag -> ROVIOLI VI-map -> optvi/lc/optvi -> localization summary map.
+Probe wrapper = new catkin package summary_map_localizer calling
+LoopDetectorNode::findNFrameInSummaryMapDatabase.
+
+WRAPPER FACTS THAT ARE LOAD-BEARING (each alternative = silent zero or a crash):
+- extractor_settings.rotation_invariant = TRUE. Library default is FALSE but
+  ROVIOLI sets --rovioli_descriptor_rotation_invariance (default TRUE), so the
+  summary map holds ROTATION-INVARIANT BRISK. Default-constructed extractor =
+  descriptors that match nothing, no error at any log level.
+- The NFrame must hold the SAME NCamera OBJECT (raw-pointer identity) the
+  tracking pipeline was built with; initializeFirstNFrame CHECK-fails otherwise.
+- Build frames with NullVisualPipeline, not createEmptyTestVisualNFrame (the
+  latter pre-swaps a zero-length 48-row descriptor block; a two-block frame
+  CHECK-fails in the query path).
+- skip_untracked_keypoints = FALSE (true needs a TRACK_IDS channel).
+- Declare T_G_I and the inlier list INSIDE the probe loop: the zero-match early
+  return clears neither, so reuse leaks the previous probe's answer.
+- Read T_G_I only when the call returns true.
+- Report inlier_structure_matches.size() as inliers (exactly the handler's
+  internal count). num_of_lc_matches is RAW matches before geometry.
+- MAPLAB_LOOPCLOSURE_DIR must be set (env hook from matching_based_loopclosure;
+  source devel/setup.bash). Only inverted_multi_index_quantizer_brisk.dat is
+  read at runtime -- the projection matrix is EMBEDDED in the quantizer, so
+  projection_matrix_brisk.dat is not needed.
+- lc_max_delta_position_m / lc_max_delta_rotation_deg: leave at -1.0. The
+  topological block is gated off at defaults; at >=0 it runs CHECK_NOTNULL(map_)
+  and map_ is nullptr on this path -> hard crash. The trap is real, it just
+  never fires unless you set the flags.
+- T_G_I is the BODY/IMU pose in the map's G frame -> no frame conversion for
+  scoring (unlike stella's camera-frame poses).
+Gauge check before scoring: 30/30 same-session probes land within 6.5 cm
+(median 1.0) of the re-optimised trajectory export, so the export and the
+summary map share a frame.
+
+CROSS-SESSION, FOUR SYSTEMS (recall / median landing cm vs GT):
+  probe    OURS         RTAB-Map     stella       maplab
+  MH_02    0.967/ 7.3   0.967/ 4.6   0.967/ 5.2   1.000/ 3.1
+  MH_03    0.600/15.0   0.533/ 4.6   0.600/ 5.4   0.567/ 3.5
+  MH_04    0.033/58.3   0.033/12.6   0.100/ 2.1   0.000/  -
+  MH_05    0.000/  -    0.000/  -    0.067/ 2.1   0.033/ 7.2
+  V1_02    0.800/12.8   0.433/ 9.9   0.467/ 2.6   0.533/ 4.4
+  V1_03    0.433/17.1   0.267/ 5.3   0.033/ 2.4   0.033/29.8
+  V2_02    0.667/10.4   0.467/13.1   0.533/ 6.6   0.467/ 4.4
+  V2_03    0.333/ 7.9   0.300/22.2   0.033/ 1.8   0.000/  -
+  mean recall: OURS 0.479, RTAB-Map 0.375, stella 0.350, maplab 0.329
+  map-session ATE: maplab 1.4-3.4, stella 3.5-5.1, OURS 3.8-4.3, RTAB 6.2-14.2
+WE LEAD RECALL (best-or-tied 5/8, only system >0.30 on every V pair). THEY LEAD
+PRECISION where they succeed. maplab builds the MOST ACCURATE maps and has the
+LOWEST recall -- its deficit is relocalizer conservatism, not map quality.
+
+MAP-HEALTH IS A PUBLISHED COLUMN NOW, in all three systems it mattered:
+RTAB-Map's vision-only odometry maps 6.6% of V1_02; stella's V-group closures
+are thin; ROVIOLI produced a degenerate MH_02 map (7,308 landmarks vs MH_01's
+45,293, 4.4 MB vs 49.7 MB). MH_02 is only a PROBE sequence here so nothing
+above depends on it.
+Site: Cross-session tab, data/reloc_xsession.json (32 rows, 4 arms).

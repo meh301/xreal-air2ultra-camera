@@ -47,6 +47,7 @@ const ARM_LABEL = {
   // cross-session arms (Cross-session tab): map from one sequence, probes from
   // another in the same room, error against ground truth
   oursxs: "OURS", rtabmapxs: "RTAB-Map", stellaxs: "stella_vslam",
+  maplabxs: "maplab",
 };
 /* Colour resolution goes through TRAJ_COLOR FIRST, then the arm name.
  * That indirection is load-bearing: col() reads the CSS var --c-<token>,
@@ -690,7 +691,34 @@ async function xsessionView() {
     odometry</b>, not the mapping run's. Reading the map session's VIO track at
     a foreign sequence's timestamps would hand every probe whatever attitude
     the mapping device happened to have at that clock value. A kidnapped device
-    knows gravity from its own accelerometer.</p>`));
+    knows gravity from its own accelerometer.</p>
+    <p class="note"><b>What this table says.</b> Mean recall across the eight
+    pairs: <b>OURS 0.479</b>, RTAB-Map 0.375, stella 0.350, maplab 0.329 — and
+    ours is best-or-tied on 5 of 8, the only system above 0.30 on every V pair.
+    The ordering INVERTS on landing precision: where they succeed, maplab
+    (3.1–4.4 cm) and stella (1.8–6.6 cm) land far tighter than we do
+    (7.3–17.1 cm). That is the same finding as the same-session tab seen from
+    the other side — our PnP solves on ~25 correspondences against RTAB-Map's
+    284–661 and maplab's 217–690 — and it is the concrete lead on our landing
+    error. Read the two columns as answering different questions: recall is
+    "does the device localize at all when the user walks in", precision is
+    "how well does the AR content sit once it does".</p>
+    <p class="note"><b>Map quality is not the explanation.</b> Each system's
+    own map-session ATE is the floor of this metric and is printed per pair:
+    maplab 1.4–3.4 cm, stella 3.5–5.1, ours 3.8–4.3, RTAB-Map 6.2–14.2. maplab
+    builds the most accurate maps here and still has the lowest recall, so its
+    deficit is relocalizer conservatism, not a worse map.</p>
+    <p class="note"><b>The protocol discriminates, which the same-session one
+    does not.</b> All four systems collapse together as the appearance gap
+    widens — ~0.97 on MH_02, ~0.57 on MH_03, ~0.03 on MH_04/MH_05 — and they
+    agree on the difficulty ordering. On the same-session tab everybody scores
+    near 1.00 nearly everywhere.</p>
+    <p class="note"><b>maplab caveat.</b> It is the only system here whose
+    front end (ROVIOLI) also had to build the map, and on MH_02 that produced a
+    degenerate one — 7,308 landmarks against MH_01's 45,293, and a 4.4 MB
+    summary map against 49.7 MB. MH_02 is only a PROBE sequence in this grid so
+    no result above depends on it, but do not reuse that map for a same-session
+    row without saying so.</p>`));
 
   view.append(mk("Relocalization recall [%]", e => e.recall * 100, "%", true,
     "Probes from a different session against a map built on another. Click a legend chip to toggle a system."));
