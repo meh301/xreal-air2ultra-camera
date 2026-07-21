@@ -2690,3 +2690,46 @@ local map its tracker used; ours is an independent estimator (XFeat + VPR +
 CROSS-SESSION, and it is buildable now: EuRoC sequences within a group share a
 world frame, and a smoke test put 10 MH_02 frames into an MH_01 stella map,
 10/10 localized, all 45 pairwise landing distances within 8 cm of MH_02 GT.
+
+### x CROSS-SESSION MAP REUSE — the clean protocol (2026-07-21)
+The same-session table rewards a probe path that shares its estimator with the
+mapping path (17/30 MH_01 probes match a map node within 0.5 s). This removes
+the confound entirely: map from ONE EuRoC sequence, probe with frames from a
+DIFFERENT sequence in the same room, zero shared frames, error against GROUND
+TRUTH. Possible because EuRoC sequences within a group share a world frame --
+MH_01/02/03 all start within 6 cm of each other in GT.
+
+HARNESS: xr_replay gains --reloc-from <pack> (probe images from another pack)
+and --reloc-vio <tum> (gravity prior from THAT sequence's own odometry -- the
+mapping run's track at a foreign timestamp would hand each probe the mapping
+device's attitude). RELOC lines gain ts=. Cross-session err_m/exp are emitted
+as -1/zeros because the map track has no pose at a foreign timestamp; scoring
+is external (score_xsession.py) with SE(3) Umeyama NO scale onto the map
+session's GT.
+
+FRAME HANDLING (get this wrong and the table is noise): stella reports the
+RECTIFIED LEFT CAMERA, GT is body/IMU, the cam0->body lever arm is ~6.9 cm and
+ROTATES -- a rigid alignment absorbs a constant offset, not a rotating one.
+Its trajectory and probes are converted via T_BS * R_left^T (run_reloc patched
+to emit the 3x3). Ours is IMU-frame already; rtabmap's base sits at the IMU
+origin with rotated axes, which the alignment absorbs.
+
+RESULTS (recall / median landing cm, 8 pairs x 30 probes, identical frames):
+  probe      OURS          RTAB-Map      stella
+  MH_02      0.967/ 7.3    0.967/ 4.6    0.967/ 5.2
+  MH_03      0.600/15.0    0.533/ 4.6    0.600/ 5.4
+  MH_04      0.033/58.3    0.033/12.6    0.100/ 2.1
+  MH_05      0.000/  -     0.000/  -     0.067/ 2.1
+  V1_02      0.800/12.8    0.433/ 9.9    0.467/ 2.6
+  V1_03      0.433/17.1    0.267/ 5.3    0.033/ 2.4
+  V2_02      0.667/10.4    0.467/13.1    0.533/ 6.6
+  V2_03      0.333/ 7.9    0.300/22.2    0.033/ 1.8
+  mean recall: OURS 0.479, RTAB-Map 0.375, stella 0.350.
+WE LEAD ON RECALL -- best-or-tied on 6 of 8 pairs, and the only system above
+0.30 on every V pair. They land tighter when they succeed (stella 1.8-6.6 cm,
+rtabmap 4.6-22.2, ours 7.3-58.3) -- consistent with the same-session finding
+that our PnP runs on ~25 correspondences vs their 284-661.
+The protocol DISCRIMINATES: all three collapse together from 0.97 (MH_02) to
+0.03 (MH_04) as the appearance gap widens, which is the behaviour a reloc
+benchmark should have and the same-session one does not.
+Site: new Cross-session tab, data/reloc_xsession.json.

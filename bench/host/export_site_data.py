@@ -227,10 +227,13 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
                 print(f"  ...{n}/{len(jobs)} scored", flush=True)
     return rows
 
-def parse_reloc(reloc_dirs, out):
+def parse_reloc(reloc_dirs, out, name="reloc.json"):
     """Parse reloc-benchmark logs (<seq>__<arm>.log with RELOC k= lines and
     RELOC-SUMMARY) into reloc.json for the site's Reloc tab."""
-    pk = re.compile(r"RELOC k=(\d+) frame=(\d+) ok=(\d) inl=(\d+) err_m=([-\d.]+)"
+    # ts= is emitted only by cross-session runs (the map track has no pose at a
+    # foreign sequence's timestamps, so those are scored offline against ground
+    # truth). Optional here so the pre-cross-session logs still parse.
+    pk = re.compile(r"RELOC k=(\d+) frame=(\d+) (?:ts=\d+ )?ok=(\d) inl=(\d+) err_m=([-\d.]+)"
                     r"(?: exp=([-\d.]+),([-\d.]+),([-\d.]+) got=([-\d.]+),([-\d.]+),([-\d.]+))?")
     ps = re.compile(r"RELOC-SUMMARY n=(\d+) verified=(\d+) recall=([\d.]+) "
                     r"r@25cm=([\d.]+) r@10cm=([\d.]+) med_err_m=([-\d.]+)")
@@ -282,8 +285,8 @@ def parse_reloc(reloc_dirs, out):
     for e in entries:
         dedup[(e["seq"], e["arm"])] = e
     entries = list(dedup.values())
-    (out / "reloc.json").write_text(json.dumps({"entries": entries}))
-    print(f"reloc.json: {len(entries)} seq-arm entries")
+    (out / name).write_text(json.dumps({"entries": entries}))
+    print(f"{name}: {len(entries)} seq-arm entries")
     return len(entries)
 
 def parse_ledgers(log_dirs):
@@ -404,6 +407,12 @@ def main():
     ap.add_argument("--logs", nargs="*", default=[])
     ap.add_argument("--reloc", nargs="*", default=[],
                     help="dirs of reloc logs (<seq>__<arm>.log)")
+    # Cross-session rows are a DIFFERENT measurement -- probes come from another
+    # session and the error is against ground truth, not the system's own map
+    # track -- so they get their own file and their own tab rather than sharing
+    # an axis with the same-session numbers.
+    ap.add_argument("--reloc-xs", nargs="*", default=[],
+                    help="dirs of CROSS-SESSION reloc logs -> reloc_xsession.json")
     ap.add_argument("--traj", action="store_true")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -444,6 +453,8 @@ def main():
     cache_f.write_text(json.dumps(cache))
     if a.reloc:
         parse_reloc(a.reloc, out)
+    if a.reloc_xs:
+        parse_reloc(a.reloc_xs, out, name="reloc_xsession.json")
     if a.logs:
         led = parse_ledgers(a.logs)
         (out / "ledger.json").write_text(json.dumps(led))

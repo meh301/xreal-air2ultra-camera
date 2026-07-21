@@ -44,6 +44,9 @@ const ARM_LABEL = {
   rtabmap: "RTAB-Map (BSD-3, appearance-based)",
   stella: "stella_vslam (BSD-2, image-only, no IMU)",
   maplab: "maplab (Apache-2.0)",
+  // cross-session arms (Cross-session tab): map from one sequence, probes from
+  // another in the same room, error against ground truth
+  oursxs: "OURS", rtabmapxs: "RTAB-Map", stellaxs: "stella_vslam",
 };
 /* Colour resolution goes through TRAJ_COLOR FIRST, then the arm name.
  * That indirection is load-bearing: col() reads the CSS var --c-<token>,
@@ -74,7 +77,7 @@ const TRAJ_COLOR = {
 };
 const GROUPS = [
   ["overview", "Overview"], ["systems", "vs. Systems"], ["trajectories", "Trajectories"],
-  ["reloc", "Reloc"],
+  ["reloc", "Reloc"], ["xsession", "Cross-session"],
   ["euroc", "EuRoC"], ["rooms", "TUM-VI rooms"],
   ["corridor", "TUM-VI corridors"], ["hall", "TUM-VI magistrale/slides"],
   ["msd", "MSD (headset)"], ["drives", "4Seasons drives"],
@@ -625,6 +628,92 @@ function trajectoriesView() {
   $("#view").append(trajPanel({}));
 }
 
+/* ---------- Cross-session tab: map built on visit 1, probed on visit 2 ----
+ * A DIFFERENT measurement from the Reloc tab, which is why it has its own
+ * file and its own axis. There, probes are frames of the sequence the map was
+ * built from, so a keyframe usually exists within a fraction of a second of
+ * every probe and the error is measured against the system's own map track.
+ * Here the probes come from a different session entirely — zero shared frames
+ * — and the only honest reference is ground truth. */
+async function xsessionView() {
+  const view = $("#view");
+  const data = await loadJSON("data/reloc_xsession.json", { entries: [] });
+  if (!data.entries.length) {
+    view.append(el("div", { class: "card" },
+      "<h3>Cross-session map reuse</h3><p class='note'>No cross-session runs " +
+      "exported yet. Produce with <code>xr_replay --reloc N --reloc-from " +
+      "&lt;other pack&gt; --reloc-vio &lt;that sequence's VIO track&gt;</code>, " +
+      "score with <code>score_xsession.py</code>, export with " +
+      "<code>--reloc-xs &lt;logdir&gt;</code>.</p>"));
+    return;
+  }
+  const entries = data.entries;
+  const seqs = [...new Set(entries.map(e => e.seq))].sort();
+  const arms = [...new Set(entries.map(e => e.arm))].sort();
+  const M = {};
+  entries.forEach(e => M[`${e.seq}|${e.arm}`] = e);
+  const mk = (title, get, unit, higherBetter, note) => barChart({
+    title, cats: seqs.map(shortName), unit, higherBetter, note, agg: "mean",
+    series: arms.map(a => ({ label: ARM_LABEL[a] || a, color: armColor(a),
+      values: seqs.map(s => { const e = M[`${s}|${a}`]; return e ? get(e) : null; }) })),
+  });
+
+  view.append(el("div", { class: "card" }, `
+    <h3>Cross-session map reuse — the museum case</h3>
+    <p class="note">The map is built from ONE EuRoC sequence and probed with
+    frames from a DIFFERENT sequence in the same room. Zero shared frames, so
+    nothing here can come from a probe matching a keyframe recorded seconds
+    earlier from the same viewpoint. EuRoC sequences within a group share a
+    world frame (MH_01/02/03 all start within 6&nbsp;cm of each other in
+    ground truth), which is what makes this possible at all. Maps:
+    <b>MH_01</b> &rarr; MH_02/03/04/05, <b>V1_01</b> &rarr; V1_02/03,
+    <b>V2_01</b> &rarr; V2_02/03. All three systems probe the identical seeded
+    frames.</p>
+    <p class="note"><b>Error is against EuRoC ground truth</b>, not against a
+    system's own map track — with the probes from another session there is no
+    self-consistent reference left, which is exactly why this protocol is the
+    clean one. Each system's map-session trajectory is aligned to its own
+    ground truth by SE(3) Umeyama <i>without scale</i> (fitting a scale would
+    forgive a systematically wrong map size), and probes are carried through
+    that transform. The map session's own ATE is the floor of this metric: a
+    probe cannot land nearer the truth than the map itself sits.</p>
+    <p class="note"><b>Frames were converted, not assumed.</b> stella reports
+    the rectified left CAMERA pose while ground truth is the body/IMU frame,
+    and the ~6.9&nbsp;cm cam0&rarr;body lever arm <i>rotates</i> with the
+    device — a rigid alignment absorbs a constant offset but not a rotating
+    one. Its trajectory and probes are moved to the body frame via
+    <code>T_BS · R_left<sup>T</sup></code> first; without that it would be
+    charged several cm of pure frame mismatch. Ours is already IMU-frame and
+    RTAB-Map's base frame sits at the IMU origin with rotated axes, which the
+    alignment absorbs.</p>
+    <p class="note"><b>The gravity prior comes from the probe sequence's own
+    odometry</b>, not the mapping run's. Reading the map session's VIO track at
+    a foreign sequence's timestamps would hand every probe whatever attitude
+    the mapping device happened to have at that clock value. A kidnapped device
+    knows gravity from its own accelerometer.</p>`));
+
+  view.append(mk("Relocalization recall [%]", e => e.recall * 100, "%", true,
+    "Probes from a different session against a map built on another. Click a legend chip to toggle a system."));
+  view.append(mk("Recall @25 cm [%]", e => e.r25 * 100, "%", true, ""));
+  view.append(mk("Median landing error [cm] vs ground truth",
+    e => e.med >= 0 ? e.med * 100 : null, "cm", false,
+    "Verified probes only. The map session's own ATE (3.8–6.2 cm here) is the floor."));
+
+  const rows = seqs.map(s => `<tr><td>${shortName(s)}</td>` +
+    arms.map(a => { const e = M[`${s}|${a}`]; return e
+      ? `<td>${(e.recall * 100).toFixed(0)}%</td><td>${e.med >= 0 ? (e.med * 100).toFixed(1) : "—"}</td>`
+      : "<td>—</td><td>—</td>"; }).join("") + "</tr>").join("");
+  const box = el("div", { class: "overflow" }, "");
+  box.innerHTML = `<table><thead><tr><th>probe sequence</th>` +
+    arms.map(a => `<th colspan="2">${ARM_LABEL[a] || a}</th>`).join("") +
+    `</tr><tr><th></th>` + arms.map(() => "<th>recall</th><th>med cm</th>").join("") +
+    `</tr></thead><tbody>${rows}</tbody></table>`;
+  const c = el("div", { class: "card" });
+  c.append(el("h3", {}, "Per-pair table"));
+  c.append(box);
+  view.append(c);
+}
+
 /* ---------- Reloc tab: cold-probe relocalization results ---------- */
 async function relocView() {
   const view = $("#view");
@@ -917,7 +1006,7 @@ function methodView() {
 function render() {
   $("#view").innerHTML = "";
   ({ overview: overviewView, systems: systemsView, trajectories: trajectoriesView,
-     reloc: relocView,
+     reloc: relocView, xsession: xsessionView,
      table: tableView, method: methodView }[S.tab] || (() => datasetBar(S.tab, $("#view"))))();
 }
 function buildShell() {

@@ -284,6 +284,7 @@ int main(int argc, char **argv) {
     const char *pack = NULL, *out = NULL, *toml = NULL, *xfeat = NULL;
     const char *vpr = NULL, *lglue = NULL;
     int inflight = 6, fast = 0, use_map = 1, reloc_n = 0, reloc_clip = 1;
+    const char *reloc_from = NULL, *reloc_vio = NULL;   /* XR_XSESSION */
     double kd_t0 = -1, kd_dur = 0;
     int seed_frontend = 0;   /* set after args: XR_SEED env + xfeat model */
     for (int i = 1; i < argc; i++) {
@@ -298,6 +299,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-map")) use_map = 0;
         else if (!strcmp(argv[i], "--reloc") && i + 1 < argc) reloc_n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--reloc-clip") && i + 1 < argc) reloc_clip = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--reloc-from") && i + 1 < argc) reloc_from = argv[++i];
+        else if (!strcmp(argv[i], "--reloc-vio") && i + 1 < argc) reloc_vio = argv[++i];
         else if (!strcmp(argv[i], "--kidnap") && i + 1 < argc) {
             /* t0,dur (s): drop ALL camera frames in [t0,t0+dur) while IMU
              * continues, with SHAKING held through the window + a short
@@ -631,6 +634,47 @@ int main(int argc, char **argv) {
             }
             fclose(fv);
         }
+        /* XR_XSESSION: cross-session probing. Re-point the frame source at
+         * another pack and take the gravity prior from that sequence's own
+         * odometry, so the probes share nothing with the map but the room. */
+        int xsession = 0;
+        if (reloc_from) {
+            char rp[1024];
+            snprintf(rp, sizeof rp, "%s/frames.csv", reloc_from);
+            FILE *nf_idx = fopen(rp, "r");
+            snprintf(rp, sizeof rp, "%s/frames.raw", reloc_from);
+            FILE *nf_raw = fopen(rp, "rb");
+            if (!nf_idx || !nf_raw)
+                DIE("--reloc-from: cannot open %s frames.csv/raw", reloc_from);
+            pack_meta pm;
+            read_meta(reloc_from, &pm);
+            if (pm.W != meta.W || pm.H != meta.H)
+                DIE("--reloc-from %s is %dx%d, map pack is %dx%d",
+                    reloc_from, pm.W, pm.H, meta.W, meta.H);
+            fclose(f_idx); fclose(f_raw);
+            f_idx = nf_idx; f_raw = nf_raw;
+            xsession = 1;
+            fprintf(stderr, "xr_replay: CROSS-SESSION probes from %s\n", reloc_from);
+        }
+        if (reloc_vio) {
+            FILE *fx = fopen(reloc_vio, "r");
+            if (!fx) DIE("--reloc-vio: cannot open %s", reloc_vio);
+            vn = 0;
+            double t, x, y, z, qx, qy, qz, qw;
+            while (vn < 120000 &&
+                   fscanf(fx, "%lf %lf %lf %lf %lf %lf %lf %lf",
+                          &t, &x, &y, &z, &qx, &qy, &qz, &qw) == 8) {
+                vts[vn] = t;
+                vq[vn][0] = (float)qw; vq[vn][1] = (float)qx;
+                vq[vn][2] = (float)qy; vq[vn][3] = (float)qz;
+                vp[vn][0] = (float)x; vp[vn][1] = (float)y; vp[vn][2] = (float)z;
+                vn++;
+            }
+            fclose(fx);
+            fprintf(stderr, "xr_replay: gravity prior from %s (%ld poses)\n",
+                    reloc_vio, vn);
+        }
+
         /* XR_BURSTPNP: fuse the clip into one joint solve (needs the vio
          * track for intra-burst relatives) */
         int use_burst = 0;
@@ -716,7 +760,7 @@ int main(int argc, char **argv) {
                 }
             }
             float err = -1.f;
-            if (ok && mn) {
+            if (ok && mn && !xsession) {
                 double t = (double)fts[fi] * 1e-9;
                 long best = 0;
                 for (long j = 1; j < mn; j++)
@@ -735,13 +779,14 @@ int main(int argc, char **argv) {
                 long best = 0;
                 for (long j = 1; j < mn; j++)
                     if (fabs(mts[j] - t) < fabs(mts[best] - t)) best = j;
-                printf("RELOC k=%d frame=%ld ok=%d inl=%d err_m=%.3f "
+                int haveexp = mn && !xsession;   /* XR_XSESSION */
+                printf("RELOC k=%d frame=%ld ts=%llu ok=%d inl=%d err_m=%.3f "
                        "exp=%.3f,%.3f,%.3f got=%.3f,%.3f,%.3f "
                        "lat_ms=%.0f ttv_ms=%.0f\n",
-                       k, fi, ok, inl, (double)err,
-                       mn ? (double)mp[best][0] : 0.0,
-                       mn ? (double)mp[best][1] : 0.0,
-                       mn ? (double)mp[best][2] : 0.0,
+                       k, fi, (unsigned long long)fts[fi], ok, inl, (double)err,
+                       haveexp ? (double)mp[best][0] : 0.0,
+                       haveexp ? (double)mp[best][1] : 0.0,
+                       haveexp ? (double)mp[best][2] : 0.0,
                        ok ? (double)pp[0] : 0.0, ok ? (double)pp[1] : 0.0,
                        ok ? (double)pp[2] : 0.0,
                        lat_n ? lat_sum_ms / lat_n : -1.0, ttv_ms);
