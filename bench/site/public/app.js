@@ -2,53 +2,78 @@
  * Data: data/{results,baselines,published,ledger,meta}.json + data/traj/<seq>_<arm>.json */
 "use strict";
 
-/* SITE CURATION 2026-07-18: two ours arms only. fzbase = the deploy
- * base (reloc stack, no map->VIO factors); fz18 = FREEZE v16-final
- * (fzbase + LMFACT/LMTRACK/LMMARG factor stack, scene-gated folds,
- * LMTRACK_PERSIST). Historical iteration arms live in bench/ITERATIONS.md
- * and the raw result dirs, not on the site. */
-const ARMS = ["vio", "bc", "obs03", "absorb", "fz19", "fz18", "fzbase", "fz17d"];
-// Older 400-cap arms default OFF so the page opens on the corrected 3333 set.
-const AB_ARMS = new Set(["fz18", "fzbase", "fz17d", "absorb"]);
+/* SITE CURATION 2026-07-21: the site shows exactly the final lockstep A/B.
+ *   base    = the frozen stack (COVKEEP/PGO/LMDESC/TIGHT/TIGHTSUB/SEQVOTE/
+ *             TRUSTVPR/LMFACT/LMTRACK[_PERSIST]/LMMARG[_AUTO]/BURSTPNP/
+ *             MULTIHYP), XR_OUTFILT off
+ *   outfilt = the same stack with XR_OUTFILT=1 (the one open knob)
+ * n=1 per seq/arm, lockstep-scheduled, 39 sequences x 2 arms = 78 runs.
+ * Every historical arm (fz17d/fzbase/fz18/fz19/bc/obs03/absorb) lives in
+ * bench/ITERATIONS.md and the raw result dirs, not on the site.
+ *
+ * CAVEAT carried into the labels below: the libbasalt.so this fleet ran
+ * against has NO stage-8 landmark injection compiled in (verified absent
+ * from the shipped binary on all three containers), so XR_LMINJ=1 in the
+ * runner was inert. Both arms lack it equally — the A/B is sound — but
+ * these are NOT the full shipping stack's numbers. */
+const ARMS = ["base", "outfilt"];
+// Both arms are the point of the page, so neither defaults off.
+const AB_ARMS = new Set([]);
+/* The arm whose VIO track is the raw-odometry reference. Both arms share the
+ * same Basalt build; `base` is the one without the OUTFILT knob. */
+const VIO_ARM = "base";
 const ARM_LABEL = {
-  vio: "VIO only (Basalt floor, no map)",
-  bc: "OURS best-config (cap 3333)",
-  obs03: "OURS tuned (obs_std 0.3, EuRoC/TUM)",
-  absorb: "OURS +closure-absorb (PARKED: conflicts w/ obs_std tuning)",
-  "bc-vio": "VIO track under best-config",
-  fzbase: "OURS base 400-cap (reloc stack, no factors)",
-  fz18: "OURS fz18 400-cap (factor stack)",
-  fz19: "OURS fz19 400-cap (+ landmark injection)",
-  fz17d: "OURS drive config (fz17 stack + reloc sweep)",
-  "fzbase-vio": "VIO only", "fz18-vio": "VIO (factor-coupled)",
+  base: "OURS (frozen stack)",
+  outfilt: "OURS + XR_OUTFILT",
+  "base-vio": "VIO floor (Basalt, no map correction)",
+  "outfilt-vio": "VIO floor (OUTFILT arm)",
   okvis2lc0: "OKVIS2", okvis2lc1: "OKVIS2+LC",
   orb3lc0: "ORB-SLAM3", orb3lc1: "ORB-SLAM3+LC", openvinslc0: "OpenVINS",
   dmviolc0: "DM-VIO", hybviolc0: "HybVIO",
   rl18: "wake-up, single frame", rb18: "wake-up, burst-15",
   clip1: "wake-up probe, 1 frame", clip15: "wake-up probe, 15 frames",
+  // reloc tab is a SEPARATE benchmark (wake-up relocalization, fz19-era
+  // stack) with its own arms; it is not part of the lockstep A/B above.
+  rl19: "wake-up, single frame", rb19: "wake-up, burst-15",
+  dbw19: "wake-up, DBoW2 retrieval",
 };
-/* deterministic color for arms without a CSS variable (new A/B arms) */
+/* Colour resolution goes through TRAJ_COLOR FIRST, then the arm name.
+ * That indirection is load-bearing: col() reads the CSS var --c-<token>,
+ * and --c-base is already the BASELINE red (OKVIS2 et al). Without the
+ * mapping an arm literally named "base" would render in the same red as
+ * the systems it is being compared against. */
 function armColor(a) {
-  const c = col(a);
+  const c = col(TRAJ_COLOR[a] || a);
   if (c && c !== "#888") return c;
   let h = 0;
   for (const ch of a) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return `hsl(${h % 360},62%,50%)`;
 }
 /* every plot key the trajectory panel may offer, in display order */
-const TRAJ_KEYS = ["vio", "bc", "obs03", "bc-vio", "absorb",
-  "fz19", "fzbase-vio", "fz18-vio", "fz18", "fzbase", "fz17d",
+/* orb3lc0/lc1 are deliberately ABSENT despite having traj files on disk:
+ * ORB-SLAM3 is quarantined below (BASELINE_QUARANTINE) as non-functional,
+ * and offering its trajectories here would contradict that. */
+const TRAJ_KEYS = ["base", "outfilt", "base-vio", "outfilt-vio",
   "okvis2lc0", "okvis2lc1", "openvinslc0", "dmviolc0", "hybviolc0"];
 const TRAJ_COLOR = {
-  vio: "vio", "bc-vio": "vio", "fzbase-vio": "vio", "fz18-vio": "vio",
-  okvis2lc0: "base", okvis2lc1: "base", openvinslc0: "pub", dmviolc0: "pub", hybviolc0: "pub",
+  base: "fzbase",          // blue-grey  — ours, OUTFILT off
+  outfilt: "xvpr",         // orange     — ours, OUTFILT on
+  "base-vio": "vio",       // blue       — raw odometry
+  "outfilt-vio": "megaloc",// pink       — raw odometry, OUTFILT arm
+  okvis2lc0: "base", okvis2lc1: "base",   // red   (--c-base = baselines)
+  orb3lc0: "pub", orb3lc1: "pub",
+  openvinslc0: "pub", dmviolc0: "pub", hybviolc0: "pub",
 };
 const GROUPS = [
   ["overview", "Overview"], ["systems", "vs. Systems"], ["trajectories", "Trajectories"],
   ["reloc", "Reloc"],
   ["euroc", "EuRoC"], ["rooms", "TUM-VI rooms"],
   ["corridor", "TUM-VI corridors"], ["hall", "TUM-VI magistrale/slides"],
-  ["msd", "MSD (headset)"], ["drives", "4Seasons drives"],
+  // "4Seasons drives" removed 2026-07-21: the 3 drive sequences are ~10 km
+  // and did not finish inside the runner's 12 h per-job timeout, so the
+  // fleet carries no drive data at all. An empty tab is worse than none —
+  // restore this line when a drive fleet completes.
+  ["msd", "MSD (headset)"],
   ["table", "Full table"], ["method", "Method"],
 ];
 const GROUP_TITLE = Object.fromEntries(GROUPS);
@@ -503,8 +528,8 @@ function datasetBar(group, view) {
   const cv = (s, v) => v == null ? null
       : drives && !S.useRte ? (v / 100) / (PATH[s] || 1) * 100 : v;
   const series = [
-    { label: "VIO only", color: col("vio"), values: seqs.map(s => cv(s, med[s]?.fzbase?.vio ?? (drives ? (med[s]?.bc?.vio ?? med[s]?.fz17d?.vio) : null))) },
-    ...armsOn.map(a => ({ label: `+map ${ARM_LABEL[a]}`, color: col(a),
+    { label: "VIO only", color: col("vio"), values: seqs.map(s => cv(s, med[s]?.[VIO_ARM]?.vio)) },
+    ...armsOn.map(a => ({ label: `+map ${ARM_LABEL[a]}`, color: armColor(a),
       values: seqs.map(s => cv(s, med[s]?.[a]?.map)) })),
   ];
   // baseline systems as REAL bar series (same machine, same causal protocol)
@@ -533,7 +558,8 @@ function datasetBar(group, view) {
 function overviewView() {
   const view = $("#view");
   const med = medians(S.runs, "ate");
-  const gmed = g => { const v = seqsIn(g).map(s => med[s]?.bc?.map ?? med[s]?.fz18?.map ?? med[s]?.fzbase?.map).filter(x => x != null); return v.length ? median(v) : null; };
+  /* per-group headline = the best of the live arms on each sequence */
+  const gmed = g => { const v = seqsIn(g).map(s => { const a = ARMS.map(x => med[s]?.[x]?.map).filter(x => x != null); return a.length ? Math.min(...a) : null; }).filter(x => x != null); return v.length ? median(v) : null; };
   const tiles = el("div", { class: "tiles" });
   const defs = [
     [new Set(S.runs.map(r => r.seq)).size, "sequences"],
@@ -555,8 +581,11 @@ function overviewView() {
       <tr><td>burst-15 recall, corridors (90 probes/seq)</td><td class="best">99&ndash;100% (r@10cm 90&ndash;96%, ~55 ms)</td><td>DNF &mdash; reference harness deadlocks at the camera gap</td></tr>
       <tr><td>burst-15 recall, magistrale2</td><td class="best">85.6%</td><td>DNF</td></tr>
     </tbody></table>
-    <p class="note">Wake-up protocol: camera frames removed for a window while IMU continues (a real sleep/pocket event); every system must re-anchor to its own map. Full grid on the Reloc tab; drives now have their own tab below.</p>`));
-  for (const g of ["euroc", "rooms", "corridor", "hall", "msd", "drives"]) datasetBar(g, view);
+    <p class="note">Wake-up protocol: camera frames removed for a window while IMU continues (a real sleep/pocket event); every system must re-anchor to its own map. Full grid on the Reloc tab.</p>`));
+  /* keep in step with GROUPS: "drives" is omitted because the fleet has no
+   * drive data (jobs exceeded the runner timeout), and rendering it produced
+   * an "undefined — causal ATE medians" card with zero bars. */
+  for (const g of ["euroc", "rooms", "corridor", "hall", "msd"]) datasetBar(g, view);
 }
 
 function systemsView() {
@@ -569,10 +598,10 @@ function systemsView() {
   const seqs = [...new Set(base.map(b => b.seq))].sort();
   const med = medians(S.runs.filter(r => seqs.includes(r.seq)), S.useRte ? "rte" : "ate");
   const sysArms = [...new Set(base.map(b => `${b.sys}_lc${b.lc}`))].sort();
-  const bestArm = s => { const v = ARMS.map(a => med[s]?.[a]?.map).filter(x => x != null); return v.length ? Math.min(...v) : null; };
   const series = [
-    { label: "ours: VIO floor", color: col("vio"), values: seqs.map(s => med[s]?.fzbase?.vio ?? med[s]?.bc?.vio) },
-    { label: "ours: best-config (+map, cap 3333)", color: col("bc"), values: seqs.map(s => med[s]?.bc?.map ?? bestArm(s)) },
+    { label: "ours: VIO floor", color: col("vio"), values: seqs.map(s => med[s]?.[VIO_ARM]?.vio) },
+    ...ARMS.map(a => ({ label: `ours: ${ARM_LABEL[a]} (+map)`, color: armColor(a),
+      values: seqs.map(s => med[s]?.[a]?.map) })),
     ...sysArms.map(sa => ({ label: BASE_LABEL[sa] || sa.replace("_", " "), color: BASE_COLORS[sa] || "#888",
       defaultOff: sa.startsWith("orb3"),
       values: seqs.map(s => { const b = base.find(x => x.seq === s && `${x.sys}_lc${x.lc}` === sa); return b ? (S.useRte ? b.rte : b.ate) : null; }) })),
@@ -580,7 +609,7 @@ function systemsView() {
   view.append(barChart({
     title: `Ours vs every system we ran — causal ${S.useRte ? "RTE" : "ATE"} medians [cm]`,
     cats: seqs.map(shortName), series,
-    note: "Ours = best-config (cap 3333, full flag stack). Baselines: OKVIS2 (±LC), OpenVINS, DM-VIO, HybVIO — all built and run in-house, same machine, same causal protocol (pose at first estimate). ORB-SLAM3 quarantined (dead LC toggle). Whole-run causal ATE penalizes loop-closure re-anchoring for ALL systems — see Method for the tail-window caveat.",
+    note: "Ours = the frozen stack, shown as both arms of the XR_OUTFILT A/B (they differ in that one flag only). Baselines: OKVIS2 (±LC), OpenVINS, DM-VIO, HybVIO — all built and run in-house, same machine, same causal protocol (pose at first estimate). ORB-SLAM3 quarantined (dead LC toggle). Whole-run causal ATE penalizes loop-closure re-anchoring for ALL systems — see Method for the tail-window caveat.",
     onBar: i => { document.getElementById("sys-traj").innerHTML = ""; document.getElementById("sys-traj").append(trajPanel({ seq: seqs[i], compact: true })); },
   }));
   view.append(el("div", { id: "sys-traj" }));
@@ -763,23 +792,32 @@ function tableView() {
   const t = el("table");
   t.innerHTML = `<tr><th>sequence</th><th>VIO ATE</th><th>VIO RTE</th>` +
     armsOn.map(a => `<th>+${ARM_LABEL[a]}</th>`).join("") + `</tr>`;
-  for (const g of ["euroc", "rooms", "long", "msd"]) {
+  /* "long" was split into corridor + hall on 2026-07-19; leaving it here
+   * printed an "undefined" group header and silently dropped all 9
+   * corridor/magistrale/slides rows from the table. */
+  for (const g of ["euroc", "rooms", "corridor", "hall", "msd"]) {
     t.innerHTML += `<tr class="ghead"><td colspan="${3 + armsOn.length}">${GROUP_TITLE[g]}</td></tr>`;
     for (const s of seqsIn(g)) {
       const vals = armsOn.map(a => med[s]?.[a]?.map);
-      const best = Math.min(...vals.filter(v => v != null).concat(med[s]?.fzbase?.vio ?? Infinity));
+      const best = Math.min(...vals.filter(v => v != null).concat(med[s]?.[VIO_ARM]?.vio ?? Infinity));
       t.innerHTML += `<tr><td>${shortName(s)}</td>` +
-        `<td class="${med[s]?.fzbase?.vio === best ? "best" : ""}">${fmt(med[s]?.fzbase?.vio)}</td><td>${fmt(medR[s]?.fzbase?.vio)}</td>` +
+        `<td class="${med[s]?.[VIO_ARM]?.vio === best ? "best" : ""}">${fmt(med[s]?.[VIO_ARM]?.vio)}</td><td>${fmt(medR[s]?.[VIO_ARM]?.vio)}</td>` +
         armsOn.map((a, k) => `<td class="${vals[k] === best ? "best" : ""}">${fmt(vals[k])}</td>`).join("") + `</tr>`;
     }
   }
-  view.append(el("div", { class: "overflow" }, "")).append(t);
+  /* Node.append() returns undefined, so the old one-liner
+   *     view.append(el(...)).append(t)
+   * threw a TypeError and left the whole Full-table tab blank. */
+  const box = el("div", { class: "overflow" }, "");
+  box.append(t);
+  view.append(box);
 }
 
 function methodView() {
   $("#view").append(el("div", { class: "card" }, `
     <h3>Protocol</h3>
-    <p>${S.meta.protocol || "causal, SE(3)-Umeyama ATE, RTE Δ=6 frames"}. One replay emits both tracks: raw VIO pose and map-corrected session pose (the map layer has no feedback into VIO). Arms differ only in descriptor (BAD/TEBLID vs XFeat) and retrieval model (none / EigenPlaces-512 / MegaLoc-8448).</p>
+    <p>${S.meta.protocol || "causal, SE(3)-Umeyama ATE, RTE Δ=6 frames"}. One replay emits both tracks: raw VIO pose and map-corrected session pose. The two arms are the SAME stack (XFeat descriptors, EigenPlaces-512 retrieval, LMFACT/LMTRACK/LMMARG landmark factors fed into the estimator) and differ in exactly one flag: <code>XR_OUTFILT</code>. n=1 per sequence and arm, lockstep-scheduled so both arms see identical machine conditions.</p>
+    <p class="note"><b>Scope caveat.</b> The Basalt library this fleet ran against does not contain the stage-8 landmark-injection patch — verified absent from the built binary on all three machines — so <code>XR_LMINJ</code> was inert. Both arms are affected identically, so the A/B is sound, but these are not the full shipping stack's numbers. The map layer does still act on the estimator through the landmark-factor channel, which is present and active.</p>
     <h3>Comparing to other systems, honestly</h3>
     <p>Five baselines were built and run by us on the same container under the same causal protocol (see "vs. Systems"): OKVIS2 (LC on/off), OpenVINS, DM-VIO and HybVIO. ORB-SLAM3 is quarantined — its LC toggle is a byte-identical no-op and MH_01 lands ~230× off published, so a dead baseline is dropped from every comparison until its harness is fixed. Whole-run causal ATE penalizes any loop-closure system at the instant a correction re-anchors the live pose (past poses stay in the old frame) — OKVIS2+LC shows metre-scale steps at closures while its tail-window ATE is centimetres. Divergence therefore gates on ATE only (10 m; 1 m for MSD): an RTE gate would structurally disqualify correction-based systems, since one re-anchor step is a giant frame-pair error. RTE is still computed and reported for every run — correction snaps are plainly visible there. DM-VIO is monocular and scale-fragile on aggressive motion (diverges on 6 of 14 MSD sequences); it does not lead us on any group.</p>
     <h3>Aggregation rules</h3>
@@ -806,7 +844,7 @@ function buildShell() {
   }
   const chips = $("#arm-chips"); chips.innerHTML = "";
   for (const a of ARMS) {
-    const c = el("span", { class: "chip" + (S.armOn[a] ? "" : " off") }, `<span class="dot" style="background:${col(a)}"></span>${ARM_LABEL[a]}`);
+    const c = el("span", { class: "chip" + (S.armOn[a] ? "" : " off") }, `<span class="dot" style="background:${armColor(a)}"></span>${ARM_LABEL[a]}`);
     c.onclick = () => { S.armOn[a] = !S.armOn[a]; c.classList.toggle("off"); render(); };
     chips.append(c);
   }

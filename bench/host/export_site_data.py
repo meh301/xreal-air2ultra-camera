@@ -185,6 +185,13 @@ def collect_runs(dirs, name_re, cache=None, progress=None):
             if cache is not None and key in cache:
                 row = dict(cache[key])
                 row["arm"] = ARM_ALIAS.get(row["arm"], row["arm"])
+                # `group` is DERIVED from seq, so never serve it from cache:
+                # group_of() split "long" into corridor/hall on 2026-07-19 and
+                # every row cached before that still said "long". Ours re-scored
+                # and got the new labels while the (unchanged, cache-hit)
+                # baselines kept the old one — so OKVIS2/ORB3/OpenVINS silently
+                # vanished from the corridor and magistrale/slides charts.
+                row["group"] = group_of(row["seq"])
                 if row["group"] == "drives" and "path_m" not in row:
                     row["path_m"] = round(path_m_for(row["seq"]), 1)
                 rows.append(row)
