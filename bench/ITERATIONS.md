@@ -2626,3 +2626,67 @@ tighten closure acceptance. n=8 median lands on the good mode -> reliable.
 Rejected-experiment diffs preserved: patch_stage18_19 (EPIRANSAC/TRKGATE),
 patch_stage22 (INITGATE). Final deterministic (LOCKSTEP) full-fleet run
 launched (base vs OUTFILT) for the authoritative site update.
+
+### x THIRD-PARTY MAP-REUSE SYSTEMS RUN (2026-07-21)
+Screened 13 systems for one capability: an image -> map-frame pose call
+against a map loaded from disk, cold, no odometry continuity. EXACTLY TWO
+besides ours expose one -- RTAB-Map (BSD-3) and stella_vslam (BSD-2). Both
+built and run on the identical protocol; maplab (Apache-2.0) built but its
+probe wrapper is unfinished. ORB-SLAM3/COVINS/VINS-Fusion save maps and
+cannot cold-localize into them; OKVIS2/SVO Pro/Kimera/Hydra/Basalt/DM-VIO
+cannot save one. That screen is itself the result.
+
+Boxes: .15 RTAB-Map 0.23.8 (WITH_G2O=ON, in-tree euroc_reloc tool),
+.58 stella_vslam (patched loader, see below), .181 maplab in an Ubuntu
+20.04/ROS-Noetic chroot (24.04 hosts cannot host ROS1).
+
+RESULTS, EuRoC 11 seqs x 30 seeded probes, error vs each system's OWN mapping
+pose at the probe frame:
+- stella:  recall 0.90-1.00, median landing 2-7 mm.
+- rtabmap: recall 1.00 where it maps, median 1.2-3.9 cm on MH_01/02/03,
+  7.5/24.4 cm on MH_04/05, 55.7 cm on V1_03; 0.00 on V1_02 and V2_03.
+- ours (rl19): recall 0.63-1.00, median 5.0-23.4 cm.
+Ours wins V2_01/V2_02 on median and is the only system that maps all 11.
+
+THREE MEASUREMENT BUGS CAUGHT (each would have shipped a wrong table):
+1. FRAME INDICES ARE NOT PORTABLE. MH_04 (cam0 2033/cam1 2032), V1_02
+   (1710/1711), V2_03 (1922/2336) have unequal camera image counts and our
+   packs pair before indexing, so "frame 542" meant a different instant to
+   each system. Everything now resolves through TIMESTAMPS
+   (make_probe_stamps.py + stamps_to_index.py, paired symlink trees for the
+   three); the 8 unaffected seqs verify byte-identical, worst dt 0.0 ms.
+2. UNSCOREABLE != FAILED. RTAB-Map's odometry is vision-only and maps 41% of
+   V1_01; 9 probes land outside the mapped window with no reference pose.
+   Scoring those as failures reported recall 0.700 for a run that returned a
+   pose 28/30 times. They are now excluded from n and counted in RELOC-MAPINFO.
+3. COVERAGE MUST BE PUBLISHED NEXT TO RECALL. RTAB-Map maps 6.6% of V1_02 and
+   6.2% of V2_03 before losing tracking -- its 0% there is an ODOMETRY failure
+   in a relocalization column. Site now plots a coverage chart.
+
+VERIFICATIONS (do not re-litigate):
+- Cold arm IS cold: a one-shared-instance cross-check scores WORSE for both
+  (rtabmap MH_01 25/30 vs 30/30; stella r@25cm 0.63 vs 1.00) because the prior
+  probe's pose survives and the consistency check rejects correct
+  localizations that disagree with it.
+- RTAB-Map refines, does not echo the node pose: on MH_03, probes matching a
+  node >=2 s away score 0.9 cm vs 3.6 cm had it returned the node pose.
+- Our inlier count is like-for-like (PROBE_RES.inliers = pnp2_ransac nin, same
+  semantic as rtabmap Loop/Visual_inliers): ours ~25 correspondences vs their
+  284-661. THAT is the lead on our landing precision, not retrieval.
+
+STELLA DEFECT PATCHED (load side only, disclosed on the site): to_json
+serialises landmarks whose reference keyframe was culled; register_landmark
+then throws on an unguarded keyframes_.at(). Reproduced on their OWN
+run_euroc_slam --map-db-in, so not our integration; --wait-loop-ba does not
+fix it. Guards added in the skip-and-warn style the same file already uses in
+register_association (map_database.cc register_landmark + step-7 geometry loop
++ register_graph). 131 of 23,361 landmarks (0.56%) dropped on an MH_01 load.
+
+KNOWN CONFOUND, STATED NOT HIDDEN: same-session self-consistency rewards a
+probe path that shares its estimator with the mapping path. 17/30 MH_01 probes
+match a map node within 0.5 s. stella's relocalizer optimises against the same
+local map its tracker used; ours is an independent estimator (XFeat + VPR +
+4-DoF PnP) scored against a Basalt VIO track. The clean protocol is
+CROSS-SESSION, and it is buildable now: EuRoC sequences within a group share a
+world frame, and a smoke test put 10 MH_02 frames into an MH_01 stella map,
+10/10 localized, all 45 pairwise landing distances within 8 cm of MH_02 GT.

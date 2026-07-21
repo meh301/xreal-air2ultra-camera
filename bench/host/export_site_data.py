@@ -234,6 +234,12 @@ def parse_reloc(reloc_dirs, out):
                     r"(?: exp=([-\d.]+),([-\d.]+),([-\d.]+) got=([-\d.]+),([-\d.]+),([-\d.]+))?")
     ps = re.compile(r"RELOC-SUMMARY n=(\d+) verified=(\d+) recall=([\d.]+) "
                     r"r@25cm=([\d.]+) r@10cm=([\d.]+) med_err_m=([-\d.]+)")
+    # Optional, emitted by the third-party converter: what MAP the probes were
+    # run against. A recall column on its own cannot distinguish "the
+    # relocalizer failed" from "the mapping run covered 7% of the sequence and
+    # there was nothing to relocalize into", which is exactly what RTAB-Map's
+    # vision-only odometry does on the fast EuRoC V sequences.
+    pm = re.compile(r"RELOC-MAPINFO cov=([\d.]+) mapate_m=([-\d.]+)")
     entries = []
     for d in reloc_dirs:
         for f in sorted(Path(d).glob("*__*.log")):
@@ -255,6 +261,10 @@ def parse_reloc(reloc_dirs, out):
                      "recall": float(s.group(3)), "r25": float(s.group(4)),
                      "r10": float(s.group(5)), "med": float(s.group(6)),
                      "probes": probes}
+            mi = pm.search(txt)
+            if mi:
+                entry["cov"] = float(mi.group(1))
+                entry["mapate"] = float(mi.group(2))
             # SESSION-frame trajectory (same frame as exp/got — the aligned
             # traj jsons are in the GT frame and MUST NOT be mixed in)
             mt = f.with_name(f.stem + "_map.tum")

@@ -36,6 +36,14 @@ const ARM_LABEL = {
   // stack) with its own arms; it is not part of the lockstep A/B above.
   rl19: "wake-up, single frame", rb19: "wake-up, burst-15",
   dbw19: "wake-up, DBoW2 retrieval",
+  // THIRD-PARTY map-reuse systems, run through the identical probe protocol
+  // (same seeded frames, resolved by timestamp; cold start; one frame each).
+  // These are the only two screened systems besides ours that expose an
+  // image -> map-frame-pose call at all; ORB-SLAM3, COVINS and VINS-Fusion
+  // can save a map but cannot cold-localize into a loaded one.
+  rtabmap: "RTAB-Map (BSD-3, appearance-based)",
+  stella: "stella_vslam (BSD-2, image-only, no IMU)",
+  maplab: "maplab (Apache-2.0)",
 };
 /* Colour resolution goes through TRAJ_COLOR FIRST, then the arm name.
  * That indirection is load-bearing: col() reads the CSS var --c-<token>,
@@ -643,6 +651,72 @@ async function relocView() {
       values: seqs.map(s => { const e = M[`${s}|${a}`]; return e ? get(e) : null; }) })),
   });
   view.append(el("div", { class: "card" }, `
+    <h3>Third-party map-reuse systems (EuRoC, 2026-07-21)</h3>
+    <p class="note">Thirteen systems were screened for a single capability:
+    an <b>image &rarr; map-frame pose</b> call against a map loaded from disk,
+    cold, with no odometry continuity. <b>Exactly two</b> besides ours expose
+    one. ORB-SLAM3, COVINS and VINS-Fusion can all save a map and none can
+    cold-localize into a loaded one (ORB-SLAM3 makes a fresh empty map active
+    right after <code>LoadAtlas</code>, so a loaded keyframe can never be a
+    reloc candidate; VINS-Fusion's serialised map contains no 3D landmarks at
+    all). OKVIS2, SVO&nbsp;Pro, Kimera, Hydra, Basalt and DM-VIO cannot save a
+    map. <i>That screen is itself the finding: the field builds map
+    </i>merging<i>, not map </i>reuse.</p>
+    <p class="note"><b>RTAB-Map</b> (BSD-3) and <b>stella_vslam</b> (BSD-2) were
+    built and run on the identical protocol — same seeded probe frames,
+    resolved by <b>timestamp</b> rather than index because MH_04, V1_02 and
+    V2_03 ship unequal cam0/cam1 image counts and an index means a different
+    instant to each system. A fresh system instance is constructed per probe,
+    so nothing carries over. Both land tighter against their own maps than we
+    do; read that with the three caveats below, not as a ranking.</p>
+    <p class="note"><b>Caveat 1 — coverage.</b> RTAB-Map's odometry is
+    vision-only (<code>--imu&nbsp;1</code> feeds a gravity filter, not a VI
+    fusion). It maps 6.6% of V1_02 and 6.2% of V2_03 before losing tracking, so
+    its 0% there is an odometry failure in a relocalization column. See the
+    coverage chart. Probes falling outside a mapped window are counted
+    UNSCOREABLE and excluded from n, never scored as failures — that
+    distinction alone moved RTAB-Map's V1_01 recall from 0.700 to 1.000.</p>
+    <p class="note"><b>Caveat 2 — the metric rewards estimator similarity.</b>
+    Landing error is measured against each system's own mapping pose at that
+    frame. stella's relocalizer optimises against the same local map its
+    tracker used, and RTAB-Map's PnP resolves against a node created seconds
+    earlier — 17 of 30 MH_01 probes match a map node within 0.5&nbsp;s. Our
+    probe is a genuinely independent estimator (XFeat + VPR retrieval + 4-DoF
+    PnP against map landmarks) scored against a Basalt VIO track, so it cannot
+    agree with itself the same way. RTAB-Map's refinement is real and was
+    verified — on MH_03, probes matching a node &ge;2&nbsp;s away score
+    0.9&nbsp;cm versus 3.6&nbsp;cm had it simply returned the node pose — but
+    the cross-system comparison is not clean and the only clean version is
+    cross-session (map on visit 1, probe visit 2).</p>
+    <p class="note"><b>Caveat 3 — what was patched, and one correspondence
+    count.</b> stella cannot reload a map stella just wrote: <code>to_json</code>
+    serialises landmarks whose reference keyframe was culled, and
+    <code>register_landmark</code> then throws on an unguarded
+    <code>keyframes_.at()</code>. Reproduced on their own
+    <code>run_euroc_slam --map-db-in</code> path, so it is not our integration.
+    We patched the <b>load</b> side only, in the skip-and-warn style the same
+    file already uses for the mirror case; <b>131 of 23,361 landmarks (0.56%)</b>
+    are dropped on an MH_01 load. stella also has no IMU anywhere — it is an
+    image-only baseline solving full 6-DoF, while our probes and RTAB-Map's
+    both carry a gravity prior. Finally, the likely mechanism behind our wider
+    landing error: our probes solve PnP with <b>~25 correspondences</b>
+    (<code>n3=22 nin=22</code> — the matcher is precise but sparse) against
+    RTAB-Map's <b>284&ndash;661</b>.</p>
+    <p class="note"><b>Cross-check (not plotted).</b> Every system was also run
+    with ONE instance shared across all probes. It scores <i>worse</i> —
+    RTAB-Map MH_01 25/30 vs 30/30, stella r@25cm 0.63 vs 1.00 — because the
+    previous probe's pose survives as a prior and the consistency check then
+    rejects a correct localization that disagrees with it. Continuity is a
+    liability here, which is the evidence that the published arms are
+    genuinely cold.</p>
+    <p class="note"><b>Cross-session works.</b> Smoke-tested on stella: 10
+    MH_02 probe frames into an <i>MH_01</i> map, zero shared frames, 10/10
+    localized, and all 45 pairwise distances between landings agree with
+    MH_02 ground truth to within 8&nbsp;cm. EuRoC sequences within a group
+    share a world frame, so a full cross-session map-reuse benchmark — the
+    museum scenario, and the protocol that removes Caveat 2 entirely — is
+    directly buildable on maps that already exist.</p>`));
+  view.append(el("div", { class: "card" }, `
     <h3>Baselines under the same protocol</h3>
     <p class="note">OKVIS2 (both LC modes): <b>DNF</b> — the reference synchronous
     harness deadlocks at the camera gap on every blackout sequence tried
@@ -662,6 +736,22 @@ async function relocView() {
   view.append(mk("Recall @25 cm [%]", e => e.r25 * 100, "%", true, ""));
   view.append(mk("Median landing error [cm] (verified probes)",
     e => e.med >= 0 ? e.med * 100 : null, "cm", false, ""));
+
+  /* Coverage is reported for the third-party arms because their recall
+   * column is otherwise unreadable: a system whose odometry died 7% into the
+   * sequence has almost no map to relocalize into, and its 0% recall is an
+   * odometry result wearing a relocalization label. Our own arms carry no
+   * bar here — the replay pushes every frame and our map track covers 99.9%
+   * of every sequence (the missing ~3 frames are Basalt's gravity-init
+   * warmup, documented in bench/README.md), so the bar would be flat at 100
+   * and say nothing. */
+  if (entries.some(e => e.cov !== undefined)) {
+    view.append(mk("Mapping coverage [% of sequence frames]",
+      e => e.cov !== undefined ? e.cov * 100 : null, "%", true,
+      "Third-party arms only. Read the recall bars above against THIS chart: " +
+      "where coverage collapses, recall is measuring the mapper's odometry, " +
+      "not its relocalizer."));
+  }
 
   /* spatial panel — trajPanel-style comparative plotting: sequence
    * selector + multi-arm chips + persistent-camera orbit. Arms overlay in
