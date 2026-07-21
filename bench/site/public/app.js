@@ -69,11 +69,7 @@ const GROUPS = [
   ["reloc", "Reloc"],
   ["euroc", "EuRoC"], ["rooms", "TUM-VI rooms"],
   ["corridor", "TUM-VI corridors"], ["hall", "TUM-VI magistrale/slides"],
-  // "4Seasons drives" removed 2026-07-21: the 3 drive sequences are ~10 km
-  // and did not finish inside the runner's 12 h per-job timeout, so the
-  // fleet carries no drive data at all. An empty tab is worse than none —
-  // restore this line when a drive fleet completes.
-  ["msd", "MSD (headset)"],
+  ["msd", "MSD (headset)"], ["drives", "4Seasons drives"],
   ["table", "Full table"], ["method", "Method"],
 ];
 const GROUP_TITLE = Object.fromEntries(GROUPS);
@@ -547,7 +543,8 @@ function datasetBar(group, view) {
     title: `${GROUP_TITLE[group]} — causal ${S.useRte ? "RTE medians [cm]" : drives ? "ATE medians [% of GT path]" : "ATE medians [cm]"}`,
     unit: drives && !S.useRte ? "%path" : "cm",
     cats: seqs.map(shortName), series,
-    note: "All bars are systems we ran ourselves: same machine, same causal protocol. Click a legend chip to toggle a series, or a bar to load its trajectory below.",
+    note: "All bars are systems we ran ourselves: same machine, same causal protocol. Click a legend chip to toggle a series, or a bar to load its trajectory below."
+      + (drives ? " ⚠ DRIVES ARE NOT LOCKSTEP-SCHEDULED. The ~10 km sequences cannot finish under lockstep (it drains the map layer every frame: ~43 h/job vs ~5 min), so these ran with the map layer async. Offer acceptance is therefore thread-timing dependent and these carry run-to-run variance that the other tabs do not. n=1 per cell — treat small deltas as noise. Both arms of each sequence ran concurrently and alone on the same idle GPU, so the pair is internally fair." : ""),
     onBar: i => { curSeq = seqs[i]; panelHost.innerHTML = ""; panelHost.append(trajPanel({ group, seq: curSeq, compact: true })); panelHost.scrollIntoView({ behavior: "smooth", block: "nearest" }); },
   });
   view.append(chart);
@@ -582,10 +579,10 @@ function overviewView() {
       <tr><td>burst-15 recall, magistrale2</td><td class="best">85.6%</td><td>DNF</td></tr>
     </tbody></table>
     <p class="note">Wake-up protocol: camera frames removed for a window while IMU continues (a real sleep/pocket event); every system must re-anchor to its own map. Full grid on the Reloc tab.</p>`));
-  /* keep in step with GROUPS: "drives" is omitted because the fleet has no
-   * drive data (jobs exceeded the runner timeout), and rendering it produced
-   * an "undefined — causal ATE medians" card with zero bars. */
-  for (const g of ["euroc", "rooms", "corridor", "hall", "msd"]) datasetBar(g, view);
+  /* keep in step with GROUPS — a group listed in one and not the other either
+   * renders an "undefined — causal ATE medians" card with zero bars, or hides
+   * data that exists. */
+  for (const g of ["euroc", "rooms", "corridor", "hall", "msd", "drives"]) datasetBar(g, view);
 }
 
 function systemsView() {
